@@ -1,0 +1,25 @@
+# Rust
+/daemon/target/
+**/*.rs.bk
+Cargo.lock
+
+# PHP
+/vendor/
+composer.lock
+
+# Logs
+/logs/
+*.log
+
+# Environment
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+*.sublime-*
+
+# OS
+.DS_Store
+Thumbs.db
