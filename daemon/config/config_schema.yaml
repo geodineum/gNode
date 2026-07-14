@@ -1,0 +1,139 @@
+# gNode daemon — config_schema
+#
+# Published at startup via geodineum_schema::publish_config_schema_sync
+# into geodineum:config_schema:gnode (HSET, field-per-key) +
+# geodineum:config_schema:_index (SADD).
+#
+# Per-key shape matches primer CONFIG_SCHEMA_SHAPE invariant:
+#   {key, type, default, mutable, description, [capability], [values]}
+#
+# `mutable: true` means the operator can change the value via the gCore
+# wp-admin panel AND the daemon will pick it up on the next SIGHUP /
+# reload cycle. `mutable: false` keys are structural — changes require
+# a clean restart (and typically a new install).
+
+component: gnode
+entries:
+  - key: GNODE_SCHEMAS_DIR
+    type: path
+    default: /opt/geodineum/pro/gNode/daemon/config/schemas
+    mutable: false
+    description: >-
+      Directory containing stream-contract YAML files. Resolved at startup
+      via env first, then compile-time CARGO_MANIFEST_DIR fallback. Missing
+      directory is a hard startup error post-Commit-0.5 (closes GN-D3.09).
+
+  - key: GNODE_CONFIG_SCHEMA_FILE
+    type: path
+    default: /opt/geodineum/pro/gNode/daemon/config/config_schema.yaml
+    mutable: false
+    description: >-
+      Path to this file. Resolved at startup via env first, then compile-time
+      CARGO_MANIFEST_DIR fallback.
+
+  - key: GNODE_ENVIRONMENT
+    type: enum
+    default: production
+    mutable: false
+    values: [dev, tst, acc, prd, production]
+    description: >-
+      Environment tag baked into ValKey stream keys and schema index. DTAP
+      auto-detect uses this (project_dtap_environment memory).
+
+  - key: GNODE_LOG_LEVEL
+    type: enum
+    default: info
+    mutable: true
+    values: [trace, debug, info, warn, error]
+    description: Tracing-subscriber filter. Picked up on SIGHUP.
+
+  - key: GNODE_THREADS
+    type: int
+    default: 4
+    mutable: false
+    description: Worker thread count. Requires restart to change.
+
+  - key: GNODE_MAX_THREADS
+    type: int
+    default: 16
+    mutable: false
+    description: Upper bound on worker threads for elastic scaling.
+
+  - key: GNODE_TOPOLOGY_NAMESPACE
+    type: string
+    default: geodineum
+    mutable: false
+    description: >-
+      Prefix used in place of per-site site_id for infrastructure-level
+      ValKey keys (gNode is not a per-site service).
+
+  - key: GNODE_NODE_ID
+    type: string
+    default: ""
+    mutable: false
+    description: >-
+      Per-node identifier; populated by installer. Used in constellation
+      topology tracking.
+
+  - key: GNODE_NODE_TYPE
+    type: enum
+    default: worker
+    mutable: false
+    values: [master, worker, standalone]
+    description: Role of this node in the constellation.
+
+  - key: GNODE_BLOCK_TIMEOUT_MS
+    type: int
+    default: 5000
+    mutable: true
+    description: XREADGROUP BLOCK timeout (milliseconds).
+
+  - key: GNODE_IDLE_TIME_MS
+    type: int
+    default: 30000
+    mutable: true
+    description: Pending-entry idle threshold before claim reassignment.
+
+  - key: GNODE_CB_THRESHOLD
+    type: int
+    default: 5
+    mutable: true
+    description: Circuit-breaker failure threshold before tripping.
+
+  - key: GNODE_CB_COOLDOWN_SECS
+    type: int
+    default: 30
+    mutable: true
+    description: Circuit-breaker cooldown window in seconds.
+
+  - key: GNODE_STREAM_MAX_LENGTH
+    type: int
+    default: 100000
+    mutable: true
+    description: Stream trim target (XADD MAXLEN ~).
+
+  - key: GNODE_DIMENSIONS
+    type: string
+    default: "1"
+    mutable: false
+    description: Comma-separated dimension IDs this node participates in.
+
+  - key: GNODE_RATELIMIT_CAPACITY
+    type: int
+    default: 100
+    mutable: true
+    description: >-
+      Per-site token-bucket burst capacity. One token == one command. A
+      site can briefly burst up to this many commands before being
+      throttled to the GNODE_RATELIMIT_REFILL_PER_SEC sustained rate.
+      GN-D2.03 closure (Tier-2 commit 2.1.c).
+
+  - key: GNODE_RATELIMIT_REFILL_PER_SEC
+    type: int
+    default: 50
+    mutable: true
+    description: >-
+      Per-site token-bucket sustained refill rate in tokens/second.
+      Effective per-tenant cap on the unified consumer loop. Tune up
+      for trusted high-traffic sites; tune down to harden against
+      flood-starvation. GN-D2.03 closure (Tier-2 commit 2.1.c).

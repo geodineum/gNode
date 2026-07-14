@@ -1,0 +1,103 @@
+contract:
+  name: unified_command
+  component: gnode
+  version: "1.1.0"
+  stability: stable
+  stream: "{site_id}:gnode:unified:{env}"
+  consumer_group: gnode-daemon
+  purpose: >
+    Bidirectional command/response stream. Clients XADD commands, the gNode daemon
+    processes them and XADDs responses keyed by request ID. Because this contract
+    covers BOTH directions on a single stream, the `command` and `site_id` fields
+    are marked required:false — they are logically required for command messages
+    (t=c) but absent on response messages (t=r). Pre-XADD validate() enforces the
+    universally-required `id` field and the enum domain of `t`. Higher-level
+    producers (the gNode daemon for responses, gNode-Client for commands) are
+    responsible for their side-specific required-field semantics.
+
+  fields:
+    - name: id
+      type: string
+      required: true
+      description: "Unique request ID (for response correlation). Universal."
+      example: "req-example-com-1713189600123"
+
+    - name: t
+      type: string
+      required: false
+      description: >
+        Message type: 'c' = command, 'r' = response, 'bc' = batch command,
+        'br' = batch response. Batch types wrap multiple individual messages
+        (see fields 'm' / 'bi' / 'tc'). Producers always set this; the
+        daemon's OptimizedCommand::create_batch_response emits 'br' on
+        consolidated stream writes.
+      example: "c"
+      values: "c|r|bc|br"
+
+    - name: command
+      type: string
+      required: false
+      description: "Command name (e.g., GNODE_CACHE_SET). Required for t=c; absent for t=r."
+      example: "GNODE_CACHE_SET"
+
+    - name: parameters
+      type: json
+      required: false
+      description: "Command parameters as JSON object (commands) or response payload (responses)."
+      example: '{"key":"page_cache:home","value":"<html>...","ttl":3600}'
+
+    - name: site_id
+      type: string
+      required: false
+      description: "Site identifier for ACL isolation. Commands set this; responses use ss/sn/ds/dn routing fields instead."
+      example: "example_com"
+
+    - name: node_id
+      type: string
+      required: false
+      description: "Target node ID (for multi-node routing)"
+      example: "gnode-primary"
+
+    - name: _rt
+      type: string
+      required: false
+      description: "Relay target — triggers inter-service relay routing"
+      example: "geodineum_comms"
+
+    - name: ss
+      type: string
+      required: false
+      description: "Response: source site (daemon side)"
+      example: "gNode"
+
+    - name: sn
+      type: string
+      required: false
+      description: "Response: source node (daemon side)"
+      example: "daemon"
+
+    - name: ds
+      type: string
+      required: false
+      description: "Response: destination site"
+      example: "example_com"
+
+    - name: dn
+      type: string
+      required: false
+      description: "Response: destination node"
+      example: "gnode-primary"
+
+    - name: timestamp
+      type: iso8601
+      required: false
+      description: "ISO-8601 timestamp (auto-generated if omitted)"
+      example: "2026-04-15T16:00:00Z"
+
+  xadd_example: >
+    XADD {site_id}:gnode:unified:production *
+    id req-001
+    t c
+    command GNODE_CACHE_SET
+    parameters '{"key":"page:home","value":"cached","ttl":3600}'
+    site_id example_com

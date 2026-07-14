@@ -1,0 +1,85 @@
+# Evolution Schema — Customizable service lifecycle labels
+# ======================================================
+# Assigns human-readable evolutionary labels to services based on their
+# relative ecosystem contribution (Stream Contribution Score).
+#
+# This is PURELY DISPLAY — labels do not affect routing, discovery,
+# or any operational logic. Users can customize terminology freely.
+#
+# Metric: Stream Contribution Score (SCS)
+#   SCS = XLEN(service_stream)  [Ch.1 — stream entry count only]
+#   Future: + relay_pair_counts + consumer_group_delivered
+#
+# Labels are assigned by PERCENTILE RANK within the topology:
+#   All services sorted by SCS descending → each gets a percentile →
+#   the label whose threshold range contains that percentile is assigned.
+#
+# The top-1 service always gets the highest label regardless of threshold.
+
+schema_version: "1.0"
+
+# Metric configuration
+metric:
+  name: "Stream Contribution Score"
+  short_name: "SCS"
+  # Components included in the score (flags for future expansion)
+  components:
+    stream_entry_count: true    # XLEN of service's unified stream
+    relay_pair_count: false     # Sum of relay PairCounters (future)
+    consumer_delivered: false   # XINFO GROUPS delivered count (future)
+
+# Evolution labels — ordered from lowest to highest rank
+# Each label has a percentile floor (inclusive) and ceiling (exclusive)
+# The top-1 service always receives the highest label
+labels:
+  - name: "Claim"
+    description: "Newly registered or minimal activity"
+    percentile_floor: 0.00
+    percentile_ceiling: 0.15
+    color: "#9e9e9e"    # grey
+    icon: "flag"
+
+  - name: "Outpost"
+    description: "Low but consistent activity — established presence"
+    percentile_floor: 0.15
+    percentile_ceiling: 0.40
+    color: "#8d6e63"    # brown
+    icon: "visibility"
+
+  - name: "Settlement"
+    description: "Steady contributor — reliable, moderate throughput"
+    percentile_floor: 0.40
+    percentile_ceiling: 0.70
+    color: "#42a5f5"    # blue
+    icon: "home"
+
+  - name: "City"
+    description: "High contributor — mature service with significant throughput"
+    percentile_floor: 0.70
+    percentile_ceiling: 0.90
+    color: "#66bb6a"    # green
+    icon: "location_city"
+
+  - name: "Metropole"
+    description: "Major hub — critical infrastructure, disproportionate load"
+    percentile_floor: 0.90
+    percentile_ceiling: 0.99
+    color: "#ffa726"    # orange
+    icon: "domain"
+
+  - name: "Capital"
+    description: "Highest ecosystem contributor — the topology's heartbeat"
+    percentile_floor: 0.99
+    percentile_ceiling: 1.00
+    color: "#ef5350"    # red
+    icon: "star"
+    top_one: true       # Always assigned to the #1 ranked service
+
+# Refresh interval (seconds) — how often labels are recomputed
+refresh_interval: 300   # 5 minutes
+
+# Display settings
+display:
+  show_score: true      # Show raw SCS alongside label
+  show_percentile: true # Show percentile rank
+  animate_transitions: true  # Animate label changes in dashboard

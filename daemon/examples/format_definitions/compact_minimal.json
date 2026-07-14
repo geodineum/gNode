@@ -1,0 +1,68 @@
+{
+  "format_name": "compact_minimal",
+  "version": "1.0.0",
+  "description": "Compact message format with abbreviated field names for bandwidth-constrained systems. Reduces message size by ~40% compared to standard JSON format through field name compression.",
+  "content_type": "application/json",
+  "binary": false,
+  "detection_patterns": [
+    {
+      "pattern_type": "regex",
+      "pattern": "^\\s*\\{\\s*\"i\"\\s*:",
+      "confidence": 0.92
+    },
+    {
+      "pattern_type": "regex",
+      "pattern": "\"c\"\\s*:\\s*\"[a-zA-Z_]",
+      "confidence": 0.88
+    }
+  ],
+  "field_mapping": {
+    "i": "id",
+    "c": "command",
+    "p": "parameters",
+    "t": "timestamp",
+    "s": "site_id",
+    "n": "node_id"
+  },
+  "schema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": ["i", "c", "t"],
+    "properties": {
+      "i": {
+        "type": "string",
+        "description": "Message ID (maps to 'id')",
+        "pattern": "^[a-zA-Z0-9_-]+$"
+      },
+      "c": {
+        "type": "string",
+        "description": "Command (maps to 'command')",
+        "minLength": 1
+      },
+      "p": {
+        "type": "object",
+        "description": "Parameters (maps to 'parameters')",
+        "additionalProperties": true
+      },
+      "t": {
+        "type": "number",
+        "description": "Timestamp (maps to 'timestamp')",
+        "minimum": 0
+      },
+      "s": {
+        "type": "string",
+        "description": "Site ID (maps to 'site_id')"
+      },
+      "n": {
+        "type": "string",
+        "description": "Node ID (maps to 'node_id')"
+      }
+    },
+    "additionalProperties": false
+  },
+  "defaults": {
+    "p": {},
+    "s": "default",
+    "n": "default"
+  }
+}

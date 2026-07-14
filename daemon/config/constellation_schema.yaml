@@ -1,0 +1,236 @@
+# Constellation Topology Schema — 20D (16 discovery + 4 storage)
+# Tier: CONSTELLATION — nodes within a WireGuard VPN cluster
+# Keyspace: constellation:{cid}:topology:{node_id}
+#
+# Registers each node's role, capacity, data ownership, and health.
+# Queries: "which node is master?", "route to lowest-load node",
+# "find nodes with local ValKey replica", "capacity planning"
+
+schema_version: "3.0"
+tier: constellation
+total_dimensions: 20
+discovery_dimensions: 16
+
+dimensions:
+  # ═══════════════════════════════════════════════════════════════
+  # Role (0-1) — What this node does in the constellation
+  # ═══════════════════════════════════════════════════════════════
+
+  node_role:
+    index: 0
+    query_type: equality
+    values:
+      headless: 0.00
+      edge: 0.20
+      replica: 0.40
+      full_node: 0.60
+      master: 0.80
+      coordinator: 1.00
+
+  service_profile:
+    index: 1
+    query_type: equality
+    values:
+      headless: 0.00
+      minimal: 0.25
+      standard: 0.50
+      full: 0.75
+      custom: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Version (2-3) — Compatibility
+  # ═══════════════════════════════════════════════════════════════
+
+  geodineum_version:
+    index: 2
+    query_type: equality
+    values:
+      v1: 0.20
+      v2: 0.40
+      v3: 0.60
+      v4: 0.80
+      v5: 1.00
+
+  api_compatibility:
+    index: 3
+    query_type: range
+    values:
+      minimal: 0.00
+      partial: 0.50
+      full: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Data (4-7) — Storage and data ownership
+  # ═══════════════════════════════════════════════════════════════
+
+  valkey_mode:
+    index: 4
+    query_type: equality
+    values:
+      none: 0.00
+      client_only: 0.33
+      replica: 0.67
+      primary: 1.00
+
+  data_residency:
+    index: 5
+    query_type: equality
+    values:
+      global: 0.00
+      na: 0.15
+      eu: 0.30
+      apac: 0.45
+      sa: 0.60
+      af: 0.75
+      me: 0.90
+
+  storage_tier:
+    index: 6
+    query_type: range
+    values:
+      ephemeral: 0.00
+      ssd: 0.33
+      high_iops: 0.67
+      archival: 1.00
+
+  storage_available:
+    index: 7
+    query_type: range
+    dynamic: true
+    values:
+      critical: 0.00
+      low: 0.25
+      adequate: 0.50
+      ample: 0.75
+      plenty: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Capacity (8-10) — Hardware profile
+  # ═══════════════════════════════════════════════════════════════
+
+  cpu_tier:
+    index: 8
+    query_type: range
+    values:
+      minimal: 0.00
+      standard: 0.33
+      compute: 0.67
+      gpu: 1.00
+
+  memory_tier:
+    index: 9
+    query_type: range
+    values:
+      minimal: 0.00
+      standard: 0.50
+      high_memory: 1.00
+
+  bandwidth_tier:
+    index: 10
+    query_type: range
+    values:
+      low: 0.00
+      standard: 0.33
+      high: 0.67
+      dedicated: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Runtime (11-12) — Dynamic health and load
+  # ═══════════════════════════════════════════════════════════════
+
+  aggregate_load:
+    index: 11
+    query_type: range
+    dynamic: true
+    values:
+      idle: 0.00
+      light: 0.25
+      moderate: 0.50
+      heavy: 0.75
+      saturated: 1.00
+
+  node_health:
+    index: 12
+    query_type: range
+    dynamic: true
+    values:
+      dead: 0.00
+      degraded: 0.33
+      healthy: 0.67
+      optimal: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Network (13-14) — Accessibility
+  # ═══════════════════════════════════════════════════════════════
+
+  availability_zone:
+    index: 13
+    query_type: equality
+    values:
+      dr_site: 0.00
+      secondary: 0.50
+      primary: 1.00
+
+  network_zone:
+    index: 14
+    query_type: equality
+    values:
+      isolated: 0.00
+      vpn_only: 0.50
+      vpn_plus_public: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Domain (15) — Node specialization
+  # ═══════════════════════════════════════════════════════════════
+
+  specialization:
+    index: 15
+    query_type: proximity
+    values:
+      general: 0.00
+      inference: 0.25
+      storage: 0.50
+      compute: 0.75
+      content: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Visual — VPN Topology (16-18) — Storage-only
+  # ═══════════════════════════════════════════════════════════════
+
+  vpn_position_x:
+    index: 16
+    storage_only: true
+    values:
+      left: 0.00
+      center: 0.50
+      right: 1.00
+
+  vpn_position_y:
+    index: 17
+    storage_only: true
+    values:
+      front: 0.00
+      center: 0.50
+      back: 1.00
+
+  vpn_position_z:
+    index: 18
+    storage_only: true
+    values:
+      bottom: 0.00
+      middle: 0.50
+      top: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Metadata (19) — Temporal
+  # ═══════════════════════════════════════════════════════════════
+
+  join_order:
+    index: 19
+    storage_only: true
+    values:
+      founding: 0.00
+      early: 0.25
+      middle: 0.50
+      late: 0.75
+      recent: 1.00

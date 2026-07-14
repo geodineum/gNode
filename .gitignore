@@ -1,11 +1,21 @@
+
+# Hidden files/dirs — strict policy: keep them out
+.*
+!.gitignore
+!.gitattributes
+
+*.rdb
 # Rust
 /daemon/target/
 **/*.rs.bk
 Cargo.lock
-
-# PHP
-/vendor/
-composer.lock
+/run/
+# Legacy test artifacts (PHP tests, benchmarks, etc.)
+/tests/*.php
+/tests/*.log
+/tests/diagnostics/
+/tests/performance/
+/tests/framework/
 
 # Logs
 /logs/
@@ -14,6 +24,14 @@ composer.lock
 # Environment
 .env
 .env.local
+.env.backup.*
+.setup-state.json
+
+# Security credentials (NEVER COMMIT)
+.gnode
+*.password
+valkey.conf
+gnode.conf
 
 # IDE
 .idea/
@@ -23,3 +41,27 @@ composer.lock
 # OS
 .DS_Store
 Thumbs.db
+
+**/.claude/settings.local.json
+
+# Root archive (internal session docs, stale items)
+/archive/
+
+# Internal session/handoff documents (not for public release)
+CLAUDE.md
+*.scn.md
+# …except the permanent contract primer, which is tracked alongside CONTRACT.md
+!CONTRACT.scn.md
+SESSION_*.md
+MISSION_*.md
+
+# Audit Reports
+AUDIT_REPORT_*.md
+AUDIT_*.md
+
+# Benchmark Results
+benchmark_results_*.json
+*_benchmark_*.json
+.claude/
+*.bak
+CLAUDE.md.bak

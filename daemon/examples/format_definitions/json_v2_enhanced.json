@@ -1,0 +1,93 @@
+{
+  "format_name": "json_v2_enhanced",
+  "version": "2.0.0",
+  "description": "Enhanced JSON message format with distributed tracing support for production systems. Includes trace_id, span_id, and metadata fields for observability in microservices architectures.",
+  "content_type": "application/json",
+  "binary": false,
+  "detection_patterns": [
+    {
+      "pattern_type": "regex",
+      "pattern": "\"trace_id\"\\s*:",
+      "confidence": 0.95
+    },
+    {
+      "pattern_type": "regex",
+      "pattern": "\"span_id\"\\s*:",
+      "confidence": 0.90
+    }
+  ],
+  "field_mapping": {
+    "id": "id",
+    "command": "command",
+    "parameters": "parameters",
+    "timestamp": "timestamp",
+    "trace_id": "trace_id",
+    "span_id": "span_id",
+    "parent_span_id": "parent_span_id",
+    "metadata": "metadata"
+  },
+  "schema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": ["id", "command", "timestamp", "trace_id"],
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Unique message identifier",
+        "pattern": "^[a-zA-Z0-9_-]+$"
+      },
+      "command": {
+        "type": "string",
+        "description": "Command name to execute",
+        "minLength": 1
+      },
+      "parameters": {
+        "type": "object",
+        "description": "Command parameters",
+        "additionalProperties": true
+      },
+      "timestamp": {
+        "type": "number",
+        "description": "Unix timestamp in seconds with millisecond precision",
+        "minimum": 0
+      },
+      "trace_id": {
+        "type": "string",
+        "description": "Distributed tracing identifier for request correlation",
+        "pattern": "^[a-f0-9]{16,32}$"
+      },
+      "span_id": {
+        "type": "string",
+        "description": "Trace span identifier for this operation",
+        "pattern": "^[a-f0-9]{16}$"
+      },
+      "parent_span_id": {
+        "type": "string",
+        "description": "Parent span identifier (optional)",
+        "pattern": "^[a-f0-9]{16}$"
+      },
+      "metadata": {
+        "type": "object",
+        "description": "Additional metadata for observability (service name, environment, etc.)",
+        "properties": {
+          "service_name": {
+            "type": "string"
+          },
+          "environment": {
+            "type": "string",
+            "enum": ["development", "staging", "production"]
+          },
+          "version": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": true
+      }
+    },
+    "additionalProperties": true
+  },
+  "defaults": {
+    "parameters": {},
+    "metadata": {}
+  }
+}

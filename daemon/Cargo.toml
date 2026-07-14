@@ -1,26 +1,106 @@
 [package]
-name = "gsd-daemon"
+name = "gnode-daemon"
 version = "0.1.0"
 edition = "2021"
-authors = ["nCore Team"]
-description = "Geometric Service Daemon for capability-based service discovery"
+authors = ["gCore Team"]
+description = "gNode - Geodineum Service Daemon for capability-based service discovery"
+license = "MIT OR Apache-2.0"
+
+[features]
+# No Cargo features for extensions. ALL extensions
+# (CMS and any others) go through the canonical signed-extension
+# pipeline (build.rs::discover_signed_extensions) — discovered via
+# GNODE_EXT_DIR, verified via ed25519, staged into OUT_DIR. The previous
+# cms-as-Cargo-feature carved CMS out as a special case; the signed
+# pipeline unifies them.
+# To enable an extension: clone its repo, sign its extension.yaml with
+# the AUTHOR_PUBKEY's offline private key, place under $GNODE_EXT_DIR.
+# To disable: don't clone (or delete) the extension dir.
+default = []
 
 [dependencies]
-redis = "0.22.0"
+# Q64.64 fixed-point arithmetic (replaces hand-rolled Q32.32 in geometric_precision.rs)
+g_math = "0.4.0"
+
+# Schema discovery: publishes config/schemas/*.yaml contracts to ValKey on startup
+geodineum-schema = { path = "../../Geodineum/lib/geodineum-schema" }
+
+# 0.26+ required the Value enum migration (Data→BulkString, Bulk→Array,
+# Status→SimpleString) — migrated in Commit 1.15.b.
+redis = { version = "0.26", features = ["tokio-comp", "connection-manager"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_yaml = "0.9.16"
 log = "0.4"
-env_logger = "0.9"
-clap = { version = "3.0", features = ["derive"] }
+clap = { version = "3.0", features = ["derive", "env"] }
 thiserror = "1.0"
 tokio = { version = "1.0", features = ["full"] }
-dotenv = "0.15"
+futures = "0.3"
+urlencoding = "2.1" # For URL-encoding Redis passwords with special characters
+                    # Also used by ecosystem_config to URL-encode admin password in redis URL
 bincode = "1.3"
+lazy_static = "1.4.0"
+num_cpus = "1.13.1" # For determining optimal thread count
+tempfile = "3.3.0" # For creating temporary directories/files in tests
+r2d2 = "0.8.10" # Connection pooling
+regex = "1.5.5" # For parsing RESP3 protocol responses (always included, used by command_processor)
+once_cell = "1.17.0" # For thread-safe singleton patterns
+rustc_version_runtime = "0.2.1" # For runtime Rust version detection
+# Extension-runtime dependencies. These were previously gated by
+# the `cms` Cargo feature, but with the unified signed-extension model
+# (no Cargo features for extensions), they must compile unconditionally
+# so handler source files staged from any signed extension can use
+# them. Build cost: ~3-4 min one-time, ~20MB binary. Trade-off accepted
+# for the unified model — operator's directive: "instead of having 3
+# different systems we want 2 different systems".
+base64 = "0.13.0"        # encoding binary data in command handlers
+jsonschema = { version = "0.16.0", features = ["draft202012"] }  # format-system schema validation
+semver = "1.0.16"        # version comparison in format registry
+rmp-serde = "1.1.1"      # MessagePack format support
+hex = "0.4.3"            # binary format pattern matching
+
+thread-id = "4.0.0" # For getting thread IDs for batch uniqueness
+rand = "0.8.5" # For random number generation in batch handling
+hostname = "0.3.1" # For getting system hostname in node registration
+chrono = "0.4.23" # For timestamp formatting in logs and format transformations
+
+# Content processing (unconditional — CMS handlers stage into OUT_DIR)
+minify-html = "0.11"   # AST-based HTML minification
+lightningcss = "1.0.0-alpha.68"  # Rust-native CSS minification
+minifier = "0.2"       # Safe JS minification (AST-free but semantic-preserving)
+flate2 = "1.0"         # gzip compression/decompression
+
+# Template rendering (unconditional)
+tera = "1.19"          # Runtime template engine with auto-escape
+
+# Signal handling for graceful shutdown
+signal-hook = "0.3"
+
+# Logging with multi-target output (Phase 3 logging centralization)
+fern = "0.6"
+
+# Runtime verification of signed extension manifests (paired with
+# the build-time check in build.rs). serde_yaml is already declared above.
+ed25519-dalek = { version = "2" }
+
+# Runtime hashing for canonical-hashes signature verification (mirrors
+# build.rs scope: extension.yaml + handler files + lua libraries).
+sha2 = "0.10"
+
+[build-dependencies]
+# Verifying signatures on optional extension manifests at build time.
+ed25519-dalek = { version = "2", default-features = false, features = ["std"] }
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+# sha2 hashes extension.yaml + handler/lua files for the canonical-hashes
+# signature scope (fixes GN-D2.01 — signature no longer covers only
+# extension.yaml).
+sha2 = "0.10"
 
 [lib]
-name = "gsd"
+name = "gnode"
 path = "src/lib.rs"
 
 [[bin]]
-name = "gsd-daemon"
+name = "gnode-daemon"
 path = "src/main.rs"

@@ -1,0 +1,37 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "description": "gNode Response Schema - Standard response format for Geodineum Service Daemon",
+    "required": ["id", "status", "timestamp"],
+    "properties": {
+        "id": {
+            "type": "string",
+            "description": "Identifier matching the command that generated this response"
+        },
+        "status": {
+            "type": "string",
+            "enum": ["ok", "error", "pending", "timeout"],
+            "description": "Response status"
+        },
+        "result": {
+            "type": ["object", "null"],
+            "description": "Response result data (for successful operations)"
+        },
+        "error": {
+            "type": ["string", "null"],
+            "description": "Error message (for failed operations)"
+        },
+        "timestamp": {
+            "type": "number",
+            "description": "Unix timestamp in seconds with millisecond precision"
+        },
+        "batch_id": {
+            "type": "string",
+            "description": "Optional batch identifier for batch operations"
+        },
+        "sequence": {
+            "type": "integer",
+            "description": "Optional sequence number for ordered processing"
+        }
+    }
+}

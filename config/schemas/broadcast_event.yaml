@@ -1,0 +1,51 @@
+contract:
+  name: broadcast_event
+  component: gnode
+  version: "1.0.0"
+  stability: stable
+  stream: "{site_id}:gnode:broadcast"
+  consumer_group: null
+  purpose: >
+    1:many topology broadcast stream. gNode daemon publishes topology changes,
+    service registrations, and configuration updates. All consumers use XREAD
+    (no consumer groups) to receive every event.
+
+  fields:
+    - name: event_type
+      type: string
+      required: true
+      description: "Event type"
+      example: "service_registered"
+      values: "service_registered|service_removed|topology_update|config_change|format_registered"
+
+    - name: entity_id
+      type: string
+      required: false
+      description: "Affected entity (service ID, site ID, etc.)"
+      example: "geodineum_comms"
+
+    - name: payload
+      type: json
+      required: false
+      description: "Event-specific data"
+      example: '{"capabilities":{"protocol":"gnode_stream","domain_primary":"communication"}}'
+
+    - name: source_node
+      type: string
+      required: true
+      description: "Node that originated this event"
+      example: "gnode-primary"
+
+    - name: timestamp
+      type: iso8601
+      required: true
+      description: "ISO-8601 timestamp"
+      example: "2026-04-15T16:01:00Z"
+
+  xadd_example: >
+    XADD {site_id}:gnode:broadcast *
+    event_type service_registered
+    entity_id geodineum_comms
+    payload '{"capabilities":{"protocol":"gnode_stream"}}'
+    source_node gnode-primary
+    timestamp 2026-04-15T16:01:00Z

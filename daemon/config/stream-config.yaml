@@ -1,0 +1,47 @@
+# gNode Daemon - DTAP Unified Stream Configuration
+# This configuration tells the daemon to listen to 4 environment-specific streams
+#
+# Stream Pattern: {environment}:gnode:unified:{node_id}
+# Where:
+#   - environment: testing | acceptance | staging | production
+#   - node_id: daemon instance identifier (default)
+#
+# Each environment stream provides isolation for safe testing and deployment
+
+# List of environments to listen to
+environments:
+  - testing       # Development sandbox - rapid iteration, breaking changes OK
+  - acceptance    # UAT/client review - business validation
+  - staging       # Pre-production replica - final technical validation
+  - production    # Live production system
+
+# Stream pattern template (will be expanded for each environment)
+# Creates:
+#   {testing}:gnode:unified:default
+#   {acceptance}:gnode:unified:default
+#   {staging}:gnode:unified:default
+#   {production}:gnode:unified:default
+stream_pattern: "{environment}:gnode:unified:default"
+
+# Stream processing configuration
+stream_config:
+  # Consumer group name (same for all streams)
+  consumer_group: "gnode-daemon"
+
+  # Block time for XREADGROUP (milliseconds)
+  block_time: 5000
+
+  # Maximum messages to read per stream per iteration
+  batch_size: 100
+
+  # Stream trimming (prevent unbounded growth)
+  trim_enabled: true
+  max_stream_length: 10000
+  trim_strategy: "MAXLEN"
+  approximate_trim: true
+
+# Notes:
+# - Daemon creates consumer groups automatically if they don't exist
+# - All 4 streams are processed concurrently in a single XREADGROUP call
+# - Message-level multi-tenancy via site_id field in payload
+# - Clients choose environment via their .env: GNODE_ENVIRONMENT=testing|staging|etc

@@ -1,0 +1,101 @@
+# DTAP Environment Schema — Auto-detection from domain naming
+# ==========================================================
+# Services auto-detect their DTAP environment from domain prefixes.
+# Non-production environments are ViewKey-gated (login required).
+# Only bare domains (no DTAP prefix) default to production.
+#
+# Schema-driven: developers can customize terminology for their locale.
+# Detection happens at: geodineum new site, geodineum register, gCore bootstrap.
+
+schema_version: "1.0"
+
+# Environment tiers (ordered from least to most privileged)
+tiers:
+  - id: development
+    description: "Local development — unrestricted access for developers"
+    gate: viewkey
+    gate_message: "Development environment. Access restricted."
+
+  - id: testing
+    description: "Automated testing — CI/CD and integration tests"
+    gate: viewkey
+    gate_message: "Testing environment. This service is under active testing."
+
+  - id: staging
+    description: "Pre-production — mirrors production for final validation"
+    gate: viewkey
+    gate_message: "This service is under preparation. Check back at another opportune moment."
+
+  - id: acceptance
+    description: "User acceptance testing — stakeholder review before production"
+    gate: viewkey
+    gate_message: "This service is in review. Access requires authorization."
+
+  - id: production
+    description: "Live — publicly accessible"
+    gate: none
+
+# Domain prefix → environment mapping
+# The FIRST matching prefix determines the environment.
+# Matching is case-insensitive, checks subdomain prefix before first dot.
+prefix_rules:
+  # Development
+  - prefixes: [dev, develop, local, localhost]
+    environment: development
+    # i18n aliases
+    aliases:
+      nl: [ontwikkel, lokaal]
+      de: [entwicklung, lokal]
+      es: [desarrollo, local]
+      fr: [developpement, local]
+
+  # Testing
+  - prefixes: [test, testing, ci, qa]
+    environment: testing
+    aliases:
+      nl: [test, testen]
+      de: [test, testen]
+      es: [prueba, pruebas]
+      fr: [test, essai]
+
+  # Staging
+  - prefixes: [staging, stage, preprod, preview]
+    environment: staging
+    aliases:
+      nl: [staging, voorproductie]
+      de: [staging, vorproduktion]
+      es: [staging, preproduccion]
+      fr: [staging, preproduction]
+
+  # Acceptance
+  - prefixes: [accept, acceptance, uat, review]
+    environment: acceptance
+    aliases:
+      nl: [acceptatie, acceptatie]
+      de: [abnahme, akzeptanz]
+      es: [aceptacion, revision]
+      fr: [recette, acceptation]
+
+# Default: bare domains (no matching prefix) = production
+default_environment: production
+
+# ViewKey gate configuration
+viewkey:
+  # How the gate is displayed to unauthorized visitors
+  page_title: "Access Restricted"
+  # Message shown on the gate page (per-tier messages override this)
+  default_message: "This service is not yet publicly available. Check back soon."
+  # Cookie name for authenticated sessions
+  cookie_name: "geodineum_viewkey"
+  cookie_duration_hours: 24
+  # Allow site admins to bypass the gate
+  admin_bypass: true
+  # WordPress capability required to bypass
+  bypass_capability: "manage_options"
+
+# Detection algorithm
+# 1. Parse domain: "staging.example.com" → prefix="staging", base="example.com"
+# 2. Check prefix against prefix_rules (case-insensitive)
+# 3. If match → use that environment
+# 4. If no match → use default_environment (production)
+# 5. Explicit override: --env flag or site config takes precedence over auto-detect

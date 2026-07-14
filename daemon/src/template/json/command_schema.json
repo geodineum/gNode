@@ -1,0 +1,40 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "description": "gNode Command Schema - Standard command format for Geodineum Service Daemon",
+    "required": ["id", "command", "parameters", "site_id", "node_id", "timestamp"],
+    "properties": {
+        "id": {
+            "type": "string",
+            "description": "Unique identifier for the command"
+        },
+        "command": {
+            "type": "string",
+            "description": "Command name to execute"
+        },
+        "parameters": {
+            "type": "object",
+            "description": "Command parameters"
+        },
+        "site_id": {
+            "type": "string",
+            "description": "Site identifier for namespacing"
+        },
+        "node_id": {
+            "type": "string",
+            "description": "Node identifier"
+        },
+        "timestamp": {
+            "type": "number",
+            "description": "Unix timestamp in seconds with millisecond precision"
+        },
+        "batch_id": {
+            "type": "string",
+            "description": "Optional batch identifier for batch operations"
+        },
+        "sequence": {
+            "type": "integer",
+            "description": "Optional sequence number for ordered processing"
+        }
+    }
+}

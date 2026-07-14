@@ -1,0 +1,66 @@
+{
+    "description": "gNode RESP3 Redis Type Mapping - Mapping between JSON data types and Redis RESP3 types",
+    "version": "1.0.0",
+    "typeMapping": {
+        "string": {
+            "resp3Type": "BulkString",
+            "description": "Simple string value"
+        },
+        "integer": {
+            "resp3Type": "Integer",
+            "description": "64-bit signed integer"
+        },
+        "float": {
+            "resp3Type": "Double",
+            "description": "Double-precision floating point number"
+        },
+        "boolean": {
+            "resp3Type": "Boolean",
+            "description": "True or false value"
+        },
+        "null": {
+            "resp3Type": "Null",
+            "description": "Null value"
+        },
+        "array": {
+            "resp3Type": "Array",
+            "description": "Array of values"
+        },
+        "object": {
+            "resp3Type": "Map",
+            "description": "Key-value map"
+        }
+    },
+    "nativeOptimizations": {
+        "timestamp": {
+            "jsonType": "float",
+            "resp3Type": "Integer",
+            "transform": "multiply_1000",
+            "description": "Store timestamps as milliseconds in integer format"
+        },
+        "node_id": {
+            "jsonType": "string",
+            "resp3Type": "VerbatimString",
+            "transform": "txt:",
+            "description": "Store node_id as verbatim string for faster comparison"
+        },
+        "site_id": {
+            "jsonType": "string",
+            "resp3Type": "VerbatimString",
+            "transform": "txt:",
+            "description": "Store site_id as verbatim string for faster comparison"
+        },
+        "command": {
+            "jsonType": "string",
+            "resp3Type": "VerbatimString",
+            "transform": "txt:",
+            "description": "Store command as verbatim string for faster comparison"
+        },
+        "id": {
+            "jsonType": "string",
+            "resp3Type": "VerbatimString",
+            "transform": "txt:",
+            "description": "Store id as verbatim string for faster comparison"
+        }
+    }
+}

@@ -1,0 +1,50 @@
+# Shared Value Mappings — Cross-Tier Consistency
+# These value→coordinate mappings are identical across all tier schemas
+# that use the same concept. Import into tier-specific schemas.
+#
+# When adding a value to a shared concept, update it HERE and in all
+# tier schemas that reference it. This file is the source of truth for
+# cross-tier queries that compare coordinates from different tiers.
+
+shared_mappings:
+  # Version compatibility (used by service, tool, constellation, galaxy)
+  version:
+    v1: 0.20
+    v2: 0.40
+    v3: 0.60
+    v4: 0.80
+    v5: 1.00
+
+  # Contract stability (used by service, tool, galaxy)
+  contract_stability:
+    experimental: 0.00
+    alpha: 0.25
+    beta: 0.50
+    stable: 0.75
+    frozen: 1.00
+
+  # Data residency (used by constellation, galaxy)
+  data_residency:
+    global: 0.00
+    na: 0.15
+    eu: 0.30
+    apac: 0.45
+    sa: 0.60
+    af: 0.75
+    me: 0.90
+
+  # Aggregate load (used by constellation, galaxy — dynamic)
+  aggregate_load:
+    idle: 0.00
+    light: 0.25
+    moderate: 0.50
+    heavy: 0.75
+    saturated: 1.00
+
+  # Registration order (used by all tiers)
+  registration_order:
+    first: 0.00
+    early: 0.25
+    middle: 0.50
+    late: 0.75
+    recent: 1.00

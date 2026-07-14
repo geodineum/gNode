@@ -1,0 +1,50 @@
+runtime:
+  # owner resolved from GEODEPLOY_DEPLOY_USER / DEPLOY_USER /
+  # /etc/geodineum/deploy.env.
+  group: gnode
+  service: gnode-daemon
+
+triggers:
+  - match: "daemon/functions/**"
+    actions: [lua-reload]
+  - match: "daemon/src/**|daemon/Cargo*"
+    actions: [build, restart]
+  - match: "daemon/config/*.service"
+    actions: [service-install]
+  - match: "scripts/*.sh"
+    actions: [chmod-scripts]
+
+build:
+  # Route through scripts/build.sh (NOT a bare `cargo build`) so signed
+  # extensions are discovered + staged on every geodeploy rebuild. A bare
+  # cargo build builds lean and silently drops CMS — the daemon then logs
+  # "No handler found" for every CMS command (template_fragment, …).
+  # build.sh defaults GNODE_EXT_DIR to the sibling pro/gNode tree and cd's
+  # into daemon/ itself, so working_dir is the repo root.
+  command: scripts/build.sh
+  working_dir: .
+
+dirty-tree:
+  strategy: stash
+
+cli:
+  commands:
+    - name: daemon contract
+      handler: scripts/cli/daemon-contract.sh
+      description: Print the daemon contract (commands, Lua functions, wire format); `daemon contract <ext>` prints a signed extension's contract (cms|broker|observe|topo|signals)
+      category: Daemon
+    - name: daemon reload-lua
+      handler: scripts/cli/daemon-reload-lua.sh
+      description: Reload Lua function libraries into ValKey
+      requires_sudo: true
+      category: Daemon
+    - name: daemon rebuild
+      handler: scripts/cli/daemon-rebuild.sh
+      description: Rebuild gNode daemon binary from source
+      requires_sudo: true
+      category: Daemon
+    - name: topology
+      handler: scripts/cli/topology.sh
+      description: Topology — list|all|show|stats|sites | register {tool|service <site> [profile]} | deregister <site> <entity|--all>
+      requires_sudo: true
+      category: Topology

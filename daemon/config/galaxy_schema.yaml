@@ -1,0 +1,253 @@
+# Galaxy Topology Schema — 20D (16 discovery + 4 storage)
+# Tier: GALAXY — federation of Geodineum Constellations
+# Keyspace: galaxy:topology:{constellation_id}
+#
+# Registers constellations in the Geodineum Galaxy for discovery
+# and routing. Eventually routed via GeoH domain hashing + gNode spatial hash.
+# Confidence: 0.45 — most speculative tier, design for known patterns.
+#
+# Queries: "find constellations offering hosting in Europe",
+# "route domain to its constellation", "compare SLAs"
+
+schema_version: "3.0"
+tier: galaxy
+total_dimensions: 20
+discovery_dimensions: 16
+
+dimensions:
+  # ═══════════════════════════════════════════════════════════════
+  # Offering (0-2) — What this constellation provides
+  # ═══════════════════════════════════════════════════════════════
+
+  offering_primary:
+    index: 0
+    query_type: proximity
+    values:
+      hosting: 0.10
+      inference: 0.25
+      storage: 0.40
+      compute: 0.55
+      marketplace: 0.70
+      mixed: 0.85
+
+  offering_secondary:
+    index: 1
+    query_type: proximity
+    values:
+      hosting: 0.10
+      inference: 0.25
+      storage: 0.40
+      compute: 0.55
+      marketplace: 0.70
+      mixed: 0.85
+      none: 0.00
+
+  specialization:
+    index: 2
+    query_type: proximity
+    values:
+      general: 0.00
+      content: 0.20
+      inference: 0.40
+      iot: 0.60
+      enterprise: 0.80
+      research: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Version (3-5) — Compatibility and maturity
+  # ═══════════════════════════════════════════════════════════════
+
+  geodineum_version:
+    index: 3
+    query_type: equality
+    values:
+      v1: 0.20
+      v2: 0.40
+      v3: 0.60
+      v4: 0.80
+      v5: 1.00
+
+  federation_protocol:
+    index: 4
+    query_type: equality
+    values:
+      v1: 0.33
+      v2: 0.67
+      v3: 1.00
+
+  contract_stability:
+    index: 5
+    query_type: range
+    values:
+      experimental: 0.00
+      beta: 0.33
+      stable: 0.67
+      production: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Trust (6-7) — Verification and economics
+  # ═══════════════════════════════════════════════════════════════
+
+  trust_level:
+    index: 6
+    query_type: range
+    values:
+      self_declared: 0.00
+      verified: 0.33
+      audited: 0.67
+      founding: 1.00
+
+  pricing_tier:
+    index: 7
+    query_type: equality
+    values:
+      free: 0.00
+      freemium: 0.25
+      paid: 0.50
+      enterprise: 0.75
+      private: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Scale (8-11) — Capacity and availability
+  # ═══════════════════════════════════════════════════════════════
+
+  constellation_scale:
+    index: 8
+    query_type: range
+    values:
+      single: 0.00
+      small: 0.33
+      medium: 0.67
+      large: 1.00
+
+  aggregate_capacity:
+    index: 9
+    query_type: range
+    values:
+      minimal: 0.00
+      standard: 0.33
+      enterprise: 0.67
+      hyperscale: 1.00
+
+  aggregate_load:
+    index: 10
+    query_type: range
+    dynamic: true
+    values:
+      idle: 0.00
+      light: 0.25
+      moderate: 0.50
+      heavy: 0.75
+      saturated: 1.00
+
+  availability_sla:
+    index: 11
+    query_type: range
+    values:
+      best_effort: 0.00
+      standard: 0.33
+      high: 0.67
+      ultra: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Geography (12-14) — Physical location and jurisdiction
+  # ═══════════════════════════════════════════════════════════════
+
+  geography_region:
+    index: 12
+    query_type: equality
+    values:
+      na: 0.10
+      eu: 0.25
+      apac: 0.40
+      sa: 0.55
+      af: 0.70
+      me: 0.85
+      oc: 1.00
+
+  geography_subregion:
+    index: 13
+    query_type: proximity
+    values:
+      na_east: 0.05
+      na_west: 0.10
+      na_central: 0.15
+      eu_west: 0.25
+      eu_central: 0.30
+      eu_north: 0.35
+      eu_east: 0.40
+      apac_east: 0.50
+      apac_south: 0.55
+      apac_southeast: 0.60
+      sa_east: 0.70
+      sa_west: 0.75
+      af_north: 0.80
+      af_south: 0.85
+      me_gulf: 0.90
+      oc_australia: 0.95
+
+  data_residency:
+    index: 14
+    query_type: equality
+    values:
+      global: 0.00
+      eu: 0.25
+      us: 0.50
+      apac: 0.75
+      restricted: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Network (15) — Connectivity quality
+  # ═══════════════════════════════════════════════════════════════
+
+  network_connectivity:
+    index: 15
+    query_type: range
+    values:
+      residential: 0.00
+      business: 0.33
+      datacenter: 0.67
+      multi_homed: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Visual — Galaxy Position (16-18) — Storage-only
+  # GeoH produces deterministic coordinates from domain hierarchy
+  # ═══════════════════════════════════════════════════════════════
+
+  galaxy_position_x:
+    index: 16
+    storage_only: true
+    values:
+      west: 0.00
+      center: 0.50
+      east: 1.00
+
+  galaxy_position_y:
+    index: 17
+    storage_only: true
+    values:
+      south: 0.00
+      equator: 0.50
+      north: 1.00
+
+  galaxy_position_z:
+    index: 18
+    storage_only: true
+    values:
+      ground: 0.00
+      orbital: 0.50
+      high: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Metadata (19) — Temporal
+  # ═══════════════════════════════════════════════════════════════
+
+  registration_order:
+    index: 19
+    storage_only: true
+    values:
+      founding: 0.00
+      early: 0.25
+      middle: 0.50
+      late: 0.75
+      recent: 1.00

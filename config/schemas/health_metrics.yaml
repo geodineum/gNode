@@ -1,0 +1,56 @@
+contract:
+  name: health_metrics
+  component: gnode
+  version: "1.0.0"
+  stability: stable
+  stream: "{site_id}:gnode:health:{env}"
+  consumer_group: null
+  purpose: >
+    Health metrics stream. gNode daemon publishes load metrics every 30 seconds.
+    Consumers use XREAD (no consumer group) for monitoring and scaling decisions.
+
+  fields:
+    - name: node_id
+      type: string
+      required: true
+      description: "Node identifier publishing this metric"
+      example: "gnode-primary"
+
+    - name: cpu_load
+      type: float
+      required: true
+      description: "CPU load average (0.0-1.0)"
+      example: "0.35"
+
+    - name: memory_used_mb
+      type: integer
+      required: true
+      description: "Memory usage in megabytes"
+      example: "512"
+
+    - name: active_streams
+      type: integer
+      required: true
+      description: "Number of active stream consumers"
+      example: "8"
+
+    - name: commands_processed
+      type: integer
+      required: true
+      description: "Commands processed since last report"
+      example: "1247"
+
+    - name: timestamp
+      type: iso8601
+      required: true
+      description: "ISO-8601 timestamp of this health report"
+      example: "2026-04-15T16:00:30Z"
+
+  xadd_example: >
+    XADD {site_id}:gnode:health:production *
+    node_id gnode-primary
+    cpu_load 0.35
+    memory_used_mb 512
+    active_streams 8
+    commands_processed 1247
+    timestamp 2026-04-15T16:00:30Z

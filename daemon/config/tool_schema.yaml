@@ -1,0 +1,203 @@
+# Tool Topology Schema — 16D (12 discovery + 4 storage)
+# Tier: TOOL — static registry of base ecosystem components
+# Keyspace: ecosystem:tools:topology:{entity_id}
+#
+# The tool tier registers gMath, gNode, ValKey, gCore, gTemplate, etc.
+# Each component declares its interface, domain, and classification.
+# The visual dimensions (12-14) encode a dependency pyramid:
+#   z = hierarchy level (1.0 = top, 0.0 = bottom)
+#   x/y = position within level (centered under dependencies)
+# Computed automatically from the dependency graph at registration time.
+
+schema_version: "3.0"
+tier: tool
+total_dimensions: 16
+discovery_dimensions: 12
+
+dimensions:
+  # ═══════════════════════════════════════════════════════════════
+  # Interface (0-3) — How the tool exposes itself
+  # ═══════════════════════════════════════════════════════════════
+
+  protocol:
+    index: 0
+    query_type: equality
+    values:
+      none: 0.00
+      cli: 0.15
+      php_internal: 0.30
+      http_rest: 0.45
+      gnode_stream: 0.60
+      resp3_direct: 0.75
+      library: 0.90
+
+  native_format:
+    index: 1
+    query_type: informational
+    values:
+      none: 0.00
+      php_array: 0.15
+      json: 0.30
+      yaml: 0.45
+      resp3: 0.60
+      binary: 0.75
+      fixed_point: 0.90
+
+  api_version:
+    index: 2
+    query_type: equality
+    values:
+      v1: 0.20
+      v2: 0.40
+      v3: 0.60
+      v4: 0.80
+      v5: 1.00
+
+  contract_stability:
+    index: 3
+    query_type: range
+    values:
+      experimental: 0.00
+      alpha: 0.25
+      beta: 0.50
+      stable: 0.75
+      frozen: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Domain (4) — What it does
+  # ═══════════════════════════════════════════════════════════════
+
+  domain_primary:
+    index: 4
+    query_type: proximity
+    values:
+      math: 0.05
+      infrastructure: 0.15
+      storage: 0.25
+      framework: 0.35
+      messaging: 0.45
+      template: 0.55
+      presentation: 0.65
+      backup: 0.75
+      security: 0.85
+      orchestration: 0.95
+
+  # ═══════════════════════════════════════════════════════════════
+  # Classification (5-8) — What kind of tool
+  # ═══════════════════════════════════════════════════════════════
+
+  implementation_language:
+    index: 5
+    query_type: equality
+    values:
+      rust: 0.15
+      php: 0.30
+      lua: 0.45
+      bash: 0.60
+      c: 0.75
+
+  build_type:
+    index: 6
+    query_type: equality
+    values:
+      none: 0.00
+      lua_load: 0.25
+      composer: 0.50
+      cargo_release: 0.75
+      apt_package: 1.00
+
+  component_tier:
+    index: 7
+    query_type: equality
+    values:
+      math: 0.00
+      infrastructure: 0.20
+      framework: 0.40
+      extension: 0.60
+      theme: 0.80
+      utility: 1.00
+
+  license_tier:
+    index: 8
+    query_type: equality
+    values:
+      open_source: 0.00
+      pro: 0.50
+      enterprise: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Dependency (9-10) — What it requires
+  # ═══════════════════════════════════════════════════════════════
+
+  requires_valkey:
+    index: 9
+    query_type: equality
+    values:
+      "no": 0.00
+      "yes": 1.00
+
+  systemd_managed:
+    index: 10
+    query_type: equality
+    values:
+      "no": 0.00
+      "yes": 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Security (11) — Data handling
+  # ═══════════════════════════════════════════════════════════════
+
+  data_sensitivity:
+    index: 11
+    query_type: range
+    values:
+      public: 0.00
+      internal: 0.50
+      credentials: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Visual — Dependency Pyramid (12-14) — Storage-only, computed
+  # ═══════════════════════════════════════════════════════════════
+  # z = 1.0 - (depth / max_depth) → top of pyramid = highest z
+  # x = horizontal position within level (centroid of parents)
+  # y = depth position (for 3D perspective, usually 0.5 for flat pyramid)
+
+  pyramid_x:
+    index: 12
+    storage_only: true
+    values:
+      left: 0.00
+      center: 0.50
+      right: 1.00
+
+  pyramid_y:
+    index: 13
+    storage_only: true
+    values:
+      front: 0.00
+      center: 0.50
+      back: 1.00
+
+  pyramid_z:
+    index: 14
+    storage_only: true
+    values:
+      bottom: 0.00
+      low: 0.25
+      middle: 0.50
+      high: 0.75
+      top: 1.00
+
+  # ═══════════════════════════════════════════════════════════════
+  # Metadata (15) — Temporal, auto-injected
+  # ═══════════════════════════════════════════════════════════════
+
+  registration_order:
+    index: 15
+    storage_only: true
+    values:
+      first: 0.00
+      early: 0.25
+      middle: 0.50
+      late: 0.75
+      recent: 1.00

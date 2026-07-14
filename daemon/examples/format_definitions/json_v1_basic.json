@@ -1,0 +1,51 @@
+{
+  "format_name": "json_v1_basic",
+  "version": "1.0.0",
+  "description": "Basic JSON message format with minimal metadata for simple command/response patterns. Ideal for development, testing, and systems with straightforward messaging needs.",
+  "content_type": "application/json",
+  "binary": false,
+  "detection_patterns": [
+    {
+      "pattern_type": "regex",
+      "pattern": "^\\s*\\{\\s*\"(id|command)\":",
+      "confidence": 0.85
+    }
+  ],
+  "field_mapping": {
+    "id": "id",
+    "command": "command",
+    "parameters": "parameters",
+    "timestamp": "timestamp"
+  },
+  "schema": {
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "required": ["id", "command", "timestamp"],
+    "properties": {
+      "id": {
+        "type": "string",
+        "description": "Unique message identifier",
+        "pattern": "^[a-zA-Z0-9_-]+$"
+      },
+      "command": {
+        "type": "string",
+        "description": "Command name to execute",
+        "minLength": 1
+      },
+      "parameters": {
+        "type": "object",
+        "description": "Command parameters (optional)",
+        "additionalProperties": true
+      },
+      "timestamp": {
+        "type": "number",
+        "description": "Unix timestamp in seconds with millisecond precision",
+        "minimum": 0
+      }
+    },
+    "additionalProperties": false
+  },
+  "defaults": {
+    "parameters": {}
+  }
+}

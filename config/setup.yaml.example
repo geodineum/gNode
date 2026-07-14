@@ -1,0 +1,84 @@
+# ==============================================================================
+# Geodineum Deployment Configuration
+# ==============================================================================
+# Used by: scripts/deploy-geodineum.sh
+# Purpose: Declarative specification of a geodineum ecosystem deployment
+#
+# Copy this file to setup.yaml and customize for your environment.
+# Credentials are NEVER stored here - they are generated during deployment.
+#
+# Usage:
+#   sudo ./scripts/deploy-geodineum.sh --config config/setup.yaml
+# ==============================================================================
+
+# ==============================================================================
+# §1 ECOSYSTEM PATHS (FHS-compliant defaults)
+# ==============================================================================
+geodineum:
+  config_root: "/etc/geodineum"
+  install_root: "/opt/geodineum"
+  log_root: "/var/log/geodineum"
+  cache_root: "/var/cache/geodineum"
+
+# ==============================================================================
+# §2 COMPONENTS
+# ==============================================================================
+# Each component can be individually enabled/disabled.
+# Set enabled: false to skip a component entirely.
+components:
+  gnode:
+    enabled: true
+    repo: "https://github.com/geodineum/gNode.git"
+    branch: "main"
+    install_dir: "/opt/geodineum/gNode"
+    build_daemon: true
+    load_functions: true
+    install_service: true
+  gnode_client:
+    enabled: true
+    repo: "https://github.com/geodineum/gNode-Client.git"
+    branch: "main"
+    install_dir: "/opt/geodineum/gNode-Client"
+  gcore:
+    enabled: true
+    repo: "https://github.com/geodineum/gCore.git"
+    branch: "main"
+    install_dir: "/opt/geodineum/gCore"
+  gcube:
+    enabled: false
+    repo: "https://github.com/geodineum/gCube.git"
+    branch: "main"
+    install_dir: "/opt/geodineum/gCube"
+
+# ==============================================================================
+# §3 VALKEY
+# ==============================================================================
+valkey:
+  host: "127.0.0.1"
+  port: 47445
+  setup_service: true
+  topology_namespace: "geodineum"
+  stream_prefix: "gnode"
+
+# ==============================================================================
+# §4 SITES
+# ==============================================================================
+# Sites to register after deployment. Each creates:
+#   - ACL user (gnode_client_{site_id})
+#   - Unified stream(s) per environment
+#   - Health stream
+#   - Credential file at /etc/geodineum/credentials/
+sites: []
+  # - id: "my_app"
+  #   environments: ["production", "staging"]
+  # - id: "example_com"
+  #   environments: ["production"]
+
+# ==============================================================================
+# §5 SECURITY
+# ==============================================================================
+security:
+  credentials_dir: "/etc/geodineum/credentials"
+  gnode_user: "gnode"
+  gnode_group: "gnode"
+  web_group: "www-data"

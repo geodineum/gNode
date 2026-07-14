@@ -1,0 +1,44 @@
+{
+    "description": "gNode RESP3 Field Mapping - Standard mapping between JSON field names and optimized RESP3 field names",
+    "version": "1.0.0",
+    "commonFields": {
+        "id": "i",
+        "command": "c",
+        "parameters": "p",
+        "site_id": "ss",
+        "node_id": "sn",
+        "timestamp": "ts",
+        "type": "t",
+        "status": "st",
+        "result": "r",
+        "error": "e",
+        "destination_site": "ds",
+        "destination_node": "dn",
+        "batch_id": "bi",
+        "sequence": "sq",
+        "total_count": "tc",
+        "messages": "m",
+        "request_id": "ri"
+    },
+    "typeValues": {
+        "command": "c",
+        "response": "r",
+        "batch": "b",
+        "message": "m",
+        "error": "e",
+        "initialization": "i"
+    },
+    "commandShortNames": {
+        "geometric_discover": "geo_disc",
+        "geometric_store_topology": "geo_store",
+        "geometric_load_sequence": "geo_seq",
+        "geometric_distance": "geo_dist",
+        "geometric_dimensions": "geo_dim",
+        "stream_info": "str_info",
+        "stream_group_info": "str_group",
+        "stream_consumer_info": "str_cons",
+        "stream_pending": "str_pend",
+        "get_node_info": "node_info",
+        "get_site_info": "site_info"
+    }
+}

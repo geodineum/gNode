@@ -1,0 +1,54 @@
+# gNode Lua Library Loading Configuration
+# =======================================
+#
+# Controls which Lua function libraries are loaded into ValKey.
+# Libraries are loaded via FUNCTION LOAD REPLACE and are independent
+# (no cross-library FCALL calls — the Rust daemon orchestrates
+# coordination).
+#
+# This file lists the base libraries shipped with gNode. Optional
+# extension libraries live in their own extension directories and are
+# discovered by load-valkey-functions.sh via:
+#
+#   1. GNODE_EXT_<NAME>_PATH env vars
+#   2. Signed extension subdirectories of GNODE_EXT_DIR
+#
+# See the top-level README's Extension System section for details.
+
+libraries:
+  # --- Core Infrastructure (data operations, locking, caching) ---
+  gnode_core: {}
+  gnode_utils: {}
+  gnode_hash: {}
+  gnode_lock: {}
+  gnode_cache: {}
+  gnode_batch: {}
+  gnode_batch_resp3: {}
+  gnode_transaction: {}
+  gnode_group: {}
+  gnode_config: {}
+  gnode_monitoring: {}
+  gnode_node: {}
+  gnode_pubsub: {}
+
+  # --- Streaming & Protocol ---
+  gnode_stream: {}
+  gnode_broadcast: {}
+  gnode_protocol: {}
+
+  # --- Site Management ---
+  gnode_site: {}
+
+  # --- Topology (core discovery) ---
+  gnode_topo: {}
+  gnode_geometric: {}
+  gnode_topology: {}
+
+  # --- Resilience (circuit breaker, idempotency) ---
+  gnode_resilience: {}
+
+  # --- Direct Channels (inter-service provisioned streams) ---
+  gnode_direct: {}
+
+  # NOTE: gnode_asset.lua ships with the gNode-CMS companion extension.
+  # It is loaded by load-valkey-functions.sh when the CMS path resolves.

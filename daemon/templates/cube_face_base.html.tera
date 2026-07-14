@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<div class="cube-face-content" data-face-id="{{ face_id }}" data-position="{{ position }}">
+    <header class="face-header">
+        <h2 class="face-title">
+            {{ title | default(value="Untitled Face") }}
+        </h2>
+        {% if subtitle %}
+        <p class="face-subtitle">{{ subtitle }}</p>
+        {% endif %}
+    </header>
+
+    <main class="face-body">
+        {% if content %}
+            {{ content | safe }}
+        {% else %}
+            <div class="empty-state">
+                <p>No content available for this face.</p>
+                <p class="debug-info">Face {{ face_id }} ({{ position }})</p>
+            </div>
+        {% endif %}
+    </main>
+
+    <footer class="face-footer">
+        <small>
+            {{ blog_name | default(value="gCube Site") }} |
+            Face {{ face_id }} ({{ position }}) |
+            Site: {{ site_id | default(value="default") }}
+        </small>
+        <small class="render-info">
+            Rendered by gNode Tera @ {{ timestamp | default(value=0) }}
+        </small>
+    </footer>
+</div>

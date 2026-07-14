@@ -1,0 +1,126 @@
+# ============================================================================
+# EXAMPLE ONLY - This file is not loaded by the daemon.
+# Health stream configuration is embedded in the Rust code.
+# See: daemon/src/integration/load_metrics.rs for runtime configuration.
+# ============================================================================
+#
+# Health Stream Configuration for gNode Load-Aware Service Discovery
+#
+# This configuration file defines parameters for the dedicated health stream
+# that carries runtime operational metrics separate from command/response traffic.
+#
+# Design Principles:
+# - Separation of concerns: operational state vs. architectural capabilities
+# - Temporal characteristics: health data expires (TTL), capabilities persist
+# - Performance: optimized for 2-3 second update frequency from services
+# - Bounded growth: automatic retention limits prevent unbounded stream expansion
+
+# Stream naming pattern
+key_pattern: "{site_id}:gnode:health:{node_id}"
+
+# Consumer groups configuration
+consumer_groups:
+  # Only the daemon reads health updates (no client access needed)
+  - name: gnode-daemon
+    start_id: "0"  # Read from beginning to process all health updates
+    description: "Daemon processor group for load metric updates"
+
+# Stream retention policy
+# These settings prevent unbounded growth while maintaining recent history
+retention:
+  # Maximum number of entries to keep in the stream
+  # At 1 update/second per service, 300 entries = ~5 minutes of history
+  max_length: 300
+
+  # Time-to-live for stream entries (seconds)
+  # Entries older than this will be trimmed during cleanup
+  ttl_seconds: 300  # 5 minutes
+
+  # Use approximate trimming for better performance
+  # XTRIM with ~ allows ValKey to trim slightly more for efficiency
+  approximate_trim: true
+
+  # Interval between stream trimming operations (seconds)
+  trim_interval_seconds: 30
+
+# Stream processing configuration
+processing:
+  # Number of messages to read per XREADGROUP call
+  batch_size: 50
+
+  # Maximum time to block waiting for messages (milliseconds)
+  # Low value (1000ms) ensures responsive processing of health updates
+  block_ms: 1000
+
+  # Timeout for reading operations (milliseconds)
+  read_timeout_ms: 5000
+
+# Load metrics configuration
+load_metrics:
+  # Default TTL for metrics entries (seconds)
+  # Metrics older than this are considered stale and excluded from selection
+  default_ttl_seconds: 30
+
+  # Interval between stale metric cleanup runs (seconds)
+  cleanup_interval_seconds: 10
+
+  # Composite scoring weights (must sum to 1.0)
+  scoring_weights:
+    load_factor: 0.6   # Overall load (most important)
+    cpu_usage: 0.2     # CPU utilization
+    memory_usage: 0.1  # Memory utilization
+    latency: 0.1       # Response latency
+
+# Health thresholds for filtering unhealthy services
+health_thresholds:
+  # Maximum load before service is considered overloaded
+  max_load_factor: 0.95  # 95% capacity
+
+  # Maximum error rate before service is considered unhealthy
+  max_error_rate: 0.05   # 5% errors
+
+  # Maximum latency before service is deprioritized (milliseconds)
+  max_latency_ms: 1000
+
+# Thundering herd prevention
+# When multiple clients select services simultaneously, jitter helps
+# distribute load more evenly by randomly choosing from top N candidates
+jitter:
+  enabled: true
+  top_candidates_count: 3  # Randomly select from top 3 services
+
+# Debug and monitoring
+debug:
+  # Log all load update messages
+  log_updates: false
+
+  # Log service selection decisions
+  log_selections: true
+
+  # Log cleanup operations
+  log_cleanup: true
+
+  # Detailed metric scoring logs
+  log_scoring: false
+
+# Message format specification
+# Health update messages use this format:
+# {
+#   "t": "lu",           # Message type: load update
+#   "si": "service-id",  # Service identifier
+#   "l": 0.35,           # Load factor (0.0-1.0)
+#   "cpu": 0.45,         # CPU usage (optional, 0.0-1.0)
+#   "mem": 0.60,         # Memory usage (optional, 0.0-1.0)
+#   "rq": 12,            # Active requests (optional, integer)
+#   "lat": 150,          # Average latency in ms (optional, integer)
+#   "err": 0.02,         # Error rate (optional, 0.0-1.0)
+#   "ts": 1696800000000  # Timestamp in milliseconds
+# }
+
+# Performance expectations
+# With this configuration:
+# - Stream size: ~300 entries × ~200 bytes = ~60KB memory per stream
+# - Processing latency: <10ms per health update
+# - Query latency: <1ms for load-based selection
+# - Cleanup overhead: <100ms per cleanup cycle
+# - Total overhead: <1MB for 1000 services with load data
