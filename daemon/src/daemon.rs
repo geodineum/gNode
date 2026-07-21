@@ -681,69 +681,93 @@ impl GNodeDaemon {
     pub fn run(&self) -> Result<()> {
         info!("Starting gNode daemon");
 
-        // Initialize ValKey functions
-        info!("Initializing ValKey functions");
-        
-        // First verify ValKey connection and function support
-        let mut valkey_support_verified = false;
-        let valkey_conn_result = self.client.get_connection();
-        
-        match valkey_conn_result {
-            Ok(mut conn) => {
-                // Test if ValKey supports functions
-                let test_function = "#!lua name=test_gnode\nserver.register_function('TEST_PING', function() return 'PONG' end)";
-                let test_result: redis::RedisResult<String> = redis::cmd("FUNCTION")
-                    .arg("LOAD")
-                    .arg(test_function)
-                    .query(&mut conn);
-                
-                match test_result {
-                    Ok(_) => {
-                        info!("ValKey functions support verified");
-                        valkey_support_verified = true;
-                        
-                        // Clean up test function
-                        let _: redis::RedisResult<()> = redis::cmd("FUNCTION")
-                            .arg("DELETE")
-                            .arg("test_gnode")
-                            .query(&mut conn);
-                    },
-                    Err(e) => {
-                        error!("ValKey does not support functions: {}. Check your ValKey version.", e);
-                    }
-                }
-            },
-            Err(e) => {
-                error!("Failed to connect to ValKey to verify function support: {}", e);
-            }
-        }
-        
-        // Only attempt to load functions if ValKey supports them
-        let valkey_initialized = if valkey_support_verified {
-            // Use topology_namespace for function loading (daemon-level, not site-specific)
-            match crate::integration::valkey_functions::reload_functions(
-                &self.client,
-                &self.topology_namespace,  // Daemon uses topology namespace, not site_id
-                self.debug
-            ) {
-                Ok(count) => {
-                    if count > 0 {
-                        info!("ValKey functions initialized: {} functions loaded", count);
-                        true
-                    } else {
-                        warn!("No ValKey functions were loaded. If this is unexpected, check the function files and run scripts/load-valkey-functions.sh manually to diagnose.");
-                        false
+        // ValKey function libraries are a namespace shared by every node on
+        // this ValKey, so exactly one node owns writing them: the master. A
+        // constellation worker verifies read-only — its own tree may differ in
+        // version from the master's, and silently replacing the libraries all
+        // live sites call is never the right outcome of a worker restart.
+        let valkey_initialized = if self.is_master {
+            info!("Initializing ValKey functions (master owns the library namespace)");
+
+            // Probe function support. This writes, which is why it is inside
+            // the master branch.
+            let mut valkey_support_verified = false;
+            match self.client.get_connection() {
+                Ok(mut conn) => {
+                    let test_function = "#!lua name=test_gnode\nserver.register_function('TEST_PING', function() return 'PONG' end)";
+                    let test_result: redis::RedisResult<String> = redis::cmd("FUNCTION")
+                        .arg("LOAD")
+                        .arg(test_function)
+                        .query(&mut conn);
+
+                    match test_result {
+                        Ok(_) => {
+                            info!("ValKey functions support verified");
+                            valkey_support_verified = true;
+
+                            let _: redis::RedisResult<()> = redis::cmd("FUNCTION")
+                                .arg("DELETE")
+                                .arg("test_gnode")
+                                .query(&mut conn);
+                        },
+                        Err(e) => {
+                            error!("ValKey does not support functions: {}. Check your ValKey version.", e);
+                        }
                     }
                 },
                 Err(e) => {
-                    error!("ValKey functions failed to initialize: {}. Will use fallbacks.", e);
-                    error!("For a one-time fix, run: scripts/load-valkey-functions.sh");
+                    error!("Failed to connect to ValKey to verify function support: {}", e);
+                }
+            }
+
+            if valkey_support_verified {
+                // Use topology_namespace for function loading (daemon-level, not site-specific)
+                match crate::integration::valkey_functions::sync_functions(
+                    &self.client,
+                    &self.topology_namespace,  // Daemon uses topology namespace, not site_id
+                    self.debug
+                ) {
+                    Ok(count) => {
+                        if count > 0 {
+                            info!("ValKey functions initialized: {} functions loaded", count);
+                            true
+                        } else {
+                            warn!("No ValKey functions were loaded. If this is unexpected, check the function files and run scripts/load-valkey-functions.sh manually to diagnose.");
+                            false
+                        }
+                    },
+                    Err(e) => {
+                        error!("ValKey functions failed to initialize: {}. Will use fallbacks.", e);
+                        error!("For a one-time fix, run: scripts/load-valkey-functions.sh");
+                        false
+                    }
+                }
+            } else {
+                warn!("Skipping ValKey function loading due to lack of function support");
+                false
+            }
+        } else {
+            info!("Verifying ValKey functions (worker — the master owns the library namespace)");
+            match crate::integration::valkey_functions::verify_functions(&self.client, self.debug) {
+                Ok(missing) if missing.is_empty() => {
+                    info!("ValKey function libraries verified");
+                    true
+                },
+                Ok(missing) => {
+                    error!(
+                        "ValKey is missing {} function librar{} this node needs: {}",
+                        missing.len(),
+                        if missing.len() == 1 { "y" } else { "ies" },
+                        missing.join(", ")
+                    );
+                    error!("Load them ON THE MASTER: scripts/load-valkey-functions.sh");
+                    false
+                },
+                Err(e) => {
+                    error!("Could not verify ValKey functions: {}. Will use fallbacks.", e);
                     false
                 }
             }
-        } else {
-            warn!("Skipping ValKey function loading due to lack of function support");
-            false
         };
 
         info!("Function initialization complete - ValKey: {}",

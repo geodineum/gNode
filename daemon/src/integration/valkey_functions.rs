@@ -366,19 +366,9 @@ fn load_function_library(
                content.lines().take(5).collect::<Vec<_>>().join("\n"));
     }
 
-    // First check if the function library already exists
-    let library_name = match library {
-        FunctionLibrary::Custom(name) => name.clone(),
-        _ => library.to_file_name().trim_end_matches(".lua").to_string(),
-    };
-    
-    // Try to delete the library first to ensure clean state
-    let _: redis::RedisResult<()> = redis::cmd("FUNCTION")
-        .arg("DELETE")
-        .arg(&library_name)
-        .query(conn);
-    
-    // Load function into ValKey
+    // LOAD REPLACE swaps the library atomically. A prior FUNCTION DELETE
+    // would open a window in which every FCALL against this library fails
+    // for anyone sharing this ValKey.
     let load_result: redis::RedisResult<String> = redis::cmd("FUNCTION")
         .arg("LOAD")
         .arg("REPLACE")
@@ -1040,11 +1030,12 @@ pub fn execute_consumer_group_operation(
     execute_stream_operation(conn, operation, stream_key, &operation_args, site_id, debug_mode)
 }
 
-/// Reload all ValKey functions
+/// Sync this node's on-disk ValKey function libraries into ValKey.
 ///
-/// This function reloads all ValKey functions from disk.
-/// It's useful when functions have been modified or when
-/// functions are missing due to a ValKey restart.
+/// Additive and idempotent: every library is written with LOAD REPLACE, and
+/// libraries this node does not carry are left untouched. Only a node that
+/// owns its ValKey may call this — see `verify_functions` for the read-only
+/// check a constellation worker performs instead.
 ///
 /// # Arguments
 /// * `client` - Redis client
@@ -1053,12 +1044,12 @@ pub fn execute_consumer_group_operation(
 ///
 /// # Returns
 /// * `IntegrationResult<usize>` - Number of functions loaded
-pub fn reload_functions(
+pub fn sync_functions(
     client: &Client,
     site_id: &str,
     debug: bool
 ) -> IntegrationResult<usize> {
-    info!("Reloading all ValKey functions");
+    info!("Syncing ValKey function libraries from disk");
     
     // Verify we can connect to ValKey
     let mut conn = match client.get_connection() {
@@ -1077,31 +1068,18 @@ pub fn reload_functions(
     
     match &list_before_result {
         Ok(redis::Value::Array(list)) => {
-            info!("Found {} function libraries before flush", list.len());
+            info!("Found {} function libraries already loaded", list.len());
         },
         Ok(_) => info!("Unexpected response format from FUNCTION LIST"),
-        Err(e) => warn!("Failed to list functions before flush: {}", e)
+        Err(e) => warn!("Failed to list functions: {}", e)
     }
-    
-    // Flush functions with FUNCTION FLUSH
-    let flush_result: redis::RedisResult<()> = redis::cmd("FUNCTION")
-        .arg("FLUSH")
-        .query(&mut conn);
-    
-    match flush_result {
-        Ok(_) => info!("Successfully flushed ValKey functions"),
-        Err(e) => {
-            warn!("Failed to flush ValKey functions: {}", e);
-            // If we can't flush, check if this is a permission issue
-            if e.to_string().contains("permission") || e.to_string().contains("auth") {
-                error!("Permission denied when attempting to flush functions. Check ValKey ACL configuration.");
-                return Err(valkey_function_error(format!(
-                    "Permission denied for ValKey functions: {}", e
-                )));
-            }
-        }
-    }
-    
+
+    // NO global FUNCTION FLUSH here. The library namespace is shared by every
+    // node on this ValKey and holds libraries this daemon cannot reproduce —
+    // extension libraries live under GNODE_EXT_DIR, not daemon/functions, so a
+    // flush would drop them permanently until load-valkey-functions.sh reran.
+    // Every library below is written with LOAD REPLACE, which needs no flush.
+
     // Initialize functions
     match initialize_functions(client, site_id, debug) {
         Ok(count) => {
@@ -1165,6 +1143,105 @@ pub fn reload_functions(
             // Return the error now - this is critical for proper operation
             Err(e)
         }
+    }
+}
+
+/// Read-only check that the function libraries this node needs are present.
+///
+/// A constellation worker shares the master's ValKey; the library namespace is
+/// owned by the node that owns that ValKey. A worker therefore never writes
+/// libraries — it asserts the ones its own tree carries are loaded and reports
+/// any that are missing, naming the command that fixes it.
+///
+/// # Returns
+/// * `IntegrationResult<Vec<String>>` - libraries this node carries that ValKey lacks
+pub fn verify_functions(
+    client: &Client,
+    debug: bool
+) -> IntegrationResult<Vec<String>> {
+    let mut conn = client.get_connection()
+        .map_err(|e| valkey_function_error(format!("Failed to connect to ValKey: {}", e)))?;
+
+    let loaded = list_loaded_library_names(&mut conn)?;
+    info!("ValKey holds {} function libraries", loaded.len());
+
+    // What this node's own tree carries — the set it would have loaded if it
+    // owned this ValKey. Anything here but not in ValKey is a real gap.
+    let functions_dir = find_valkey_functions_directory(debug);
+    let mut missing = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(Path::new(&functions_dir)) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !path.is_file() || path.extension().is_none_or(|ext| ext != "lua") {
+                continue;
+            }
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s,
+                None => continue,
+            };
+            if stem == "gnode_test" {
+                continue;
+            }
+            if !loaded.iter().any(|l| l == stem) {
+                missing.push(stem.to_string());
+            }
+        }
+    }
+    missing.sort();
+
+    Ok(missing)
+}
+
+/// Library names currently loaded in ValKey, via read-only FUNCTION LIST.
+fn list_loaded_library_names(conn: &mut Connection) -> IntegrationResult<Vec<String>> {
+    let value: redis::Value = redis::cmd("FUNCTION")
+        .arg("LIST")
+        .query(conn)
+        .map_err(|e| valkey_function_error(format!("FUNCTION LIST failed: {}", e)))?;
+
+    let entries = match value {
+        redis::Value::Array(entries) => entries,
+        other => return Err(valkey_function_error(format!(
+            "Unexpected FUNCTION LIST response: {:?}", other
+        ))),
+    };
+
+    // Each entry is a map/array of field-value pairs; pull the value that
+    // follows the "library_name" field. RESP2 yields a flat array, RESP3 a map.
+    let mut names = Vec::new();
+    for entry in entries {
+        match entry {
+            redis::Value::Map(pairs) => {
+                for (k, v) in pairs {
+                    if redis_value_as_string(&k).as_deref() == Some("library_name") {
+                        if let Some(name) = redis_value_as_string(&v) {
+                            names.push(name);
+                        }
+                    }
+                }
+            },
+            redis::Value::Array(fields) => {
+                let mut iter = fields.iter();
+                while let Some(field) = iter.next() {
+                    if redis_value_as_string(field).as_deref() == Some("library_name") {
+                        if let Some(name) = iter.next().and_then(redis_value_as_string) {
+                            names.push(name);
+                        }
+                    }
+                }
+            },
+            _ => continue,
+        }
+    }
+
+    Ok(names)
+}
+
+fn redis_value_as_string(value: &redis::Value) -> Option<String> {
+    match value {
+        redis::Value::BulkString(bytes) => String::from_utf8(bytes.clone()).ok(),
+        redis::Value::SimpleString(s) => Some(s.clone()),
+        _ => None,
     }
 }
 
