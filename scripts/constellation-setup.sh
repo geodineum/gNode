@@ -753,9 +753,43 @@ expand_node() {
     [[ -r "${cred_dir}/valkey_daemon.password" ]]  && daemon_pw="$(cat "${cred_dir}/valkey_daemon.password")"
     [[ -r "${cred_dir}/valkey_replica.password" ]] && replica_pw="$(cat "${cred_dir}/valkey_replica.password")"
 
+    # Per-node ValKey identity. Every daemon sharing one `gnode_daemon` login
+    # means the master cannot tell one worker from another — no attribution,
+    # no per-node scoping, and no basis for authorising anything a node asks
+    # for. Mint this node its own user of the same daemon tier.
+    #
+    # Grants come from the rule the installer wrote when it provisioned
+    # gnode_daemon, never from a copy kept here: one definition of the
+    # privilege boundary. Identical grants means this changes identity only,
+    # not what a node may do — scoping is a later, separate change.
+    local node_user="gnode_node_$(printf '%s' "$name" | tr -c 'a-zA-Z0-9_' '_')"
+    local node_pw="" acl_rule_file="/etc/geodineum/components/gnode-daemon/acl-daemon-tier.rule"
+    local admin_pwfile="${cred_dir}/valkey.password"
+    [[ -r "$admin_pwfile" ]] || admin_pwfile="${cred_dir}/valkey_admin.password"
+
+    if [[ -r "$acl_rule_file" && -r "$admin_pwfile" ]]; then
+        node_pw="$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)"
+        # Unquoted on purpose: the rule file holds whitespace-separated ACL
+        # tokens that must arrive as separate arguments.
+        # shellcheck disable=SC2046
+        if REDISCLI_AUTH="$(cat "$admin_pwfile")" valkey-cli -p "${VALKEY_PORT:-47445}" \
+            ACL SETUSER "$node_user" resetpass ">${node_pw}" $(cat "$acl_rule_file") >/dev/null 2>&1; then
+            REDISCLI_AUTH="$(cat "$admin_pwfile")" valkey-cli -p "${VALKEY_PORT:-47445}" ACL SAVE >/dev/null 2>&1 || true
+            log_success "Minted per-node ValKey identity: ${node_user}"
+        else
+            log_warning "Could not mint ${node_user} — the worker will fall back to the shared gnode_daemon login."
+            node_pw=""
+        fi
+    else
+        log_warning "Daemon-tier ACL rule or admin credential unreadable — no per-node identity minted."
+        log_warning "  rule: ${acl_rule_file}"
+        log_warning "  This master predates per-node identities; re-run the installer to write the rule."
+    fi
+    [[ -z "$node_pw" ]] && node_user=""
+
     local bundle
     bundle="$(cat <<BUNDLE
-===GEODINEUM-CONSTELLATION-BUNDLE-V1===
+===GEODINEUM-CONSTELLATION-BUNDLE-V2===
 name=${name}
 vpn_ip=${peer_ip}
 ---WIREGUARD---
@@ -772,6 +806,10 @@ PersistentKeepalive = 25
 ${daemon_pw}
 ---VALKEY_REPLICA_PASSWORD---
 ${replica_pw}
+---VALKEY_NODE_USER---
+${node_user}
+---VALKEY_NODE_PASSWORD---
+${node_pw}
 ===END===
 BUNDLE
 )"
