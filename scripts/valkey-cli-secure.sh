@@ -21,7 +21,10 @@ fi
 source "$GEODINEUM_LIB/bootstrap-loader.sh"
 load_ecosystem_config
 
-# Use port from environment or default to 47445 (standardized port)
+# Host + port from the ecosystem config loaded above. VALKEY_HOST is the
+# master's VPN address on every node that does not own the ValKey; defaulting
+# it away silently pointed every caller at a localhost that isn't there.
+VALKEY_HOST="${VALKEY_HOST:-127.0.0.1}"
 VALKEY_PORT="${VALKEY_PORT:-47445}"
 
 # Determine which user to authenticate as (daemon or client)
@@ -71,4 +74,4 @@ fi
 # Execute valkey-cli with REDISCLI_AUTH environment variable
 # Use --user for ACL authentication (ValKey 7.2+)
 # This is the recommended secure method that doesn't expose password in ps
-REDISCLI_AUTH="$VALKEY_PASSWORD" "$VALKEY_CLI" -p "$VALKEY_PORT" --user "$VALKEY_USER" "$@"
+REDISCLI_AUTH="$VALKEY_PASSWORD" "$VALKEY_CLI" -h "$VALKEY_HOST" -p "$VALKEY_PORT" --user "$VALKEY_USER" "$@"

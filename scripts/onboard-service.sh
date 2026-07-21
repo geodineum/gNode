@@ -60,23 +60,35 @@ CREDENTIAL_DIR="${GNODE_CREDENTIAL_DIR:-/etc/geodineum/credentials}"
 DISCOVERY_PATHS_FILE="${GNODE_DISCOVERY_PATHS_FILE:-/etc/geodineum/components/gnode-daemon/discovery-paths.conf}"
 VALKEY_CLI="$SCRIPT_DIR/valkey-cli-secure.sh"
 
-# Admin password for ACL operations (gnode_daemon has -@dangerous, so we need default user)
+# ValKey is local on the master and the master's VPN address on every other
+# node. VALKEY_HOST comes from bootstrap.env via load_ecosystem_config; without
+# it these calls silently target localhost, which on a worker is nothing.
+valkey_target_host() { echo "${VALKEY_HOST:-127.0.0.1}"; }
+
+# Admin password for ACL operations (gnode_daemon has -@dangerous, so we need
+# default user). The admin credential lives ONLY on the node that owns the
+# ValKey — minting ACL users is the master's job, not a worker's.
 VALKEY_ADMIN_PASSWORD_FILE="${CREDENTIAL_DIR}/valkey.password"
 valkey_admin_cli() {
     if [[ -f "$VALKEY_ADMIN_PASSWORD_FILE" ]]; then
-        REDISCLI_AUTH="$(cat "$VALKEY_ADMIN_PASSWORD_FILE")" valkey-cli -p "${VALKEY_PORT:-47445}" "$@"
+        REDISCLI_AUTH="$(cat "$VALKEY_ADMIN_PASSWORD_FILE")" \
+            valkey-cli -h "$(valkey_target_host)" -p "${VALKEY_PORT:-47445}" "$@"
     else
         log_error "Admin password file not found: $VALKEY_ADMIN_PASSWORD_FILE"
-        log_error "ACL operations require the default user password"
+        log_error "ACL provisioning requires the ValKey admin credential, which by"
+        log_error "design exists only on the constellation master. Run this on the"
+        log_error "master: geodineum provision-service <name>"
         return 1
     fi
 }
 
-# Daemon password for non-ACL operations
+# Daemon password for non-ACL operations (topology registration). Every node
+# that joined the constellation holds this credential.
 valkey_daemon_cli() {
     local daemon_pass_file="${CREDENTIAL_DIR}/valkey_daemon.password"
     if [[ -f "$daemon_pass_file" ]]; then
-        REDISCLI_AUTH="$(cat "$daemon_pass_file")" valkey-cli -p "${VALKEY_PORT:-47445}" --user gnode_daemon "$@"
+        REDISCLI_AUTH="$(cat "$daemon_pass_file")" \
+            valkey-cli -h "$(valkey_target_host)" -p "${VALKEY_PORT:-47445}" --user gnode_daemon "$@"
     else
         log_error "Daemon password file not found: $daemon_pass_file"
         return 1
@@ -344,8 +356,7 @@ elif [[ "$PASSWORD_EXISTS" == "true" && "$ACL_EXISTS" == "false" ]]; then
     if [[ "$DRY_RUN" == "true" ]]; then
         log_dry "ACL SETUSER $ACL_USER on resetpass >*** (using existing password)"
     else
-        REDISCLI_AUTH="$(cat "$VALKEY_ADMIN_PASSWORD_FILE")" \
-            valkey-cli -p "${VALKEY_PORT:-47445}" <<EOF >/dev/null
+        valkey_admin_cli <<EOF >/dev/null
 ACL SETUSER $ACL_USER on resetpass >$PASSWORD
 EOF
         # Set keyspace patterns
@@ -406,8 +417,7 @@ else
         log_success "Password stored: $PASSWORD_FILE (group ${CRED_GROUP})"
 
         # Create ACL user
-        REDISCLI_AUTH="$(cat "$VALKEY_ADMIN_PASSWORD_FILE")" \
-            valkey-cli -p "${VALKEY_PORT:-47445}" <<EOF >/dev/null
+        valkey_admin_cli <<EOF >/dev/null
 ACL SETUSER $ACL_USER on resetpass >$PASSWORD
 EOF
         # Set keyspace patterns
@@ -681,7 +691,7 @@ if [[ "$DRY_RUN" != "true" ]]; then
     echo ""
     echo -e "${BOLD}Verification commands:${NC}"
     echo "  # Test ACL authentication"
-    echo "  REDISCLI_AUTH=\"\$(cat $PASSWORD_FILE)\" valkey-cli -p ${VALKEY_PORT:-47445} --user $ACL_USER PING"
+    echo "  REDISCLI_AUTH=\"\$(cat $PASSWORD_FILE)\" valkey-cli -h $(valkey_target_host) -p ${VALKEY_PORT:-47445} --user $ACL_USER PING"
     echo ""
     echo "  # Check site registry"
     echo "  $VALKEY_CLI SISMEMBER gnode:sites:registry $SITE_ID"
