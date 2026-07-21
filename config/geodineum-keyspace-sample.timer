@@ -1,0 +1,21 @@
+[Unit]
+Description=Hourly ValKey keyspace footprint sample
+Documentation=file:/opt/geodineum/gNode/scripts/keyspace-footprint.sh
+
+[Timer]
+# Hourly, because the point is coverage across days rather than depth in any
+# one window. A 60s sample every hour costs ~1.7% of wall clock under MONITOR
+# and still catches the paths a single window never sees.
+OnCalendar=hourly
+
+# Spread across the hour so every node in a constellation does not sample the
+# master simultaneously, and so samples land at varying points in periodic
+# workloads instead of always missing the same ones.
+RandomizedDelaySec=1800
+
+# Catch up after downtime: a node that was off should still contribute a
+# sample rather than silently leaving a gap in the profile.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

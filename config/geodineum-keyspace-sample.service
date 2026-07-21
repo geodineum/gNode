@@ -1,0 +1,32 @@
+[Unit]
+Description=Sample the ValKey keyspace footprint of this node
+Documentation=file:/opt/geodineum/gNode/scripts/keyspace-footprint.sh
+After=network-online.target
+# Nothing to sample if ValKey is unreachable; the timer will try again.
+ConditionPathExists=/etc/geodineum/bootstrap.env
+
+[Service]
+Type=oneshot
+User=root
+# Root is required to read the ValKey admin credential (0640 root-owned).
+# MONITOR is admin-only; there is no lesser credential that can observe.
+ExecStart=/opt/geodineum/gNode/scripts/keyspace-footprint.sh sample 60
+
+# MONITOR costs throughput on the instance being sampled. Keep this process
+# cheap and de-prioritised so the sampler never competes with the workload
+# it is measuring.
+Nice=10
+IOSchedulingClass=idle
+CPUWeight=20
+
+# The profile is the only thing this writes.
+ReadWritePaths=/var/lib/geodineum
+StateDirectory=geodineum
+StateDirectoryMode=0700
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+NoNewPrivileges=true
+
+# A sample must never outlive its window.
+TimeoutStartSec=180
