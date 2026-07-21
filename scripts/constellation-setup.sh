@@ -772,12 +772,14 @@ expand_node() {
         # Unquoted on purpose: the rule file holds whitespace-separated ACL
         # tokens that must arrive as separate arguments.
         # shellcheck disable=SC2046
-        if REDISCLI_AUTH="$(cat "$admin_pwfile")" valkey-cli -p "${VALKEY_PORT:-47445}" \
-            ACL SETUSER "$node_user" resetpass ">${node_pw}" $(cat "$acl_rule_file") >/dev/null 2>&1; then
+        # valkey-cli exits 0 on server errors, so match the reply, not $?.
+        _acl_out="$(REDISCLI_AUTH="$(cat "$admin_pwfile")" valkey-cli -p "${VALKEY_PORT:-47445}" \
+            ACL SETUSER "$node_user" resetpass ">${node_pw}" $(cat "$acl_rule_file") 2>&1)"
+        if [[ "$_acl_out" == "OK" ]]; then
             REDISCLI_AUTH="$(cat "$admin_pwfile")" valkey-cli -p "${VALKEY_PORT:-47445}" ACL SAVE >/dev/null 2>&1 || true
             log_success "Minted per-node ValKey identity: ${node_user}"
         else
-            log_warning "Could not mint ${node_user} — the worker will fall back to the shared gnode_daemon login."
+            log_warning "Could not mint ${node_user} (server said: ${_acl_out}) — the worker will fall back to the shared gnode_daemon login."
             node_pw=""
         fi
     else

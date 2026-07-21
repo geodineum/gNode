@@ -65,9 +65,14 @@ NODE_PW="$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)"
 
 # Unquoted on purpose: the rule file holds whitespace-separated ACL tokens
 # that must arrive as separate arguments.
+# valkey-cli exits 0 even when the server rejects the command, so the reply
+# is checked rather than the exit status.
 # shellcheck disable=SC2046
-if ! vk ACL SETUSER "$USER_NAME" resetpass ">${NODE_PW}" $(cat "$RULE_FILE") >/dev/null; then
-    echo "FATAL: ACL SETUSER ${USER_NAME} failed." >&2
+SETOUT="$(vk ACL SETUSER "$USER_NAME" resetpass ">${NODE_PW}" $(cat "$RULE_FILE") 2>&1)"
+if [ "$SETOUT" != "OK" ]; then
+    echo "FATAL: ACL SETUSER ${USER_NAME} rejected by the server:" >&2
+    echo "       ${SETOUT}" >&2
+    echo "       Grant used: $(cat "$RULE_FILE")" >&2
     exit 1
 fi
 vk ACL SAVE >/dev/null 2>&1 || true
