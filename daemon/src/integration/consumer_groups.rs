@@ -2076,12 +2076,12 @@ fn filter_commands_by_node_type(
     Vec<String>,
     Vec<String>
 ) {
-    // Get routing config from cache (populated during daemon startup)
-    let routing_config = crate::routing_config::get_cached_routing_config(node_type);
+    // node_type is an exposure SPEC: a comma-separated set of routing configs
+    // whose work this node accepts. An entry is processed if any member would.
+    let exposure = crate::routing_config::ExposureSet::parse(node_type);
 
     if debug_mode {
-        debug!("Using routing config for node_type '{}': mode={:?}, hints={:?}",
-            node_type, routing_config.routing.mode, routing_config.routing.group_hints);
+        debug!("Filtering with exposure '{}' ({} member(s))", exposure.spec(), exposure.len());
     }
 
     let mut to_process = Vec::new();
@@ -2096,7 +2096,7 @@ fn filter_commands_by_node_type(
         let group_hint = cmd.group_hint.as_deref();
 
         // Use the dynamic routing config to determine if we should process this message
-        let should_process = routing_config.should_process_message(group_hint);
+        let should_process = exposure.should_process_message(group_hint);
 
         if should_process {
             to_process.push((id.clone(), cmd.clone()));
@@ -2151,7 +2151,9 @@ fn reclaim_exposed_pending_messages(
     min_idle_ms: u64,
     debug_mode: bool
 ) -> IntegrationResult<usize> {
-    let routing_config = crate::routing_config::get_cached_routing_config(node_type);
+    // Reclaim honours the same exposure set as delivery, so a node never
+    // reclaims work it would not accept in the first place.
+    let exposure = crate::routing_config::ExposureSet::parse(node_type);
 
     // READ ONLY: which entries are idle past the threshold, and who holds them.
     let pending: redis::RedisResult<Vec<(String, String, u64, u64)>> = redis::cmd("XPENDING")
@@ -2203,7 +2205,7 @@ fn reclaim_exposed_pending_messages(
 
         let gh_value = fields.iter().find(|(k, _)| k == "_gh").map(|(_, v)| v.as_str());
 
-        if routing_config.should_process_message(gh_value) {
+        if exposure.should_process_message(gh_value) {
             claimable.push(msg_id.clone());
         } else {
             skipped_unexposed += 1;

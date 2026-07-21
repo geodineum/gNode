@@ -38,7 +38,11 @@ WorkingDirectory=/opt/geodineum/gNode
 #                     daemon.env (the installer sets it to the host's name on a
 #                     constellation join); defaults to "master" for the
 #                     master/standalone node.
-#                     --node-type general processes all non-specialized messages
+#                     --node-type is this node.s EXPOSURE: a comma-separated set
+#                     of work classes it will process (an entry matches if any
+#                     member covers its _gh hint). Read from GNODE_NODE_TYPE in
+#                     daemon.env; defaults to "general". Manage with:
+#                       geodineum node expose <hint[,hint...]>
 # Tuning parameters (dimensions, batch sizes, etc.) are read from .env GNODE_* vars
 # Node config path fallback chain (auto-detected):
 #   1. --node-config-dir flag (if provided)
@@ -69,7 +73,7 @@ ExecStart=/bin/bash -c '\
   export GNODE_REDIS_AUTH="$(cat $PASS_FILE)"; \
   exec ${GNODE_DAEMON_BIN:-/opt/geodineum/gNode/daemon/target/release/gnode-daemon} \
   --node-id "${GNODE_NODE_ID:-master}" \
-  --node-type general \
+  --node-type "${GNODE_NODE_TYPE:-general}" \
   start'
 
 # Health check via built-in status command (daemon self-loads connection params)

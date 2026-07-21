@@ -401,6 +401,57 @@ pub fn get_cached_routing_config(node_type: &str) -> RoutingConfig {
     }
 }
 
+/// A node's EXPOSURE: the set of routing configs whose work it is willing to do.
+///
+/// `node_type` was a single string, so a node could serve exactly one class of
+/// work. A real participant is often willing to do several — a laptop that
+/// offers both `inference` and `sync`, say. Exposure is that set, parsed from a
+/// comma-separated `node_type` (`"inference,sync"`), and an entry is processed
+/// if ANY member would process it. The union is the correct rule: adding an
+/// exposure only ever widens what a node accepts, never narrows it.
+///
+/// A single, unqualified type (`"general"`) parses to a one-member set and
+/// behaves exactly as before — this is a superset of the old semantics.
+pub struct ExposureSet {
+    members: Vec<RoutingConfig>,
+    /// The spec as given, for logging.
+    spec: String,
+}
+
+impl ExposureSet {
+    /// Parse a comma-separated exposure spec into its member routing configs.
+    /// Whitespace and empty segments are ignored; an empty spec falls back to
+    /// `general`, never to "expose to nothing".
+    pub fn parse(spec: &str) -> Self {
+        let mut members: Vec<RoutingConfig> = spec
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(get_cached_routing_config)
+            .collect();
+        if members.is_empty() {
+            members.push(get_cached_routing_config("general"));
+        }
+        ExposureSet { members, spec: spec.to_string() }
+    }
+
+    /// Process an entry if ANY exposure would. Union, never intersection:
+    /// exposure is opt-in, so more exposures means more accepted, not less.
+    pub fn should_process_message(&self, group_hint: Option<&str>) -> bool {
+        self.members.iter().any(|c| c.should_process_message(group_hint))
+    }
+
+    /// True when this is a single-member set naming exactly `node_type` — used
+    /// to keep single-type log lines unchanged.
+    pub fn is_single(&self, node_type: &str) -> bool {
+        self.members.len() == 1 && self.spec.trim() == node_type
+    }
+
+    pub fn spec(&self) -> &str { &self.spec }
+    pub fn len(&self) -> usize { self.members.len() }
+    pub fn is_empty(&self) -> bool { self.members.is_empty() }
+}
+
 /// Pre-load routing config into cache (call during daemon startup)
 pub fn cache_routing_config(config: RoutingConfig) {
     let cache = get_routing_cache();
@@ -443,10 +494,13 @@ pub fn initialize_routing_configs(
                     cache_routing_config(config.clone());
                 }
 
-                // Return the config for this node type
+                // node_type may be a set spec ("inference,sync"); every member is
+                // now cached above. Return the first member's config for the
+                // caller's log line — the cache, not this value, drives routing.
+                let first = node_type.split(',').map(|s| s.trim()).find(|s| !s.is_empty()).unwrap_or("general");
                 return configs.into_iter()
-                    .find(|c| c.node_type == node_type)
-                    .ok_or_else(|| format!("No config found for node_type '{}'", node_type));
+                    .find(|c| c.node_type == first)
+                    .ok_or_else(|| format!("No config found for node_type '{}'", first));
             }
         }
 
@@ -463,30 +517,101 @@ pub fn initialize_routing_configs(
             cache_routing_config(config.clone());
         }
 
+        let first = node_type.split(',').map(|s| s.trim()).find(|s| !s.is_empty()).unwrap_or("general");
         defaults.into_iter()
-            .find(|c| c.node_type == node_type)
-            .ok_or_else(|| format!("No default config for node_type '{}'", node_type))
+            .find(|c| c.node_type == first)
+            .ok_or_else(|| format!("No default config for node_type '{}'", first))
     } else {
-        // Worker node: Fetch from ValKey
-        match get_routing_config(conn, node_type) {
-            Ok(config) => Ok(config),
-            Err(e) => {
-                warn!("Failed to fetch routing config from ValKey: {}. Using default.", e);
-                let config = match node_type {
-                    "inference" => RoutingConfig::default_inference(),
-                    "all" => RoutingConfig::default_all(),
-                    _ => RoutingConfig::default_general(),
-                };
-                cache_routing_config(config.clone());
-                Ok(config)
+        // Worker node: fetch every member of the exposure spec from ValKey and
+        // cache each. A worker exposed to "inference,sync" needs both configs
+        // present, not a single lookup of the literal spec string.
+        let members: Vec<&str> = {
+            let m: Vec<&str> = node_type.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            if m.is_empty() { vec!["general"] } else { m }
+        };
+
+        let mut first_config: Option<RoutingConfig> = None;
+        for member in &members {
+            let config = match get_routing_config(conn, member) {
+                Ok(config) => config,
+                Err(e) => {
+                    warn!("Failed to fetch routing config for '{}' from ValKey: {}. Using default.", member, e);
+                    match *member {
+                        "inference" => RoutingConfig::default_inference(),
+                        "all" => RoutingConfig::default_all(),
+                        _ => RoutingConfig::default_general(),
+                    }
+                }
+            };
+            cache_routing_config(config.clone());
+            if first_config.is_none() {
+                first_config = Some(config);
             }
         }
+        // First member's config is returned for the caller's log line only;
+        // routing reads the cache, where every member now lives.
+        Ok(first_config.unwrap_or_else(RoutingConfig::default_general))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ExposureSet caches configs by name via get_cached_routing_config, which
+    // falls back to hardcoded defaults when the cache is empty — so these tests
+    // exercise the union logic against the built-in general/inference/all
+    // defaults without needing a populated cache.
+    #[test]
+    fn test_exposure_single_general_matches_legacy() {
+        let e = ExposureSet::parse("general");
+        assert!(e.should_process_message(None));            // untagged -> yes
+        assert!(e.should_process_message(Some("")));        // untagged -> yes
+        assert!(e.should_process_message(Some("report")));  // non-special -> yes
+        assert!(!e.should_process_message(Some("inference"))); // excluded
+    }
+
+    #[test]
+    fn test_exposure_union_general_plus_inference_is_effectively_all() {
+        // general excludes inference; add inference back and the node accepts both.
+        let e = ExposureSet::parse("general,inference");
+        assert!(e.should_process_message(Some("inference"))); // via inference member
+        assert!(e.should_process_message(Some("report")));    // via general member
+        assert!(e.should_process_message(None));              // via general member
+        assert_eq!(e.len(), 2);
+    }
+
+    #[test]
+    fn test_exposure_two_inclusive_types_or_together() {
+        // A node exposed only to inference processes inference and nothing untagged.
+        let only_inf = ExposureSet::parse("inference");
+        assert!(only_inf.should_process_message(Some("inference")));
+        assert!(!only_inf.should_process_message(None));
+        assert!(!only_inf.should_process_message(Some("report")));
+    }
+
+    #[test]
+    fn test_exposure_whitespace_and_empty_segments() {
+        let e = ExposureSet::parse("  inference , , general ,");
+        assert_eq!(e.len(), 2);
+        assert!(e.should_process_message(Some("inference")));
+        assert!(e.should_process_message(Some("report")));
+    }
+
+    #[test]
+    fn test_exposure_empty_spec_falls_back_to_general_not_nothing() {
+        let e = ExposureSet::parse("");
+        assert_eq!(e.len(), 1);
+        // Must accept ordinary work, never silently expose to nothing.
+        assert!(e.should_process_message(None));
+        assert!(e.should_process_message(Some("report")));
+    }
+
+    #[test]
+    fn test_exposure_is_single() {
+        assert!(ExposureSet::parse("general").is_single("general"));
+        assert!(!ExposureSet::parse("general,inference").is_single("general"));
+    }
 
     #[test]
     fn test_routing_config_include_mode() {
