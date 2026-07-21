@@ -1,6 +1,6 @@
 [package]
 name = "gnode-daemon"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["gCore Team"]
 description = "gNode - Geodineum Service Daemon for capability-based service discovery"

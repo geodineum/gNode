@@ -263,6 +263,7 @@ mod tests {
 
     #[test]
     fn test_find_function_file() {
+        let _env = crate::test_env_guard();
         // Test with non-existent directory
         assert!(find_function_file("test", false).is_none());
 
@@ -291,6 +292,7 @@ mod tests {
 
     #[test]
     fn test_path_normalization() {
+        let _env = crate::test_env_guard();
         let dir = tempdir().unwrap();
         let file_path = dir.path().join("gnode_core.lua");
 

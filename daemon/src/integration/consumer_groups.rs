@@ -5,6 +5,21 @@
 //! stream processing methods by eliminating polling and providing efficient message
 //! distribution across consumers.
 //!
+//! ## Orphan recovery and consumer lifetime
+//!
+//! Ownership of a stream entry lives in the group's Pending Entries List until it
+//! is acknowledged. A consumer that stops without acknowledging leaves the entry
+//! owned by a name that will never return, and ValKey does not redeliver it. So
+//! recovery is a liveness property every node must perform, and consumers must be
+//! removed once they are gone — otherwise group metadata grows with every
+//! reconnection of an intermittent participant.
+//!
+//! Two rules keep recovery from causing what it prevents:
+//!   * inspect before claiming — ownership must not move for work this node will
+//!     not perform, so pending entries are read first and only exposed ones claimed
+//!   * never remove a consumer holding pending entries — DELCONSUMER discards
+//!     them, turning a stuck entry into a lost one
+//!
 //! The module has three layers of functionality:
 //! 1. Core consumer group operations (create, read, ack, etc.)
 //! 2. High-level batch processing utilities
@@ -21,6 +36,26 @@ use crate::integration::{
 };
 use crate::config::GNodeSettings;
 use crate::daemon::GNodeDaemon;
+
+
+/// How often a node looks for entries whose owner stopped.
+const RECLAIM_INTERVAL_MS: u64 = 5_000;
+
+/// How long an entry must be idle before it is treated as orphaned. Must exceed
+/// the slowest legitimate processing time: reclaim below it steals live work and
+/// the entry runs twice.
+const RECLAIM_MIN_IDLE_MS: u64 = 30_000;
+
+/// Entries reclaimed per pass. Bounded so recovery cannot monopolise a cycle.
+const RECLAIM_BATCH: usize = 10;
+
+/// How often stale consumers are swept. Bookkeeping, not liveness, so far less
+/// frequent than reclaim.
+const REAP_INTERVAL_MS: u64 = 300_000;
+
+/// Idle time after which a consumer holding nothing is considered gone. Well
+/// beyond any normal quiet period, so a merely idle node is never reaped.
+const REAP_IDLE_MS: u64 = 3_600_000;
 
 /// State for a consumer group processor
 #[derive(Clone, Debug)]
@@ -1272,9 +1307,10 @@ pub fn create_environment_stream_worker_dynamic(
         // Track initialization status
         let mut initialization_completed = false;
 
-        // Track last XCLAIM attempt for inference nodes
+        // Orphan recovery cadence. Every node reclaims; see the call site below.
         let mut last_xclaim_check = Instant::now();
-        let xclaim_interval_ms = 5000; // Check for unclaimed inference messages every 5 seconds
+        let xclaim_interval_ms = RECLAIM_INTERVAL_MS;
+        let mut last_reap_check = Instant::now();
 
         // Track last staleness check for service topology entities
         let mut last_staleness_check = Instant::now();
@@ -1421,26 +1457,49 @@ pub fn create_environment_stream_worker_dynamic(
                         }
                     };
 
-                    // For specialized nodes (not "general" or "all"): Periodically check for pending messages to claim
-                    // This handles inference, gpu_compute, or any custom node type defined in routing config
-                    if node_type_owned != "general" && node_type_owned != "all" && last_xclaim_check.elapsed().as_millis() as u64 >= xclaim_interval_ms {
+                    // Orphan recovery runs on EVERY node. An entry whose owner
+                    // stopped is not redelivered on its own, so if no live node
+                    // reclaims it the request is silently swallowed and the caller
+                    // waits forever. This was previously gated to specialised node
+                    // types, which meant a constellation of default "general" nodes
+                    // performed no recovery at all.
+                    //
+                    // Each node only reclaims what its exposure covers, so widening
+                    // this does not let a node take work it may not process.
+                    if last_xclaim_check.elapsed().as_millis() as u64 >= xclaim_interval_ms {
                         last_xclaim_check = Instant::now();
-                        // Check all unified streams for pending specialized messages
                         for stream_key in &active_unified_streams {
-                            if let Ok(claimed) = claim_pending_specialized_messages(
+                            if let Ok(claimed) = reclaim_exposed_pending_messages(
                                 &mut conn,
                                 stream_key,
                                 consumer_group,
                                 &consumer_name,
                                 &node_type_owned,
-                                10, // claim up to 10 messages
-                                30000, // messages idle for 30+ seconds
+                                RECLAIM_BATCH,
+                                RECLAIM_MIN_IDLE_MS,
                                 debug_mode
                             ) {
                                 if claimed > 0 {
-                                    info!("Specialized node '{}' claimed {} pending messages from {}", node_type_owned, claimed, stream_key);
+                                    info!("Node '{}' reclaimed {} orphaned entries from {}", node_type_owned, claimed, stream_key);
                                 }
                             }
+                        }
+                    }
+
+                    // Consumers accumulate with every reconnection of an
+                    // intermittent node; nothing else removes them. Swept far less
+                    // often than reclaim because it is bookkeeping, not liveness.
+                    if last_reap_check.elapsed().as_millis() as u64 >= REAP_INTERVAL_MS {
+                        last_reap_check = Instant::now();
+                        for stream_key in &active_unified_streams {
+                            let _ = reap_stale_consumers(
+                                &mut conn,
+                                stream_key,
+                                consumer_group,
+                                &consumer_name,
+                                REAP_IDLE_MS,
+                                debug_mode
+                            );
                         }
                     }
 
@@ -1966,8 +2025,33 @@ pub fn create_environment_stream_worker_dynamic(
                 }
             }
         }
-        // Log shutdown message when loop exits
+        // Depart cleanly: remove this consumer from every group it joined, so the
+        // group reflects live participants rather than every connection ever made.
+        // Only safe when nothing is pending — DELCONSUMER discards pending entries,
+        // and an entry discarded here is one no reclaim can ever recover. Anything
+        // still held is left for another node to reclaim once it goes idle.
         info!("Environment stream worker shutting down (node: {}, type: {})", node_id_owned, node_type_owned);
+        if let Ok(mut conn) = connection_manager::get_connection() {
+            let mut departed = 0usize;
+            let mut retained = 0usize;
+            for stream_key in &active_unified_streams {
+                let pending: redis::RedisResult<i64> = redis::cmd("XGROUP")
+                    .arg("DELCONSUMER").arg(stream_key).arg(consumer_group).arg(&consumer_name)
+                    .query(&mut conn);
+                match pending {
+                    Ok(0) => departed += 1,
+                    Ok(n) => {
+                        retained += 1;
+                        warn!("Departed {} holding {} pending entries — they were discarded; \
+                               another node cannot reclaim what no longer exists", stream_key, n);
+                    },
+                    Err(_) => {}
+                }
+            }
+            if departed > 0 || retained > 0 {
+                info!("Consumer {} removed from {} stream group(s)", consumer_name, departed + retained);
+            }
+        }
     });
 
     Ok(handle)
@@ -2043,7 +2127,21 @@ fn filter_commands_by_node_type(
 /// The function uses the node's routing config to determine which group_hints
 /// to look for when claiming messages.
 #[allow(clippy::too_many_arguments, clippy::type_complexity)]
-fn claim_pending_specialized_messages(
+/// Reclaim pending entries whose owner stopped, restricted to this node's exposure.
+///
+/// An entry taken by `XREADGROUP` stays owned by that consumer until acknowledged.
+/// If the consumer disappears — process killed, host slept, network dropped — the
+/// entry is never redelivered on its own. Recovering it is a liveness property of
+/// every node, not a feature of specialised ones.
+///
+/// Ownership is inspected BEFORE it is transferred. `XAUTOCLAIM` moves ownership of
+/// everything it returns, so filtering afterwards leaves this consumer holding work
+/// it will not perform, which is worse than not reclaiming at all. Here `XPENDING`
+/// and `XRANGE` are reads; only entries this node is exposed to are then `XCLAIM`ed.
+///
+/// `min_idle_ms` must exceed the slowest legitimate processing time, or reclaim
+/// steals entries that are still being worked on and they run twice.
+fn reclaim_exposed_pending_messages(
     conn: &mut redis::Connection,
     stream_key: &str,
     group_name: &str,
@@ -2053,52 +2151,184 @@ fn claim_pending_specialized_messages(
     min_idle_ms: u64,
     debug_mode: bool
 ) -> IntegrationResult<usize> {
-    // Get the routing config to know which group_hints we're looking for
     let routing_config = crate::routing_config::get_cached_routing_config(node_type);
 
-    // Use XAUTOCLAIM to claim idle messages
-    // XAUTOCLAIM stream group consumer min-idle-time start [COUNT count]
-    let result: redis::RedisResult<(String, Vec<(String, Vec<(String, String)>)>, Vec<String>)> = redis::cmd("XAUTOCLAIM")
+    // READ ONLY: which entries are idle past the threshold, and who holds them.
+    let pending: redis::RedisResult<Vec<(String, String, u64, u64)>> = redis::cmd("XPENDING")
         .arg(stream_key)
         .arg(group_name)
-        .arg(consumer_name)
+        .arg("IDLE")
         .arg(min_idle_ms)
-        .arg("0-0") // Start from beginning
-        .arg("COUNT")
+        .arg("-")
+        .arg("+")
         .arg(max_count)
         .query(conn);
 
-    match result {
-        Ok((_, messages, _deleted)) => {
-            let mut claimed_matching = 0;
-
-            // Filter and count only messages matching our routing config
-            for (_msg_id, fields) in &messages {
-                // Extract the _gh field value
-                let gh_value = fields.iter()
-                    .find(|(k, _)| k == "_gh")
-                    .map(|(_, v)| v.as_str());
-
-                // Check if this message should be processed by our node type
-                if routing_config.should_process_message(gh_value) {
-                    claimed_matching += 1;
-                }
+    let pending = match pending {
+        Ok(p) if !p.is_empty() => p,
+        Ok(_) => return Ok(0),
+        Err(e) => {
+            if debug_mode {
+                debug!("XPENDING on {} returned error (normal when the group is new): {}", stream_key, e);
             }
+            return Ok(0);
+        }
+    };
 
-            if debug_mode && claimed_matching > 0 {
-                debug!("XAUTOCLAIM found {} pending messages, {} match node_type '{}' routing",
-                    messages.len(), claimed_matching, node_type);
+    // READ ONLY: inspect each entry's routing hint before deciding to take it.
+    let mut claimable: Vec<String> = Vec::new();
+    let mut skipped_unexposed = 0usize;
+    for (msg_id, owner, idle_ms, _delivered) in &pending {
+        // Our own in-flight entries are not orphans.
+        if owner == consumer_name {
+            continue;
+        }
+
+        let entry: redis::RedisResult<Vec<(String, Vec<(String, String)>)>> = redis::cmd("XRANGE")
+            .arg(stream_key)
+            .arg(msg_id)
+            .arg(msg_id)
+            .query(conn);
+
+        let fields = match entry {
+            Ok(rows) => match rows.into_iter().next() {
+                Some((_, f)) => f,
+                // Entry gone from the stream (trimmed) but still in the PEL: the
+                // owner can never complete it. Claiming would inherit a phantom, so
+                // leave it for the group's own bookkeeping.
+                None => continue,
+            },
+            Err(_) => continue,
+        };
+
+        let gh_value = fields.iter().find(|(k, _)| k == "_gh").map(|(_, v)| v.as_str());
+
+        if routing_config.should_process_message(gh_value) {
+            claimable.push(msg_id.clone());
+        } else {
+            skipped_unexposed += 1;
+            if debug_mode {
+                debug!("Leaving {} (hint {:?}, idle {}ms) — outside this node's exposure",
+                    msg_id, gh_value, idle_ms);
             }
+        }
+    }
 
-            Ok(claimed_matching)
+    if skipped_unexposed > 0 && debug_mode {
+        debug!("{} orphaned entries on {} left for an exposed node", skipped_unexposed, stream_key);
+    }
+
+    if claimable.is_empty() {
+        return Ok(0);
+    }
+
+    // Ownership moves only now, and only for entries this node will process.
+    let mut claim = redis::cmd("XCLAIM");
+    claim.arg(stream_key).arg(group_name).arg(consumer_name).arg(min_idle_ms);
+    for id in &claimable {
+        claim.arg(id);
+    }
+    let claimed: redis::RedisResult<Vec<(String, Vec<(String, String)>)>> = claim.query(conn);
+
+    match claimed {
+        Ok(rows) => {
+            if !rows.is_empty() {
+                info!("Reclaimed {} orphaned entries from {} (idle >= {}ms)",
+                    rows.len(), stream_key, min_idle_ms);
+            }
+            Ok(rows.len())
         },
         Err(e) => {
             if debug_mode {
-                debug!("XAUTOCLAIM returned error (may be normal if no pending messages): {}", e);
+                debug!("XCLAIM on {} failed: {}", stream_key, e);
             }
             Ok(0)
         }
     }
+}
+
+/// Remove consumers that stopped and left nothing behind.
+///
+/// Every reconnection of an intermittent node can create a consumer, and nothing
+/// removes them, so group metadata grows with historical connections rather than
+/// live participants.
+///
+/// A consumer holding pending entries is never removed: `DELCONSUMER` discards
+/// those entries, turning "stuck" into "lost". Reclaim empties a consumer first;
+/// this only sweeps what is already empty.
+fn reap_stale_consumers(
+    conn: &mut redis::Connection,
+    stream_key: &str,
+    group_name: &str,
+    self_consumer: &str,
+    idle_threshold_ms: u64,
+    debug_mode: bool
+) -> IntegrationResult<usize> {
+    let consumers: redis::RedisResult<Vec<std::collections::HashMap<String, redis::Value>>> =
+        redis::cmd("XINFO").arg("CONSUMERS").arg(stream_key).arg(group_name).query(conn);
+
+    let consumers = match consumers {
+        Ok(c) => c,
+        Err(e) => {
+            if debug_mode {
+                debug!("XINFO CONSUMERS on {} failed: {}", stream_key, e);
+            }
+            return Ok(0);
+        }
+    };
+
+    let as_string = |v: &redis::Value| -> Option<String> {
+        match v {
+            redis::Value::BulkString(b) => String::from_utf8(b.clone()).ok(),
+            redis::Value::SimpleString(s) => Some(s.clone()),
+            _ => None,
+        }
+    };
+    let as_u64 = |v: &redis::Value| -> Option<u64> {
+        match v {
+            redis::Value::Int(i) => Some(*i as u64),
+            other => as_string(other).and_then(|s| s.parse().ok()),
+        }
+    };
+
+    let mut removed = 0usize;
+    for c in &consumers {
+        let name = match c.get("name").and_then(as_string) {
+            Some(n) => n,
+            None => continue,
+        };
+        // Never reap ourselves, however idle this stream happens to be.
+        if name == self_consumer {
+            continue;
+        }
+        let pending = c.get("pending").and_then(as_u64).unwrap_or(1);
+        let idle = c.get("idle").and_then(as_u64).unwrap_or(0);
+
+        if pending == 0 && idle >= idle_threshold_ms {
+            let res: redis::RedisResult<i64> = redis::cmd("XGROUP")
+                .arg("DELCONSUMER").arg(stream_key).arg(group_name).arg(&name)
+                .query(conn);
+            if let Ok(discarded) = res {
+                // Belt and braces: XINFO said zero pending, so this must be zero.
+                // If it is not, the consumer became active between the two calls
+                // and we have just discarded live work — say so loudly.
+                if discarded > 0 {
+                    warn!("DELCONSUMER {} on {} discarded {} pending entries — it became active mid-sweep",
+                        name, stream_key, discarded);
+                } else {
+                    removed += 1;
+                    if debug_mode {
+                        debug!("Reaped stale consumer {} from {} (idle {}ms)", name, stream_key, idle);
+                    }
+                }
+            }
+        }
+    }
+
+    if removed > 0 {
+        info!("Reaped {} stale consumers from {}", removed, stream_key);
+    }
+    Ok(removed)
 }
 
 /// Acknowledge messages in the unified stream

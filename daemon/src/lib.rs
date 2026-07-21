@@ -2264,3 +2264,21 @@ mod tests {
         assert!((negative_delta - (-0.5)).abs() < 0.0001, "Delta should be approximately -0.5");
     }
 }
+
+/// Serialises tests that mutate process-global environment variables.
+///
+/// `std::env::set_var` affects the whole process, not the calling thread, and
+/// cargo runs tests in parallel threads of one process. Two tests pointing
+/// `GNODE_FUNCTIONS_DIR` at different temp directories therefore read each
+/// other's value — or a removed one — and fail intermittently. Any test that
+/// sets or removes an environment variable must hold this lock.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Acquire `TEST_ENV_LOCK`, ignoring poisoning: a panicking test leaves the
+/// mutex poisoned, and failing every later test for it would hide the original
+/// failure behind a cascade.
+#[cfg(test)]
+pub(crate) fn test_env_guard() -> std::sync::MutexGuard<'static, ()> {
+    TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
