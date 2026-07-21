@@ -31,8 +31,30 @@ VALKEY_PORT="${VALKEY_PORT:-47445}"
 # Default to client for most operations
 VALKEY_USER="${VALKEY_USER:-gnode_client}"
 
+# Resolve the DAEMON TIER to this node's own identity.
+#
+# `gnode_daemon` names a privilege tier, not a login. Where the master has
+# minted this node its own user (constellation expand, bundle V2), that user
+# IS the daemon tier here and every caller asking for gnode_daemon means it.
+# Resolving centrally keeps ~56 call sites across the ecosystem correct
+# without any of them knowing a node identity exists.
+#
+# Falls through untouched when no identity was minted: masters, pre-V2 joins,
+# and standalone installs all keep authenticating as the shared login.
+NODE_IDENTITY_ENV="/etc/geodineum/components/gnode-daemon/node-identity.env"
+if [ "$VALKEY_USER" = "gnode_daemon" ] && [ -r "$NODE_IDENTITY_ENV" ]; then
+    # shellcheck disable=SC1090
+    . "$NODE_IDENTITY_ENV"
+    if [ -n "${VALKEY_NODE_USER:-}" ] && [ -r "${CENTRALIZED_CREDS}/valkey_node.password" ]; then
+        VALKEY_USER="$VALKEY_NODE_USER"
+        VALKEY_NODE_IDENTITY_RESOLVED="valkey_node.password"
+    fi
+fi
+
 # Determine password filename based on user
-if [ "$VALKEY_USER" = "gnode_daemon" ]; then
+if [ -n "${VALKEY_NODE_IDENTITY_RESOLVED:-}" ]; then
+    PASSWORD_FILENAME="$VALKEY_NODE_IDENTITY_RESOLVED"
+elif [ "$VALKEY_USER" = "gnode_daemon" ]; then
     PASSWORD_FILENAME="valkey_daemon.password"
 elif [ "$VALKEY_USER" = "gnode_client" ]; then
     PASSWORD_FILENAME="valkey_client.password"

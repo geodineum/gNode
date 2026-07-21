@@ -523,6 +523,34 @@ if [ -n "${GNODE_NODE_ID:-}" ] && [ -f "$DAEMON_ENV_DST" ]; then
     echo "✓ Node ID set to '${GNODE_NODE_ID}' in daemon.env"
 fi
 
+# Per-node ValKey identity: point daemon.env at this node's own user where the
+# master minted one (constellation expand, bundle V2). daemon.env ships with
+# the shared gnode_daemon login, which is correct for a master or a standalone
+# install and correct as a fallback for a pre-V2 join.
+#
+# Both keys move together on purpose: the username and the password file are
+# one credential, and setting one without the other is an auth failure at the
+# next restart, not a degraded mode.
+NODE_IDENTITY_ENV="/etc/geodineum/components/gnode-daemon/node-identity.env"
+NODE_PW_FILE="/etc/geodineum/credentials/valkey_node.password"
+if [ -r "$NODE_IDENTITY_ENV" ] && [ -r "$NODE_PW_FILE" ] && [ -f "$DAEMON_ENV_DST" ]; then
+    # shellcheck disable=SC1090
+    . "$NODE_IDENTITY_ENV"
+    if [ -n "${VALKEY_NODE_USER:-}" ]; then
+        if grep -qE '^VALKEY_USER=' "$DAEMON_ENV_DST"; then
+            sed -i "s|^VALKEY_USER=.*|VALKEY_USER=\"${VALKEY_NODE_USER}\"|" "$DAEMON_ENV_DST"
+        else
+            echo "VALKEY_USER=\"${VALKEY_NODE_USER}\"" >> "$DAEMON_ENV_DST"
+        fi
+        if grep -qE '^VALKEY_PASSWORD_FILE=' "$DAEMON_ENV_DST"; then
+            sed -i "s|^VALKEY_PASSWORD_FILE=.*|VALKEY_PASSWORD_FILE=\"${NODE_PW_FILE}\"|" "$DAEMON_ENV_DST"
+        else
+            echo "VALKEY_PASSWORD_FILE=\"${NODE_PW_FILE}\"" >> "$DAEMON_ENV_DST"
+        fi
+        echo "✓ Daemon authenticates as per-node identity '${VALKEY_NODE_USER}'"
+    fi
+fi
+
 # Reload systemd
 echo "Reloading systemd daemon..."
 systemctl daemon-reload
