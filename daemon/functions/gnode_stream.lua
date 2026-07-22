@@ -13,7 +13,11 @@
   while adding ValKey compatibility enhancements and RESP3 optimizations.
   
   Usage:
-  - GNODE_STREAM_ADD(stream_key, entry_data_json, site_id, max_len)
+  - GNODE_STREAM_ADD(stream_key, request_id, command, parameters, [site_id], [node_id], [timestamp])
+      Emits both 'command'/'parameters' and 'cmd'/'params' for the same values;
+      consumers disagree on the spelling and the disagreement fails silently.
+      For caller-defined fields use GNODE_STREAM_ADD_RESP3, which flattens a
+      JSON entry as given: GNODE_STREAM_ADD_RESP3(stream_key, entry_json, site_id, max_len)
   - GNODE_STREAM_CREATE_GROUP(stream_key, group, site_id, start_position)
   - GNODE_STREAM_READ_GROUP(stream_key, group, consumer, site_id, count)
   - GNODE_STREAM_ACK(stream_key, group, message_id, site_id)
@@ -307,20 +311,48 @@ server.register_function{
         local site_id = args[4] or "default"
         local node_id = args[5] or "default"
         local timestamp = args[6] or tostring(server.call('TIME')[1])
-        
-        -- Add the message to the stream
-        local msg_id = server.call('XADD', stream_key, '*', 
+
+        -- Emit BOTH the long ('command'/'parameters') and canonical
+        -- ('cmd'/'params') field names for the same values.
+        --
+        -- WHY: consumers of this stream do not agree on the spelling, and the
+        -- disagreement fails SILENTLY.
+        --
+        --   * The gNode daemon is tolerant — utils.rs field_names accepts
+        --     CMD = c|cmd|command|command_name and PARAMS = p|params|parameters
+        --     — so it reads either form.
+        --   * command_processor.rs (the RESP2 stream path) is strict the OTHER
+        --     way: fields.get("command") / fields.get("parameters") with
+        --     unwrap_or_default(). Dropping the long names would hand it empty
+        --     strings, so they must stay.
+        --   * Strict consumers of the CANONICAL form -- Geodine's
+        --     pipeline_runner.php is the live example -- test
+        --     `empty($fields['cmd'])` to decide whether an entry is a command
+        --     at all. Given only 'command', they classify it as a response or
+        --     metadata, ACK it, and DISCARD it. No error is raised anywhere:
+        --     the sender waits out its timeout and the symptom is
+        --     indistinguishable from the service never having answered.
+        --
+        -- Writing both is additive and costs two field/value pairs per entry.
+        -- Renaming would trade one silent failure for another.
+        --
+        -- Deliberately NOT added here: 't' (message type). Adding it would
+        -- change how the daemon's type dispatch routes these entries, which is
+        -- a behavioural change and not what this fix is for.
+        local msg_id = server.call('XADD', stream_key, '*',
             'id', request_id,
             'command', command,
+            'cmd', command,
             'parameters', parameters,
+            'params', parameters,
             'site_id', site_id,
             'node_id', node_id,
             'timestamp', timestamp
         )
-        
+
         return msg_id
     end,
-    description = 'Adds a message to a stream'
+    description = 'Adds a message to a stream (emits both command/parameters and cmd/params)'
 }
 
 -- Register stream acknowledge function
