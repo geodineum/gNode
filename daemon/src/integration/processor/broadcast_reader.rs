@@ -269,7 +269,7 @@ pub fn trim_broadcast_stream(
 ) -> IntegrationResult<usize> {
     // Calculate cutoff timestamp (current time - retention period)
     let current_time_ms = crate::integration::current_timestamp_ms();
-    let _cutoff_ms = current_time_ms.saturating_sub(retention_seconds * 1000);
+    let cutoff_ms = current_time_ms.saturating_sub(retention_seconds * 1000);
 
     // Get stream length before trim
     let length_before: usize = redis::cmd("XLEN")
@@ -281,19 +281,23 @@ pub fn trim_broadcast_stream(
         return Ok(0);
     }
 
-    // Use XTRIM with MINID to remove messages older than cutoff
-    // MINID was added in Redis 6.2, but we'll use MAXLEN as fallback
-
-    // Strategy: Keep only recent messages based on max length
-    // Estimate: assume 10 messages per second, calculate max messages for retention period
-    let estimated_rate = 10; // messages per second
-    let max_messages = (retention_seconds * estimated_rate).max(1000); // minimum 1000
+    // Trim by AGE, which is what a retention period means.
+    //
+    // This previously converted seconds into a message count using a hardcoded
+    // `estimated_rate = 10` msgs/sec. That made the advertised time semantics a
+    // fiction: at 1 msg/s a 300s request retained 50 minutes, at 100 msg/s it
+    // retained 30 seconds and silently discarded live data. The error was
+    // unbounded in both directions and scaled with how wrong the guess was.
+    //
+    // Stream ids are millisecond timestamps, so MINID expresses the cutoff
+    // directly and needs no rate at all.
+    let cutoff_id = format!("{}-0", cutoff_ms);
 
     let trim_result: RedisResult<usize> = redis::cmd("XTRIM")
         .arg(stream_key)
-        .arg("MAXLEN")
-        .arg("~") // Approximate trim (more efficient)
-        .arg(max_messages)
+        .arg("MINID")
+        .arg("~") // Approximate: trims whole radix nodes, cheaper and adequate
+        .arg(&cutoff_id)
         .query(conn);
 
     match trim_result {

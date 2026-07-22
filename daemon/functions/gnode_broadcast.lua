@@ -179,18 +179,26 @@ server.register_function{
 --   FCALL GNODE_BROADCAST_TRIM 1 '{default}:gnode:broadcast:global' 300
 server.register_function{
     function_name = 'GNODE_BROADCAST_TRIM',
-    description = 'Trim broadcast stream by retention time using MAXLEN',
+    description = 'Trim broadcast stream by retention age (XTRIM MINID)',
     callback = function(keys, args)
         local stream_key = keys[1]
         local retention_seconds = tonumber(args[1]) or 300 -- 5 minutes default
 
-        -- Strategy: Use MAXLEN to keep recent messages
-        -- Estimate max messages based on retention period and typical rate
-        local estimated_rate = 10 -- messages per second
-        local max_messages = math.max(retention_seconds * estimated_rate, 1000) -- minimum 1000
+        -- Trim by AGE, which is what a retention period means.
+        --
+        -- This previously converted seconds into a message count via a
+        -- hardcoded estimated_rate of 10 msgs/sec, making the advertised time
+        -- semantics a fiction: at 1 msg/s a 300s request retained 50 minutes;
+        -- at 100 msg/s it retained 30 seconds and silently dropped live data.
+        --
+        -- Stream ids are millisecond timestamps, so MINID states the cutoff
+        -- directly and needs no rate estimate at all.
+        local now = server.call('TIME')
+        local now_ms = (tonumber(now[1]) * 1000) + math.floor(tonumber(now[2]) / 1000)
+        local cutoff_ms = now_ms - (retention_seconds * 1000)
+        if cutoff_ms < 0 then cutoff_ms = 0 end
 
-        -- Execute XTRIM with approximate trim for efficiency
-        local trimmed = server.call('XTRIM', stream_key, 'MAXLEN', '~', max_messages)
+        local trimmed = server.call('XTRIM', stream_key, 'MINID', '~', tostring(cutoff_ms) .. '-0')
 
         return trimmed
     end
