@@ -338,6 +338,61 @@ pub fn load_or_generate_signer(path: &Path) -> io::Result<NodeSigner> {
     Ok(NodeSigner { scheme, private_bytes, public_bytes })
 }
 
+/// Default path for this node's receipt signing key. The daemon's own
+/// component dir is gnode-owned (writable by the daemon), unlike the credential
+/// dir (root:geodineum-creds, not gnode-writable). Overridable via
+/// `GNODE_RECEIPT_KEY_FILE`.
+pub fn default_signer_path() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("GNODE_RECEIPT_KEY_FILE") {
+        return std::path::PathBuf::from(p);
+    }
+    std::path::PathBuf::from("/etc/geodineum/components/gnode-daemon/receipt_signing.key")
+}
+
+/// The shared registry of node receipt pubkeys. Placed in the topology
+/// namespace's gnode bus — a PUBLIC key, safe in the commons, resolvable by any
+/// verifier (GeoV, gFlow, dashboard). Field = signer_id (the fingerprint a
+/// receipt carries); value = `<alg>:<pubkey_hex>`.
+pub fn pubkey_registry_key(topology_ns: &str) -> String {
+    format!("{{{}}}:gnode:receipt_pubkeys", topology_ns)
+}
+
+/// Publish this node's receipt public key so verifiers can resolve its
+/// `signer_id`. Additive and idempotent — republishing the same key is a no-op.
+pub fn publish_pubkey(
+    conn: &mut Connection,
+    signer: &NodeSigner,
+    topology_ns: &str,
+) -> redis::RedisResult<()> {
+    let registry = pubkey_registry_key(topology_ns);
+    let value = format!("{}:{}", signer.alg_id(), hex(signer.public_bytes()));
+    let _: i64 = redis::cmd("HSET")
+        .arg(&registry)
+        .arg(signer.signer_id())
+        .arg(&value)
+        .query(conn)?;
+    Ok(())
+}
+
+/// Verifier helper: resolve a receipt's `signer` id to `(alg, pubkey_bytes)`.
+/// A receipt then verifies via `receipt.verify(&pubkey)` after checking its
+/// `alg` matches. Returns None if the signer is unknown or the entry malformed.
+pub fn resolve_pubkey(
+    conn: &mut Connection,
+    topology_ns: &str,
+    signer_id: &str,
+) -> Option<(String, Vec<u8>)> {
+    let registry = pubkey_registry_key(topology_ns);
+    let v: Option<String> = redis::cmd("HGET")
+        .arg(&registry)
+        .arg(signer_id)
+        .query(conn)
+        .ok()?;
+    let v = v?;
+    let (alg, hexkey) = v.split_once(':')?;
+    Some((alg.to_string(), unhex(hexkey)?))
+}
+
 /// Lowercase hex encode.
 pub fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -521,6 +576,45 @@ mod tests {
         let r = Receipt::for_response("req-1", "cmd", "ok", None, "s", "n", 1, "ref", "body");
         assert!(r.alg.is_empty() && r.sig.is_empty());
         assert!(!r.verify(&[0u8; 32]), "an unsigned receipt never verifies");
+    }
+
+    #[test]
+    fn test_pubkey_registry_key_shape() {
+        assert_eq!(
+            pubkey_registry_key("geodineum"),
+            "{geodineum}:gnode:receipt_pubkeys"
+        );
+    }
+
+    #[test]
+    fn test_signer_id_is_pubkey_fingerprint() {
+        let (priv_b, pub_b) = Ed25519Scheme.generate();
+        let s = NodeSigner {
+            scheme: Box::new(Ed25519Scheme), private_bytes: priv_b, public_bytes: pub_b.clone(),
+        };
+        // 8 bytes → 16 hex chars, and stable for the same key.
+        assert_eq!(s.signer_id().len(), 16);
+        let s2 = NodeSigner {
+            scheme: Box::new(Ed25519Scheme),
+            private_bytes: s.private_bytes.clone(),
+            public_bytes: pub_b,
+        };
+        assert_eq!(s.signer_id(), s2.signer_id());
+    }
+
+    #[test]
+    fn test_load_or_generate_roundtrips_from_disk() {
+        // generate → reload → same key → a receipt signed by one verifies with
+        // the other's pubkey.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("receipt_signing.key");
+        let s1 = load_or_generate_signer(&path).unwrap();
+        let s2 = load_or_generate_signer(&path).unwrap(); // loads, does not regenerate
+        assert_eq!(s1.signer_id(), s2.signer_id());
+        assert_eq!(s1.public_bytes(), s2.public_bytes());
+        let mut r = Receipt::for_response("req", "cmd", "ok", None, "s", "n", 1, "ref", "b");
+        r.sign(&s1).unwrap();
+        assert!(r.verify(s2.public_bytes()));
     }
 
     #[test]

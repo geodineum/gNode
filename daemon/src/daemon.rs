@@ -779,6 +779,30 @@ impl GNodeDaemon {
         // nothing format-related needs to happen here anymore.
         if valkey_initialized {
             if let Ok(mut conn) = self.client.get_connection() {
+                // Ensure this node's receipt signing key exists (generated on
+                // first start, private key stays on this node) and publish its
+                // PUBLIC key so verifiers can resolve receipt signers. Fully
+                // non-fatal: receipts are not emitted yet, so a key/permission
+                // hiccup must never affect startup — log and carry on.
+                let signer_path = crate::integration::receipt::default_signer_path();
+                match crate::integration::receipt::load_or_generate_signer(&signer_path) {
+                    Ok(signer) => {
+                        match crate::integration::receipt::publish_pubkey(
+                            &mut conn, &signer, &self.topology_namespace,
+                        ) {
+                            Ok(()) => info!(
+                                "Receipt signer ready: {} ({}), pubkey published to {{{}}}:gnode:receipt_pubkeys",
+                                signer.signer_id(), signer.alg_id(), self.topology_namespace
+                            ),
+                            Err(e) => warn!("Receipt pubkey publish failed (non-fatal): {}", e),
+                        }
+                    }
+                    Err(e) => warn!(
+                        "Receipt signer unavailable at {} (non-fatal; receipts will be unsigned when wired): {}",
+                        signer_path.display(), e
+                    ),
+                }
+
                 // Publish gNode's own stream contracts + config_schema to ValKey
                 // for runtime discovery by agents and other components.
                 // Uses the topology_namespace as the site_id since gNode is
