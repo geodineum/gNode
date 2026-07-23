@@ -1572,78 +1572,10 @@ pub fn process_command_batch(
                 }
             }
 
-            // Ensure client consumer group exists and is properly configured
-            // Skip for relay responses — the source stream's consumer group is managed by its site
-            if !is_relay_response {
-            if debug_level >= LogLevel::Info {
-                info!("Ensuring client consumer group is properly configured for batch responses");
-            }
-
-            match crate::integration::consumer_groups::ensure_consumer_group(
-                conn,
-                response_stream,
-                "gnode-client",
-                true, // CRITICAL: Always start from beginning (ID 0) for client consumer group
-                "gNode", // Site ID
-                debug_mode
-            ) {
-                Ok(created) => {
-                    if created {
-                        if debug_level >= LogLevel::Info {
-                            info!("Created or reconfigured gnode-client consumer group for batch responses");
-                        }
-                    } else if debug_level >= LogLevel::Info {
-                        info!("Verified gnode-client consumer group is properly configured");
-                    }
-                },
-                Err(e) => {
-                    if debug_level >= LogLevel::Warning {
-                        warn!("Failed to ensure proper client consumer group configuration: {}", e);
-                        warn!("Attempting emergency client group creation");
-                    }
-                    
-                    // Last resort direct approach if the consumer group function fails
-                    // P2BF001 FIX: Try SETID first (atomic), fallback to CREATE if group doesn't exist
-
-                    // First try SETID (works if group exists, atomic operation)
-                    let setid_result = redis::cmd("XGROUP")
-                        .arg("SETID")
-                        .arg(stream_key)
-                        .arg("gnode-client")
-                        .arg("0") // Reset to beginning
-                        .query::<()>(conn);
-
-                    match setid_result {
-                        Ok(_) => {
-                            if debug_level >= LogLevel::Info {
-                                info!("Emergency client group SETID succeeded (reset to beginning)");
-                            }
-                        },
-                        Err(_) => {
-                            // Group doesn't exist, create it
-                            match redis::cmd("XGROUP")
-                                .arg("CREATE")
-                                .arg(stream_key)
-                                .arg("gnode-client")
-                                .arg("0") // CRITICAL: Use 0 not $ to read ALL messages
-                                .arg("MKSTREAM")
-                                .query::<()>(conn) {
-                                Ok(_) => {
-                                    if debug_level >= LogLevel::Info {
-                                        info!("Emergency client group creation succeeded");
-                                    }
-                                },
-                                Err(create_err) => {
-                                    if debug_level >= LogLevel::Warning {
-                                        warn!("Emergency client group creation failed: {}", create_err);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            } // end if !is_relay_response (consumer group ensure)
+            // No client/response consumer group ensure: batch responses are read
+            // by keyed rendezvous ({ss}:res:{id}), not from a group. The batch
+            // response is XADDed below AND written to the response key by the
+            // response writer; gnode-client had no reader and is retired.
 
             // Convert fields to field pairs
             let mut field_pairs = Vec::new();

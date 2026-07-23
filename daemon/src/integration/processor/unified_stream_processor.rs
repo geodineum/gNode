@@ -177,35 +177,45 @@ pub fn initialize_unified_stream(
     info!("Initializing unified stream processor for node {}: stream={}", 
         node_id, stream_key);
     
-    // Check if consumer groups already exist (single query for both - P3AF001 fix)
-    let (cmd_group_exists, client_group_exists): (bool, bool) = redis::cmd("XINFO")
+    // Has this function's command group already been created?
+    //
+    // This sentinel previously checked gnode-daemon AND gnode-client. Both were
+    // created here, so it was a consistent "did I create the groups I own"
+    // check — but gnode-client was the response group, and responses no longer
+    // flow through a consumer group (they use keyed rendezvous {ss}:res:{id}).
+    // gnode-client has no reader and is retired, and this function no longer
+    // creates it.
+    //
+    // The sentinel therefore checks the sole group this function is now
+    // responsible for: gnode-daemon. It is deliberately NOT widened to
+    // gnode-workers — that group is created by the worker-pool subsystem, not
+    // here, and is absent on streams that run no worker pool (staging/testing
+    // carry gnode-daemon only). Gating on a group this function neither creates
+    // nor can guarantee would make the early-return never fire there, forcing a
+    // full re-init every cycle.
+    let cmd_group_exists: bool = redis::cmd("XINFO")
         .arg("GROUPS")
         .arg(&stream_key)
         .query::<Vec<redis::Value>>(conn)
-        .map_or((false, false), |groups| {
-            let mut daemon_found = false;
-            let mut client_found = false;
+        .map_or(false, |groups| {
             for group in &groups {
                 if let redis::Value::Array(items) = group {
                     for (i, item) in items.iter().enumerate() {
                         if i % 2 == 0 && item == &redis::Value::BulkString(b"name".to_vec()) {
                             if let Some(redis::Value::BulkString(name)) = items.get(i + 1) {
-                                let name_str = String::from_utf8_lossy(name);
-                                if name_str == "gnode-daemon" {
-                                    daemon_found = true;
-                                } else if name_str == "gnode-client" {
-                                    client_found = true;
+                                if String::from_utf8_lossy(name) == "gnode-daemon" {
+                                    return true;
                                 }
                             }
                         }
                     }
                 }
             }
-            (daemon_found, client_found)
+            false
         });
-    
-    // If both groups exist, consider initialization complete and return early
-    if cmd_group_exists && client_group_exists {
+
+    // The command group exists ⇒ this initializer's work is done, return early.
+    if cmd_group_exists {
         if debug_mode {
             debug!("Both consumer groups already exist for stream {}", stream_key);
         }
@@ -289,113 +299,10 @@ pub fn initialize_unified_stream(
         }
     }
     
-    // Create client consumer group if it doesn't exist
-    if !client_group_exists {
-        // CRITICAL FIX: Use "0" instead of "$" so the group reads ALL messages from beginning
-        let client_group_result: RedisResult<String> = redis::cmd("XGROUP")
-            .arg("CREATE")
-            .arg(&stream_key)
-            .arg("gnode-client")
-            .arg("0")  // FIXED: Read ALL messages from the beginning, not just new ones
-            .arg("MKSTREAM")
-            .query(conn);
-        
-        match client_group_result {
-            Ok(_) => {
-                info!("Created client consumer group for {} starting from beginning (ID 0)", node_id);
-                
-                // Configure the client consumer group to read both regular and batch response messages (t=r & t=br)
-                trace!("Configuring client consumer group to see all response messages (t=r and t=br)");
-                let _ = redis::cmd("XAUTOCLAIM")
-                    .arg(&stream_key)
-                    .arg("gnode-client")
-                    .arg("INITIALIZER")
-                    .arg("0")  // Claim all pending messages regardless of idle time
-                    .arg("0")  // Start from the beginning
-                    .arg("COUNT").arg(1000)  // Reasonable batch size
-                    .query::<()>(conn);
-            },
-            Err(e) => {
-                let error_str = e.to_string();
-                if error_str.contains("BUSYGROUP") {
-                    if debug_mode {
-                        debug!("Client consumer group already exists for {} - recreating from beginning", node_id);
-                    }
-                    
-                    // For existing client groups that might have been created with "$" (only new messages),
-                    // we use SETID to atomically reset to beginning (P2BF001 FIX)
+    // Responses are delivered by keyed rendezvous ({ss}:res:{id}), not through
+    // a consumer group, so no client/response group is created here. gnode-client
+    // had no reader and is retired. See the response-delivery mission.
 
-                    // Use XGROUP SETID to atomically reset the last-delivered-ID
-                    let setid_result: RedisResult<()> = redis::cmd("XGROUP")
-                        .arg("SETID")
-                        .arg(&stream_key)
-                        .arg("gnode-client")
-                        .arg("0")  // Reset to beginning
-                        .query(conn);
-
-                    match setid_result {
-                        Ok(_) => {
-                            trace!("Successfully reset client consumer group for {} to beginning (ID 0)", node_id);
-                        },
-                        Err(set_err) => {
-                            warn!("Failed to reset client consumer group ID: {}", set_err);
-                            state.record_failure(config.circuit_breaker_threshold);
-                        }
-                    }
-                } else {
-                    warn!("Failed to create client consumer group: {}", e);
-                    state.record_failure(config.circuit_breaker_threshold);
-                }
-            }
-        }
-    } else if debug_mode {
-        debug!("Client consumer group exists - ensuring it's configured properly");
-        
-        // For existing groups, verify they can read from beginning
-        // This is done by creating a test consumer and reading from ID 0,
-        // then destroying the test consumer
-        
-        let test_consumer = format!("test-config-{}", current_timestamp_ms());
-        
-        // Try reading from the beginning with the test consumer
-        let test_read: RedisResult<()> = redis::cmd("XREADGROUP")
-            .arg("GROUP")
-            .arg("gnode-client")
-            .arg(&test_consumer)
-            .arg("COUNT")
-            .arg(1)
-            .arg("STREAMS")
-            .arg(&stream_key)
-            .arg("0")  // Try reading from beginning
-            .query(conn);
-        
-        // If reading from beginning fails, reset the group ID (P2BF001 FIX)
-        if let Err(read_err) = test_read {
-            warn!("Client consumer group exists but cannot read from beginning: {}", read_err);
-            warn!("Resetting client consumer group ID to fix the issue");
-
-            // Use XGROUP SETID to atomically reset the last-delivered-ID
-            let setid_result: RedisResult<()> = redis::cmd("XGROUP")
-                .arg("SETID")
-                .arg(&stream_key)
-                .arg("gnode-client")
-                .arg("0")  // Reset to beginning
-                .query(conn);
-
-            match setid_result {
-                Ok(_) => {
-                    trace!("Successfully reset client consumer group for {} to beginning (ID 0)", node_id);
-                },
-                Err(set_err) => {
-                    warn!("Failed to reset client consumer group ID: {}", set_err);
-                    state.record_failure(config.circuit_breaker_threshold);
-                }
-            }
-        } else if debug_mode {
-            debug!("Verified client consumer group can read from beginning");
-        }
-    }
-    
     // Record successful initialization
     state.record_success();
     
@@ -705,26 +612,8 @@ fn initialize_environment_unified_stream(
         }
     }
 
-    // Create client consumer group (for responses) if it doesn't exist
-    let client_group_result: RedisResult<String> = redis::cmd("XGROUP")
-        .arg("CREATE")
-        .arg(&stream_key)
-        .arg("gnode-client")
-        .arg("0") // Read from beginning for responses
-        .arg("MKSTREAM")
-        .query(conn);
-
-    match client_group_result {
-        Ok(_) => {
-            info!("Created client consumer group for stream {}", stream_key);
-        },
-        Err(e) => {
-            let error_str = e.to_string();
-            if !error_str.contains("BUSYGROUP") {
-                warn!("Failed to create client consumer group: {}", e);
-            }
-        }
-    }
+    // No client/response consumer group: responses use keyed rendezvous
+    // ({ss}:res:{id}), not a group. gnode-client is retired.
 
     info!("Environment unified stream ready: {} (consumer: {})", stream_key, consumer_name);
     Ok(())

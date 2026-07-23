@@ -1442,7 +1442,7 @@ server.register_function{
             end
 
             -- Create consumer groups for unified stream
-            for _, group_name in ipairs({"gnode-daemon", "gnode-client"}) do
+            for _, group_name in ipairs({"gnode-daemon"}) do
                 local group_ok = server.pcall('XGROUP', 'CREATE', stream_key, group_name, '$', 'MKSTREAM')
                 if group_ok.err then
                     if not group_ok.err:find('BUSYGROUP') then
@@ -1533,7 +1533,7 @@ server.register_function{
         end
 
         -- Create consumer groups for registration stream
-        for _, group_name in ipairs({"gnode-daemon", "gnode-client"}) do
+        for _, group_name in ipairs({"gnode-daemon"}) do
             local group_ok = server.pcall('XGROUP', 'CREATE', registration_key, group_name, '$', 'MKSTREAM')
             if group_ok.err and not group_ok.err:find('BUSYGROUP') then
                 table.insert(errors, "Failed to create group " .. group_name .. " on " .. registration_key .. ": " .. group_ok.err)
@@ -1566,7 +1566,7 @@ server.register_function{
         end
 
         -- Create consumer groups for global stream
-        for _, group_name in ipairs({"gnode-daemon", "gnode-client"}) do
+        for _, group_name in ipairs({"gnode-daemon"}) do
             local group_ok = server.pcall('XGROUP', 'CREATE', global_key, group_name, '$', 'MKSTREAM')
             if group_ok.err and not group_ok.err:find('BUSYGROUP') then
                 table.insert(errors, "Failed to create group " .. group_name .. " on " .. global_key .. ": " .. group_ok.err)
@@ -2091,7 +2091,7 @@ server.register_function{
         end
 
         -- Create consumer groups
-        for _, group_name in ipairs({"gnode-daemon", "gnode-client"}) do
+        for _, group_name in ipairs({"gnode-daemon"}) do
             local group_ok = server.pcall('XGROUP', 'CREATE', stream_key, group_name, '$', 'MKSTREAM')
             if group_ok.err then
                 if not group_ok.err:find('BUSYGROUP') then

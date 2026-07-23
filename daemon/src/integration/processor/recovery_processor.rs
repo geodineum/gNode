@@ -179,8 +179,10 @@ pub fn repair_stream(
         return Ok(true);
     }
     
-    // Reset or create consumer groups (P2BF001 FIX: SETID-first approach)
-    for group_name in ["gnode-daemon", "gnode-client"].iter() {
+    // Reset or create consumer groups (P2BF001 FIX: SETID-first approach).
+    // gnode-client (the former response group) is retired — responses use keyed
+    // rendezvous, not a consumer group — so recovery no longer recreates it.
+    for group_name in ["gnode-daemon"].iter() {
         // Try SETID first (atomic, works if group exists)
         let setid_result: RedisResult<()> = redis::cmd("XGROUP")
             .arg("SETID")
