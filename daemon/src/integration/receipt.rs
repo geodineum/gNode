@@ -24,9 +24,12 @@
 //! module MUST NOT be wired into live emission on a shared stream — an unsigned
 //! receipt in the commons is unverifiable data observers would eventually trust.
 
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use redis::Connection;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::io;
+use std::path::Path;
 
 /// How long receipts are retained. gFlow workflows carry deadlines "measured in
 /// weeks"; COMMS keeps its delivery status 30 days. 30 days covers both and is
@@ -75,12 +78,18 @@ pub struct Receipt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
 
-    // ── signature envelope (empty until the signing-key model lands) ──
+    // ── signature envelope ──
     /// Schema version.
     pub v: u32,
-    /// Ed25519 signature over `canonical_bytes()`, hex. Empty ⇒ unsigned (v1).
+    /// Signature ALGORITHM id (e.g. `ed25519`). Named on the wire and folded
+    /// into the signed bytes so the scheme is swappable and un-downgradeable —
+    /// a future post-quantum signature (ML-DSA / Dilithium) is another `alg`,
+    /// not a schema break. Empty ⇒ unsigned.
+    pub alg: String,
+    /// Signature over `canonical_bytes()`, hex. Empty ⇒ unsigned.
     pub sig: String,
-    /// Key id of the signer. Empty ⇒ unsigned.
+    /// Signer id — a fingerprint of the producing node's public key. Empty ⇒
+    /// unsigned. Verifiers resolve this to the node's published pubkey.
     pub signer: String,
 }
 
@@ -114,9 +123,40 @@ impl Receipt {
             work_ms: None,
             model: None,
             v: RECEIPT_SCHEMA_VERSION,
+            alg: String::new(),
             sig: String::new(),
             signer: String::new(),
         }
+    }
+
+    /// Sign this receipt with a node's signer. Sets `alg`, `sig`, `signer`.
+    /// `alg` is part of `canonical_bytes()`, so the scheme cannot be silently
+    /// downgraded by an attacker without invalidating the signature.
+    pub fn sign(&mut self, signer: &NodeSigner) -> Result<(), String> {
+        // alg must be set BEFORE canonical_bytes so it is covered by the sig.
+        self.alg = signer.alg_id().to_string();
+        let sig = signer.sign(&self.canonical_bytes())?;
+        self.sig = hex(&sig);
+        self.signer = signer.signer_id();
+        Ok(())
+    }
+
+    /// Verify this receipt's signature against a producer's public key bytes.
+    /// Resolves the receipt's declared `alg` to a scheme; an unknown or empty
+    /// alg fails closed.
+    pub fn verify(&self, pubkey: &[u8]) -> bool {
+        if self.alg.is_empty() || self.sig.is_empty() {
+            return false;
+        }
+        let scheme = match scheme_for(&self.alg) {
+            Some(s) => s,
+            None => return false,
+        };
+        let sig_bytes = match unhex(&self.sig) {
+            Some(b) => b,
+            None => return false,
+        };
+        scheme.verify(pubkey, &self.canonical_bytes(), &sig_bytes)
     }
 
     /// The exact bytes a signature covers: every field EXCEPT `sig`/`signer`,
@@ -127,6 +167,7 @@ impl Receipt {
         // could drift). Anything a verifier must trust goes here.
         let mut s = String::new();
         s.push_str(&format!("v={}\n", self.v));
+        s.push_str(&format!("alg={}\n", self.alg));
         s.push_str(&format!("cid={}\n", self.correlation_id));
         s.push_str(&format!("cmd={}\n", self.command));
         s.push_str(&format!("st={}\n", self.status));
@@ -160,10 +201,156 @@ impl Receipt {
         if let Some(w) = self.wait_ms { f.push(("wait_ms".to_string(), w.to_string())); }
         if let Some(w) = self.work_ms { f.push(("work_ms".to_string(), w.to_string())); }
         if let Some(m) = &self.model { f.push(("model".to_string(), m.clone())); }
+        if !self.alg.is_empty() { f.push(("alg".to_string(), self.alg.clone())); }
         if !self.sig.is_empty() { f.push(("sig".to_string(), self.sig.clone())); }
         if !self.signer.is_empty() { f.push(("signer".to_string(), self.signer.clone())); }
         f
     }
+}
+
+// ─────────────────────────── signature adapter ─────────────────────────────
+// Interface/adapter over crypto schemes, byte-oriented so the receipt, wire
+// format, and key files stay algorithm-agnostic. Ed25519 today; a post-quantum
+// signature (ML-DSA / Dilithium) is a new impl + a resolver arm, no schema
+// change. NOTE: Kyber is a KEM, not a signature scheme — the successor here is a
+// PQ *signature*.
+
+/// A signature scheme, defined over raw bytes (keys and signatures differ
+/// wildly in size between schemes, so nothing typed leaks past this boundary).
+pub trait SignatureScheme {
+    /// Wire id, e.g. `ed25519`. Folded into the signed bytes.
+    fn alg_id(&self) -> &'static str;
+    /// Generate a keypair: (private_bytes, public_bytes).
+    fn generate(&self) -> (Vec<u8>, Vec<u8>);
+    /// Public key bytes derived from a private key.
+    fn public_from_private(&self, private_bytes: &[u8]) -> Result<Vec<u8>, String>;
+    /// Sign a message with a private key.
+    fn sign(&self, private_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, String>;
+    /// Verify a signature against a public key. Fails closed on any malformed input.
+    fn verify(&self, public_bytes: &[u8], msg: &[u8], sig: &[u8]) -> bool;
+}
+
+/// Resolve an algorithm id to its scheme. The single place algorithms are
+/// registered — add a variant here to add a scheme.
+pub fn scheme_for(alg_id: &str) -> Option<Box<dyn SignatureScheme>> {
+    match alg_id {
+        "ed25519" => Some(Box::new(Ed25519Scheme)),
+        _ => None,
+    }
+}
+
+/// The default scheme for new signers until an operator selects otherwise.
+pub fn default_scheme() -> Box<dyn SignatureScheme> {
+    Box::new(Ed25519Scheme)
+}
+
+/// Ed25519 adapter.
+pub struct Ed25519Scheme;
+
+impl SignatureScheme for Ed25519Scheme {
+    fn alg_id(&self) -> &'static str { "ed25519" }
+
+    fn generate(&self) -> (Vec<u8>, Vec<u8>) {
+        use rand::RngCore;
+        let mut seed = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut seed);
+        let sk = SigningKey::from_bytes(&seed);
+        let pk = sk.verifying_key();
+        (seed.to_vec(), pk.to_bytes().to_vec())
+    }
+
+    fn public_from_private(&self, private_bytes: &[u8]) -> Result<Vec<u8>, String> {
+        let seed: [u8; 32] = private_bytes.try_into()
+            .map_err(|_| "ed25519 private key must be 32 bytes".to_string())?;
+        Ok(SigningKey::from_bytes(&seed).verifying_key().to_bytes().to_vec())
+    }
+
+    fn sign(&self, private_bytes: &[u8], msg: &[u8]) -> Result<Vec<u8>, String> {
+        let seed: [u8; 32] = private_bytes.try_into()
+            .map_err(|_| "ed25519 private key must be 32 bytes".to_string())?;
+        Ok(SigningKey::from_bytes(&seed).sign(msg).to_bytes().to_vec())
+    }
+
+    fn verify(&self, public_bytes: &[u8], msg: &[u8], sig: &[u8]) -> bool {
+        let pk: [u8; 32] = match public_bytes.try_into() { Ok(b) => b, Err(_) => return false };
+        let vk = match VerifyingKey::from_bytes(&pk) { Ok(v) => v, Err(_) => return false };
+        let sig: [u8; 64] = match sig.try_into() { Ok(b) => b, Err(_) => return false };
+        vk.verify(msg, &Signature::from_bytes(&sig)).is_ok()
+    }
+}
+
+/// A node's signing identity: an algorithm + its private key material. The
+/// private key never leaves the node — the master/topology only ever holds the
+/// published public key.
+pub struct NodeSigner {
+    scheme: Box<dyn SignatureScheme>,
+    private_bytes: Vec<u8>,
+    public_bytes: Vec<u8>,
+}
+
+impl NodeSigner {
+    pub fn alg_id(&self) -> &'static str { self.scheme.alg_id() }
+    pub fn public_bytes(&self) -> &[u8] { &self.public_bytes }
+    pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>, String> {
+        self.scheme.sign(&self.private_bytes, msg)
+    }
+    /// Short fingerprint of the public key (first 8 bytes of its sha256, hex) —
+    /// the `signer` value verifiers resolve to the published pubkey.
+    pub fn signer_id(&self) -> String {
+        let mut h = Sha256::new();
+        h.update(&self.public_bytes);
+        hex(&h.finalize()[..8])
+    }
+}
+
+/// Load this node's signer from disk, generating and persisting a keypair on
+/// first use. The private key is written `0600`; only the node holds it.
+///
+/// File format: one line `<alg>:<private_hex>`. Algorithm-tagged so a key file
+/// declares its own scheme — a future re-key to a PQ scheme rewrites this file
+/// with a new alg, and old receipts still verify against their own `alg`.
+pub fn load_or_generate_signer(path: &Path) -> io::Result<NodeSigner> {
+    if let Ok(contents) = std::fs::read_to_string(path) {
+        let line = contents.trim();
+        if let Some((alg, hexkey)) = line.split_once(':') {
+            if let (Some(scheme), Some(priv_bytes)) = (scheme_for(alg), unhex(hexkey)) {
+                let public_bytes = scheme.public_from_private(&priv_bytes)
+                    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+                return Ok(NodeSigner { scheme, private_bytes: priv_bytes, public_bytes });
+            }
+        }
+        return Err(io::Error::new(io::ErrorKind::InvalidData,
+            format!("unrecognised or corrupt signing key at {}", path.display())));
+    }
+
+    // Generate on first use.
+    let scheme = default_scheme();
+    let (private_bytes, public_bytes) = scheme.generate();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, format!("{}:{}\n", scheme.alg_id(), hex(&private_bytes)))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(NodeSigner { scheme, private_bytes, public_bytes })
+}
+
+/// Lowercase hex encode.
+pub fn hex(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes { s.push_str(&format!("{:02x}", b)); }
+    s
+}
+
+/// Decode lowercase/uppercase hex; None on any non-hex or odd length.
+pub fn unhex(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 { return None; }
+    (0..s.len()).step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).ok())
+        .collect()
 }
 
 /// The receipt stream key for a site + environment. Hash-tagged, and placed
@@ -281,8 +468,67 @@ mod tests {
         let before = r.canonical_bytes();
         r.sig = "deadbeef".to_string();
         r.signer = "key1".to_string();
-        // Signing must not change what was signed.
+        // Setting sig/signer must not change what was signed (they are excluded).
         assert_eq!(before, r.canonical_bytes());
+    }
+
+    #[test]
+    fn test_sign_then_verify_roundtrip() {
+        let scheme = Ed25519Scheme;
+        let (priv_b, pub_b) = scheme.generate();
+        let signer = NodeSigner {
+            scheme: Box::new(Ed25519Scheme),
+            private_bytes: priv_b,
+            public_bytes: pub_b.clone(),
+        };
+        let mut r = Receipt::for_response(
+            "req-1", "get_node_info", "ok", None, "nierto_com", "master",
+            1_700_000_000_000, "{nierto_com}:res:req-1", "{\"r\":1}",
+        );
+        r.sign(&signer).unwrap();
+        assert_eq!(r.alg, "ed25519");
+        assert!(!r.sig.is_empty() && !r.signer.is_empty());
+        assert!(r.verify(&pub_b), "valid signature must verify");
+    }
+
+    #[test]
+    fn test_verify_fails_on_tamper_and_wrong_key() {
+        let scheme = Ed25519Scheme;
+        let (priv_b, pub_b) = scheme.generate();
+        let (_, other_pub) = scheme.generate();
+        let signer = NodeSigner {
+            scheme: Box::new(Ed25519Scheme), private_bytes: priv_b, public_bytes: pub_b.clone(),
+        };
+        let mut r = Receipt::for_response(
+            "req-1", "cmd", "ok", None, "s", "n", 1, "ref", "body",
+        );
+        r.sign(&signer).unwrap();
+        assert!(r.verify(&pub_b));
+        // wrong key
+        assert!(!r.verify(&other_pub));
+        // tamper the covered content
+        let mut tampered = r.clone();
+        tampered.status = "failed".to_string();
+        assert!(!tampered.verify(&pub_b), "tampering must break verification");
+        // downgrade the alg
+        let mut downgraded = r.clone();
+        downgraded.alg = "bogus".to_string();
+        assert!(!downgraded.verify(&pub_b), "unknown alg fails closed");
+    }
+
+    #[test]
+    fn test_unsigned_receipt_does_not_verify() {
+        let r = Receipt::for_response("req-1", "cmd", "ok", None, "s", "n", 1, "ref", "body");
+        assert!(r.alg.is_empty() && r.sig.is_empty());
+        assert!(!r.verify(&[0u8; 32]), "an unsigned receipt never verifies");
+    }
+
+    #[test]
+    fn test_hex_roundtrip() {
+        assert_eq!(hex(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
+        assert_eq!(unhex("deadbeef"), Some(vec![0xde, 0xad, 0xbe, 0xef]));
+        assert_eq!(unhex("xyz"), None);
+        assert_eq!(unhex("abc"), None); // odd length
     }
 
     #[test]
