@@ -921,13 +921,39 @@ fn check_daemon_status(redis_url: &str, environment: &str, stream_prefix: &str) 
         }
     }
 
-    // Check active streams by discovering all registered site streams
-    // Pattern: *:gnode:{environment}:unified to find all site streams
-    let stream_pattern = format!("*:{}:{}:unified", stream_prefix, environment);
-    let streams: Vec<String> = redis::cmd("KEYS")
-        .arg(&stream_pattern)
-        .query(&mut conn)
-        .map_err(GeometricError::Redis)?;
+    // Discover the site streams that actually exist.
+    //
+    // The pattern here was `*:{prefix}:{env}:unified`, with the last two
+    // segments transposed relative to what every producer writes
+    // (`{site_id}:gnode:unified:{env}` — gnode_site.lua:935). It therefore
+    // matched nothing, and status reported "Found 0 active command streams"
+    // on an instance carrying 19 of them. Silent because an empty match is
+    // indistinguishable from an idle system.
+    //
+    // SCAN rather than KEYS: KEYS is O(N) and blocks the server for the whole
+    // keyspace. Same fix already applied in
+    // integration/processor/stream_utils.rs.
+    let stream_pattern = format!("*:{}:unified:{}", stream_prefix, environment);
+    let mut cursor = "0".to_string();
+    let mut streams: Vec<String> = Vec::new();
+    loop {
+        let scan_result: redis::RedisResult<(String, Vec<String>)> = redis::cmd("SCAN")
+            .arg(&cursor)
+            .arg("MATCH")
+            .arg(&stream_pattern)
+            .arg("COUNT")
+            .arg(100)
+            .query(&mut conn);
+        match scan_result {
+            Ok((next, batch)) => {
+                streams.extend(batch);
+                cursor = next;
+                if cursor == "0" { break; }
+            },
+            Err(e) => return Err(GeometricError::Redis(e)),
+        }
+    }
+    streams.sort();
 
     info!("Found {} active command streams:", streams.len());
     for stream in streams {
