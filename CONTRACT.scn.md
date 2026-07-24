@@ -5,7 +5,7 @@
 gNode = the **Sun** of each Constellation. Stateless (tokio async) Rust daemon `gnode-daemon v0.1.0`, edition 2021. Owns: RESP3 command-stream wire protocol + unified multi-tenant routing + geometric topology + signed-extension pipeline, sitting between PHP services and ValKey. State-aware-not-stateful: ∀ state ∈ ValKey; nothing in-process survives restart.
 
 ## ::ANCHOR
-- Stream keys: `{site_id}:gnode:unified:{env}` (cmds, config.rs) · `{ss}:res:{id}` `EX 10` (response poll, fast_lane.rs) · `{site_id}:gnode:health:{env}` (config.rs) · `{site_id}:gnode:broadcast` (env-indep, config.rs) · `{site_id}:gnode:comms:{env}` (COMMS-owned, gNode provisions) · `{topology_ns}:gnode:topology` (registry).
+- Stream keys: `{site_id}:gnode:unified:{env}` (cmds, config.rs) · `{ss}:res:{id}` `EX 10` (response poll, fast_lane.rs) · `{site_id}:gnode:receipts:{env}` (signed receipts, MINID 30d, receipt.rs) · `{topology_ns}:gnode:receipt_pubkeys` (HASH signer_id→`alg:pubkey_hex`) · `{site_id}:gnode:health:{env}` (config.rs) · `{site_id}:gnode:broadcast` (env-indep, config.rs) · `{site_id}:gnode:comms:{env}` (COMMS-owned, gNode provisions) · `{topology_ns}:gnode:topology` (registry).
 - Wire resolver: `utils::field_names` canonical alias lists utils.rs; `utils::get_field(map,keys)` utils.rs.
 - Aliases: t/type · id/request_id · c/cmd/command/command_name · p/params/parameters · ss/source_site/service_id/site_id/st · sn/source_node/node_id/n · ds/dest_site · dn/dest_node · st/s/status(resp) · r/result · e/error · ri · ts/timestamp · bi · tc · _rt(relay_target) · _rr(relay_reply_to) · _gh(group_hint).
 - Types: `Command`{id,command,parameters:Value,site_id,node_id,ts} · `Response`{id,status,result,error,ts,batch_id,sequence} · `Lane`{Fast|Ordered} (handlers/types.rs) · `CommandDescriptor` · `RelayDecision`{Forward{target_site_id,target_stream_key,target_entity_id}|Local|NotFound|Error} · `OptimizedCommand` · `ComputeRequest/Response` · `CustomTopology`{name,dimensions,schema,entities,edges,metadata}.
@@ -19,7 +19,7 @@ Philosophy: stateless (all state ValKey) · ONE canonical wire resolver (utils::
 
 ## ::IO
 IN ← ValKey `XREAD/XREADGROUP` `{site_id}:gnode:unified:{env}` = `[[stream_key,[[entry_id,[field,value,…]],…]],…]` aliased fields. ← FCALL results = JSON strings (cjson.encode, pcall, gnode_stream.lua). ← site registry `{topology_ns}:gnode:topology`. ← relay policy (RelayPolicy, router.rs). ← geometric input Q64.64 buckets/Z-scores via register_service/topo_register. ← DTAP env = stream-key suffix (config.rs, dtap_schema.yaml).
-OUT → `SET {ss}:res:{id} '<json>' EX 10` (plain JSON: {id,status,result,error,timestamp:float}). → FCALL exec on ValKey. → relayed cmd to `{target}:gnode:unified:{env}`. → provisions COMMS stream via provision_service.
+OUT → `SET {ss}:res:{id} '<json>' EX 10` (plain JSON: {id,status,result,error,timestamp:float}). → `XADD {ss}:gnode:receipts:{env}` signed receipt beside every keyed reply (ed25519 NodeSigner, fail-closed: unsigned never emitted; body_ref=res-key, bh=sha256; receipt.rs). → FCALL exec on ValKey. → relayed cmd to `{target}:gnode:unified:{env}`. → provisions COMMS stream via provision_service.
 
 ## ::CONTRACT
 PROVIDES → unified-stream cmd protocol (t=c {id,t,c,p,ss,sn,ts}; p=JSON-string) | response (t=r {id,t,st,r,e,ri,ts}) | batch (t=bc {bi,tc,p:{commands:[…]}}) | 213 FCALL fns `^(GNODE|GCUBE|COMMS|GC)_…` | topology entity JSON {id,x,y,z,bk,zs,ra,m} | capability vector {dim:float} → tier D | signed-ext loader | inter-svc relay via `_rt`/`_rr`.
