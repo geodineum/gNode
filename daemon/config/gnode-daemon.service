@@ -1,13 +1,15 @@
 [Unit]
 Description=gNode (Geodineum Service Daemon) - Capability-based Service Discovery
 Documentation=https://github.com/geodineum/gNode
-# gnode-daemon requires ValKey. The canonical Geodineum ValKey unit is
-# valkey-gnode.service — created by Geodineum/install.sh
-# (ensure_canonical_valkey_unit); purge_legacy_valkey_units() removes the
-# apt-upstream valkey-server.service, so depending on that name leaves the
-# daemon un-restartable (systemd: "Unit valkey-server.service not found").
+# gnode-daemon needs ValKey, but the canonical valkey-gnode.service (created
+# by Geodineum/install.sh ensure_canonical_valkey_unit) exists ONLY where the
+# ValKey lives — the constellation master. Worker nodes reach it over the VPN
+# and have no such unit, so a hard Requires= leaves a worker's daemon
+# un-restartable (systemd: "Unit valkey-gnode.service not found"). Wants= keeps
+# master ordering/propagation and tolerates absence; the daemon's own reconnect
+# loop covers ValKey being down or remote.
 After=network.target valkey-gnode.service
-Requires=valkey-gnode.service
+Wants=valkey-gnode.service
 PartOf=valkey-gnode.service
 
 [Service]
