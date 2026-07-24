@@ -132,6 +132,7 @@ pub async fn dispatch(
     command: Command,
     site_id: String,
     topology: Arc<RwLock<GeometricTopology>>,
+    environment: Option<String>,
     debug_mode: bool,
 ) {
     let client = match FAST_LANE_CLIENT.get() {
@@ -229,6 +230,29 @@ pub async fn dispatch(
             );
         } else if debug_mode {
             debug!("[fast_lane] response written to {}", response_key);
+        }
+
+        // Durable channel: a signed receipt beside the ephemeral reply
+        // (additive; see contract §6, emit-then-remove).
+        let now = crate::integration::receipt::now_ms();
+        let env = environment.or_else(|| {
+            crate::integration::receipt::receipt_context().map(|c| c.environment.clone())
+        });
+        if let (Some(env), Some(receipt)) = (env, crate::integration::receipt::signed_response_receipt(
+            &request_id,
+            &command.command,
+            &response.status,
+            response.error.clone(),
+            key_site,
+            &response_key,
+            &response_json,
+            now,
+        )) {
+            if let Err(e) =
+                crate::integration::receipt::emit_receipt_async(&mut conn, &receipt, &env, now).await
+            {
+                warn!("[fast_lane] receipt emit failed for {}: {}", request_id, e);
+            }
         }
     } else {
         if debug_mode {

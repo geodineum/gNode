@@ -794,8 +794,16 @@ impl GNodeDaemon {
                                 "Receipt signer ready: {} ({}), pubkey published to {{{}}}:gnode:receipt_pubkeys",
                                 signer.signer_id(), signer.alg_id(), self.topology_namespace
                             ),
+                            // Publication is idempotent-per-boot; a transient
+                            // failure leaves an earlier boot's pubkey resolvable,
+                            // so emission stays enabled either way.
                             Err(e) => warn!("Receipt pubkey publish failed (non-fatal): {}", e),
                         }
+                        crate::integration::receipt::init_receipt_context(
+                            signer,
+                            self.node_id.clone(),
+                            self.environment.clone(),
+                        );
                     }
                     Err(e) => warn!(
                         "Receipt signer unavailable at {} (non-fatal; receipts will be unsigned when wired): {}",

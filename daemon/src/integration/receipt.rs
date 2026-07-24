@@ -13,16 +13,15 @@
 //! and gFlow run receipts — so the schema below is deliberately a superset of
 //! both, with gFlow-specific fields optional.
 //!
-//! SIGNING IS NOT YET WIRED. Principle 4 of the contract is "provenance replaces
-//! secrecy": a receipt is meant to be Ed25519-SIGNED so it can live in the
-//! shared commons and still be trusted. The daemon today only VERIFIES
-//! signatures (with the offline author pubkey) and holds no signing key, so the
-//! key model is an open decision (per-node key? node-local receipt key? — see
-//! the contract §8 and service-provisioning). `canonical_bytes()` defines
-//! exactly what a signature would cover, so signing drops in additively once the
-//! key model lands. Until then receipts carry `v=1` and an empty `sig`, and this
-//! module MUST NOT be wired into live emission on a shared stream — an unsigned
-//! receipt in the commons is unverifiable data observers would eventually trust.
+//! Principle 4 of the contract is "provenance replaces secrecy": a receipt in
+//! the shared commons is trustworthy only because it is SIGNED. Each node holds
+//! its own signing key (`load_or_generate_signer`; the private key never leaves
+//! the node) and publishes only the pubkey to the topology registry, where
+//! verifiers resolve a receipt's `signer` fingerprint. Live emission goes
+//! through [`ReceiptContext`] — set once at daemon startup — and the
+//! `signed_response_receipt` builder, which refuses to produce an unsigned
+//! receipt: no context or a signing failure means no receipt, never an
+//! unverifiable one on a shared stream.
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use redis::Connection;
@@ -217,7 +216,7 @@ impl Receipt {
 
 /// A signature scheme, defined over raw bytes (keys and signatures differ
 /// wildly in size between schemes, so nothing typed leaks past this boundary).
-pub trait SignatureScheme {
+pub trait SignatureScheme: Send + Sync {
     /// Wire id, e.g. `ed25519`. Folded into the signed bytes.
     fn alg_id(&self) -> &'static str;
     /// Generate a keypair: (private_bytes, public_bytes).
@@ -432,8 +431,6 @@ pub fn body_hash(body: &str) -> String {
 /// Additive and non-destructive: this does not touch the reply key or the
 /// command stream. Trim uses MINID (by age), never MAXLEN (by count) — the
 /// resource is bytes over weeks, not a message count.
-///
-/// NOTE: not called on any live path yet — see the module doc on signing.
 pub fn emit_receipt(
     conn: &mut Connection,
     receipt: &Receipt,
@@ -465,9 +462,128 @@ pub fn emit_receipt(
     Ok(id)
 }
 
+/// Async twin of [`emit_receipt`] for the Fast lane's multiplexed connection.
+pub async fn emit_receipt_async(
+    conn: &mut redis::aio::MultiplexedConnection,
+    receipt: &Receipt,
+    environment: &str,
+    now_ms: u64,
+) -> redis::RedisResult<String> {
+    let key = receipt_stream_key(&receipt.site, environment);
+    let fields = receipt.to_fields();
+
+    let id: String = {
+        let mut cmd = redis::cmd("XADD");
+        cmd.arg(&key).arg("*");
+        for (k, v) in &fields {
+            cmd.arg(k).arg(v);
+        }
+        cmd.query_async(conn).await?
+    };
+
+    let cutoff_ms = now_ms.saturating_sub(RECEIPT_RETENTION_MS);
+    let cutoff_id = format!("{}-0", cutoff_ms);
+    let _: redis::RedisResult<i64> = redis::cmd("XTRIM")
+        .arg(&key)
+        .arg("MINID")
+        .arg("~")
+        .arg(&cutoff_id)
+        .query_async(conn)
+        .await;
+
+    Ok(id)
+}
+
+// ───────────────────────────── emission context ─────────────────────────────
+
+/// The daemon-wide emission identity: this node's signer plus the identity and
+/// default environment receipts carry. Set once at startup, read by every
+/// response path (the Fast lane's spawned tasks included, hence the static).
+pub struct ReceiptContext {
+    pub signer: NodeSigner,
+    pub node_id: String,
+    /// Fallback environment when one cannot be parsed from a stream key.
+    pub environment: String,
+}
+
+static RECEIPT_CONTEXT: std::sync::OnceLock<ReceiptContext> = std::sync::OnceLock::new();
+
+/// Install the emission context. Idempotent; the first caller wins.
+pub fn init_receipt_context(signer: NodeSigner, node_id: String, environment: String) {
+    let _ = RECEIPT_CONTEXT.set(ReceiptContext { signer, node_id, environment });
+}
+
+/// The emission context, if the daemon initialized one. None ⇒ no receipts
+/// (single-shot tools, tests, or a node whose signer failed to load).
+pub fn receipt_context() -> Option<&'static ReceiptContext> {
+    RECEIPT_CONTEXT.get()
+}
+
+/// The environment segment of a unified command stream key
+/// (`{site}:gnode:unified:{env}`); None for any other shape.
+pub fn env_from_stream_key(stream_key: &str) -> Option<&str> {
+    stream_key
+        .rsplit_once(":unified:")
+        .map(|(_, env)| env)
+        .filter(|e| !e.is_empty())
+}
+
+/// Build and SIGN a response receipt from the emission context. Returns None —
+/// emit nothing — when no context is installed or signing fails: an unsigned
+/// receipt never enters the shared stream. `response_status` is the reply's
+/// wire status (`ok` passes through; anything else records as `failed`).
+#[allow(clippy::too_many_arguments)]
+pub fn signed_response_receipt(
+    correlation_id: &str,
+    command: &str,
+    response_status: &str,
+    error: Option<String>,
+    site: &str,
+    body_ref: &str,
+    body_json: &str,
+    now_ms: u64,
+) -> Option<Receipt> {
+    let ctx = receipt_context()?;
+    let status = if response_status == "ok" { "ok" } else { "failed" };
+    let mut receipt = Receipt::for_response(
+        correlation_id,
+        command,
+        status,
+        error,
+        site,
+        ctx.node_id.as_str(),
+        now_ms,
+        body_ref,
+        body_json,
+    );
+    if let Err(e) = receipt.sign(&ctx.signer) {
+        log::warn!("receipt signing failed for {} — receipt suppressed: {}", correlation_id, e);
+        return None;
+    }
+    Some(receipt)
+}
+
+/// Milliseconds since the epoch.
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_env_from_stream_key() {
+        assert_eq!(
+            env_from_stream_key("{nierto_com}:gnode:unified:production"),
+            Some("production")
+        );
+        assert_eq!(env_from_stream_key("{nierto_com}:gnode:unified:"), None);
+        assert_eq!(env_from_stream_key("{geodineum}:gnode:broadcast"), None);
+    }
 
     #[test]
     fn test_stream_key_hash_tagged_under_gnode() {

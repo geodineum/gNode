@@ -1335,11 +1335,14 @@ pub fn process_command_batch(
                 let cmd_owned = command.clone();
                 let site_owned = site_id.to_string();
                 let topology_clone = topology.clone();
+                let env_owned = crate::integration::receipt::env_from_stream_key(stream_key)
+                    .map(String::from);
                 let spawned = crate::integration::fast_lane::try_spawn_fast(
                     crate::integration::fast_lane::dispatch(
                         cmd_owned,
                         site_owned,
                         topology_clone,
+                        env_owned,
                         debug_mode,
                     ),
                 );
@@ -1404,6 +1407,29 @@ pub fn process_command_batch(
                     .query::<()>(conn);
                 if debug_level >= LogLevel::Info {
                     info!("Wrote response to polling key: {}", response_key);
+                }
+
+                // Durable channel: a signed receipt beside the ephemeral reply.
+                // Additive — the t=r/br stream writes below are untouched until
+                // the receipt is verified live (contract §6, emit-then-remove).
+                let now = crate::integration::receipt::now_ms();
+                let env = crate::integration::receipt::env_from_stream_key(stream_key)
+                    .map(String::from)
+                    .or_else(|| crate::integration::receipt::receipt_context()
+                        .map(|c| c.environment.clone()));
+                if let (Some(env), Some(receipt)) = (env, crate::integration::receipt::signed_response_receipt(
+                    &request_id,
+                    &command.command,
+                    &response.status,
+                    response.error.clone(),
+                    key_site,
+                    &response_key,
+                    &response_json,
+                    now,
+                )) {
+                    if let Err(e) = crate::integration::receipt::emit_receipt(conn, &receipt, &env, now) {
+                        warn!("receipt emit failed for {}: {}", request_id, e);
+                    }
                 }
             }
 
