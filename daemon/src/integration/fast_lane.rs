@@ -123,6 +123,8 @@ where
 ///   3. Awaits the handler.
 ///   4. Writes the response JSON to the `{ss}:res:{request_id}` polling
 ///      key (10 s TTL) — same key shape PHP clients poll on.
+///   5. Emits a signed receipt to `{ss}:gnode:receipts:{env}` (receipt.rs;
+///      suppressed when no ReceiptContext or signing fails).
 ///
 /// Errors are logged but never propagated — the worker thread that
 /// spawned this task has already moved on, so there's no caller to
