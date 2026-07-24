@@ -82,6 +82,70 @@ valkey_admin_cli() {
     fi
 }
 
+# Manifest-policy composer (same lib the web path sources) — the service path
+# composes grants from the manifest's consumes/produces instead of a uniform
+# block. Graceful: missing lib ⇒ legacy uniform grants.
+_GEO_LIB_DIR="${GEODINEUM_ROOT:-/opt/geodineum}/Geodineum/lib"
+if [[ -r "$_GEO_LIB_DIR/manifest-policy.sh" ]]; then
+    # shellcheck source=/opt/geodineum/Geodineum/lib/manifest-policy.sh
+    source "$_GEO_LIB_DIR/manifest-policy.sh"
+fi
+
+# Apply keyspace + channel grants for $ACL_USER. Declarative when the resolved
+# manifest declares consumes/produces (composed + validated, own-namespace only,
+# REFUSAL ABORTS — a violated manifest must not silently fall back to broad
+# grants); legacy uniform block otherwise (safe default: an undeclared service
+# keeps exactly its historical powerset, never an empty grant set).
+# Cross-service access is NEVER a self-declared grant — that is the daemon
+# relay's lane, with its own authorization (relay/policy.rs).
+apply_service_grants() {
+    local _key_grants=() _channel_grants=() _use_manifest=false
+    if [[ -n "$RESOLVED_YAML" ]] && declare -F policy_manifest_has_data >/dev/null 2>&1 \
+       && policy_manifest_has_data "$RESOLVED_YAML"; then
+        log_info "Manifest declarations detected: $RESOLVED_YAML"
+        if mapfile -t _key_grants < <(policy_compose_key_grants "$RESOLVED_YAML" "$SITE_ID" "$SITE_ID" "$TOPOLOGY_NS") \
+           && mapfile -t _channel_grants < <(policy_compose_channel_grants "$RESOLVED_YAML" "$SITE_ID" "$SITE_ID" "$TOPOLOGY_NS") \
+           && [[ ${#_key_grants[@]} -gt 0 ]]; then
+            _use_manifest=true
+        else
+            log_error "Manifest grant composition refused — aborting onboarding (namespace policy)"
+            exit 1
+        fi
+    fi
+
+    if [[ "$_use_manifest" == "true" ]]; then
+        # Safe base: own namespace (tagged + legacy alias) + the shared gnode
+        # bus — the floor every service needs to register and be discovered.
+        valkey_admin_cli ACL SETUSER "$ACL_USER" resetkeys \
+            "~${SITE_ID}:*" \
+            "~{${SITE_ID}}:*" \
+            "~{${TOPOLOGY_NS}}:gnode:*" \
+            "${_key_grants[@]}" >/dev/null
+        log_success "Keyspace grants set (manifest-driven: ${#_key_grants[@]} declared + safe base)"
+    else
+        valkey_admin_cli ACL SETUSER "$ACL_USER" resetkeys \
+            "~${SITE_ID}:*" \
+            "~{${SITE_ID}}:*" \
+            "~{testing}:gnode:*" \
+            "~{staging}:gnode:*" \
+            "~{acceptance}:gnode:*" \
+            "~{production}:gnode:*" \
+            "~{${TOPOLOGY_NS}}:gnode:*" \
+            "~gnode:*" \
+            "~topology:*" \
+            "~template:*" \
+            "~membership:*" >/dev/null
+        log_success "Keyspace grants set (legacy uniform set — no manifest declarations)"
+    fi
+
+    if [[ "$_use_manifest" == "true" && ${#_channel_grants[@]} -gt 0 ]]; then
+        valkey_admin_cli ACL SETUSER "$ACL_USER" resetchannels "${_channel_grants[@]}" >/dev/null
+        log_success "Channel grants set (manifest-driven, ${#_channel_grants[@]})"
+    else
+        valkey_admin_cli ACL SETUSER "$ACL_USER" resetchannels "&*" >/dev/null
+    fi
+}
+
 # Daemon password for non-ACL operations (topology registration). Every node
 # that joined the constellation holds this credential.
 valkey_daemon_cli() {
@@ -359,20 +423,9 @@ elif [[ "$PASSWORD_EXISTS" == "true" && "$ACL_EXISTS" == "false" ]]; then
         valkey_admin_cli <<EOF >/dev/null
 ACL SETUSER $ACL_USER on resetpass >$PASSWORD
 EOF
-        # Set keyspace patterns
-        valkey_admin_cli ACL SETUSER "$ACL_USER" resetkeys \
-            "~${SITE_ID}:*" \
-            "~{${SITE_ID}}:*" \
-            "~{testing}:gnode:*" \
-            "~{staging}:gnode:*" \
-            "~{acceptance}:gnode:*" \
-            "~{production}:gnode:*" \
-            "~{${TOPOLOGY_NS}}:gnode:*" \
-            "~gnode:*" \
-            "~topology:*" \
-            "~template:*" \
-            "~membership:*" >/dev/null
-        valkey_admin_cli ACL SETUSER "$ACL_USER" resetchannels "&*" >/dev/null
+        # Keyspace + channel grants: manifest-composed when declared, legacy
+        # uniform otherwise (apply_service_grants, top of file).
+        apply_service_grants
         valkey_admin_cli ACL SETUSER "$ACL_USER" nocommands \
             +xread +xreadgroup +xadd +xack +xclaim +xpending +xinfo +xlen +xtrim +xrange +xrevrange +xgroup +xdel \
             +fcall +fcall_ro \
@@ -420,20 +473,9 @@ else
         valkey_admin_cli <<EOF >/dev/null
 ACL SETUSER $ACL_USER on resetpass >$PASSWORD
 EOF
-        # Set keyspace patterns
-        valkey_admin_cli ACL SETUSER "$ACL_USER" resetkeys \
-            "~${SITE_ID}:*" \
-            "~{${SITE_ID}}:*" \
-            "~{testing}:gnode:*" \
-            "~{staging}:gnode:*" \
-            "~{acceptance}:gnode:*" \
-            "~{production}:gnode:*" \
-            "~{${TOPOLOGY_NS}}:gnode:*" \
-            "~gnode:*" \
-            "~topology:*" \
-            "~template:*" \
-            "~membership:*" >/dev/null
-        valkey_admin_cli ACL SETUSER "$ACL_USER" resetchannels "&*" >/dev/null
+        # Keyspace + channel grants: manifest-composed when declared, legacy
+        # uniform otherwise (apply_service_grants, top of file).
+        apply_service_grants
         valkey_admin_cli ACL SETUSER "$ACL_USER" nocommands \
             +xread +xreadgroup +xadd +xack +xclaim +xpending +xinfo +xlen +xtrim +xrange +xrevrange +xgroup +xdel \
             +fcall +fcall_ro \
