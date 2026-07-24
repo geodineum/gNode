@@ -802,6 +802,29 @@ fn start_daemon(redis_url: &str, dimensions: usize, environment: &str, daemon_na
 
 // Thread configuration is now re-exported from lib.rs
 
+// Cursor-iterated SCAN (KEYS is ACL-denied for the daemon tier on worker
+// nodes, and a single SCAN batch is partial by design).
+fn scan_keys(conn: &mut redis::Connection, pattern: &str) -> Result<Vec<String>> {
+    let mut keys = Vec::new();
+    let mut cursor: u64 = 0;
+    loop {
+        let (next, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+            .arg(cursor)
+            .arg("MATCH")
+            .arg(pattern)
+            .arg("COUNT")
+            .arg(500)
+            .query(conn)
+            .map_err(GeometricError::Redis)?;
+        keys.extend(batch);
+        cursor = next;
+        if cursor == 0 {
+            break;
+        }
+    }
+    Ok(keys)
+}
+
 // Function to stop the daemon (will send a signal via Redis)
 // Note: Daemon is now site-agnostic, searches for all daemon PIDs in the environment
 fn stop_daemon(redis_url: &str, environment: &str, stream_prefix: &str) -> Result<()> {
@@ -815,10 +838,7 @@ fn stop_daemon(redis_url: &str, environment: &str, stream_prefix: &str) -> Resul
     // Check if daemon is running by querying PID keys (search all sites in environment)
     // Pattern: {*}:gnode:{environment}:daemon:pid:* or gnode:daemon:pid:{environment}:*
     let pattern = format!("{}:daemon:pid:{}:*", stream_prefix, environment);
-    let pid_keys: Vec<String> = redis::cmd("KEYS")
-        .arg(&pattern)
-        .query(&mut conn)
-        .map_err(GeometricError::Redis)?;
+    let pid_keys: Vec<String> = scan_keys(&mut conn, &pattern)?;
 
     if pid_keys.is_empty() {
         info!("No running daemons found");
@@ -875,10 +895,7 @@ fn check_daemon_status(redis_url: &str, environment: &str, stream_prefix: &str) 
 
     // Check if daemon is running by querying PID keys
     let pattern = format!("{}:daemon:pid:{}:*", stream_prefix, environment);
-    let pid_keys: Vec<String> = redis::cmd("KEYS")
-        .arg(&pattern)
-        .query(&mut conn)
-        .map_err(GeometricError::Redis)?;
+    let pid_keys: Vec<String> = scan_keys(&mut conn, &pattern)?;
 
     if pid_keys.is_empty() {
         info!("No running daemons found");
