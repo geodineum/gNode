@@ -1,0 +1,7 @@
+[Unit]
+Description=Geodineum grant-request timeout sweep (auto-deny expired pending)
+Documentation=file:/opt/geodineum/Geodineum-pro/CONTRACTS/access-grants.scn.md
+
+[Service]
+Type=oneshot
+ExecStart=/opt/geodineum/gNode/scripts/cli/grants.sh sweep

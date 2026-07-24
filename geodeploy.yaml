@@ -43,6 +43,11 @@ cli:
       description: Rebuild gNode daemon binary from source
       requires_sudo: true
       category: Daemon
+    - name: grants
+      handler: scripts/cli/grants.sh
+      description: Grant-request loop — request <svc> <patterns> | pending | approve <id> | deny <id> | show <svc> | sweep (auto-deny timeouts); ledger-then-apply, COMMS email notify
+      requires_sudo: true
+      category: Topology
     - name: topology
       handler: scripts/cli/topology.sh
       description: Topology — list|all|show|stats|sites | register {tool|service <site> [profile]} | deregister <site> <entity|--all>
