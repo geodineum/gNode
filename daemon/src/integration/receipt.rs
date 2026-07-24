@@ -563,6 +563,16 @@ pub fn signed_response_receipt(
     Some(receipt)
 }
 
+/// One-time emission proof: the first receipt a daemon process emits is logged
+/// at info so live wiring is verifiable from the journal alone (per-request
+/// logging stays off).
+pub fn log_first_emission(stream_key: &str, entry_id: &str) {
+    static FIRST: std::sync::Once = std::sync::Once::new();
+    FIRST.call_once(|| {
+        log::info!("First receipt emitted to {} (id {})", stream_key, entry_id);
+    });
+}
+
 /// Milliseconds since the epoch.
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()

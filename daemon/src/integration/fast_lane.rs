@@ -248,10 +248,11 @@ pub async fn dispatch(
             &response_json,
             now,
         )) {
-            if let Err(e) =
-                crate::integration::receipt::emit_receipt_async(&mut conn, &receipt, &env, now).await
+            match crate::integration::receipt::emit_receipt_async(&mut conn, &receipt, &env, now).await
             {
-                warn!("[fast_lane] receipt emit failed for {}: {}", request_id, e);
+                Ok(id) => crate::integration::receipt::log_first_emission(
+                    &crate::integration::receipt::receipt_stream_key(key_site, &env), &id),
+                Err(e) => warn!("[fast_lane] receipt emit failed for {}: {}", request_id, e),
             }
         }
     } else {
