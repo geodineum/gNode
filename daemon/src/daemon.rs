@@ -1779,7 +1779,7 @@ impl GNodeDaemon {
         // {env}:{component}). Distinct from the pid key above: a stable
         // component name and a fresh ts, refreshed by the heartbeat loop below.
         if let Ok(mut conn) = crate::integration::connection_manager::get_connection() {
-            let hb_key = format!("{}:heartbeat:{}:gnode-daemon", self.stream_prefix, self.environment);
+            let hb_key = format!("{{{}}}:{}:heartbeat:{}:gnode-daemon", self.topology_namespace, self.stream_prefix, self.environment);
             let hb_ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -1906,7 +1906,7 @@ impl GNodeDaemon {
                 // Refresh the unified component heartbeat with a fresh ts so the
                 // dashboard's last-seen stays accurate.
                 if let Ok(mut conn) = crate::integration::connection_manager::get_connection() {
-                    let hb_key = format!("{}:heartbeat:{}:gnode-daemon", self.stream_prefix, self.environment);
+                    let hb_key = format!("{{{}}}:{}:heartbeat:{}:gnode-daemon", self.topology_namespace, self.stream_prefix, self.environment);
                     let hb_ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
