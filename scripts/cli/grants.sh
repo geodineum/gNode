@@ -34,7 +34,10 @@ log()  { echo "[grants] $*"; }
 die()  { echo "[grants] ERROR: $*" >&2; exit 1; }
 
 # Daemon-tier for reads/request-writes (every node); admin for ACL mutation.
-vk()       { "$VCLI" --user gnode_daemon "$@"; }
+# The wrapper resolves the daemon TIER from VALKEY_USER (env), loading that
+# user's password. Passing `--user` as an ARG appends a second flag while the
+# wrapper still loads the DEFAULT user's password → NOAUTH on every call.
+vk()       { VALKEY_USER=gnode_daemon "$VCLI" "$@"; }
 vk_admin() {
     [[ -f "$CRED_DIR/valkey.password" ]] || die "admin credential absent — approve/deny run on the constellation master only"
     REDISCLI_AUTH="$(cat "$CRED_DIR/valkey.password")" \
