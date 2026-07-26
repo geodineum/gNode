@@ -52,6 +52,17 @@ WorkingDirectory=/opt/geodineum/gNode
 #   3. /etc/geodineum/components/gnode-daemon/nodes/ (centralized ecosystem)
 #   4. daemon/config/nodes/ (legacy)
 # NOTE: --site-id and --environment removed - daemon discovers sites and listens to ALL DTAP environments
+# Verify the env files above are actually readable by User=gnode before
+# trusting anything they were supposed to define. `EnvironmentFile=-` treats an
+# unreadable file exactly like an absent one — silently — and daemon.env is not
+# optional in effect: it carries GNODE_NODE_ID. Lose it and the daemon starts
+# happily under the default identity, which on a multi-node constellation means
+# two daemons sharing one consumer name, contending over the same pending
+# entries rather than load-balancing. That is a hard failure to diagnose from
+# the outside and it would leave no log line at all.
+# Guarded so a host without the helper still starts.
+ExecStartPre=/bin/bash -c 'if [ -x /usr/local/lib/geodineum/assert-env-readable.sh ]; then exec /usr/local/lib/geodineum/assert-env-readable.sh /etc/geodineum/components/gnode-daemon/daemon.env; else echo "env-preflight: helper not installed at /usr/local/lib/geodineum — env readability UNVERIFIED" >&2; fi'
+
 # Verify credential file exists before starting
 # VALKEY_PASSWORD_FILE comes from daemon.env (default: /etc/geodineum/credentials/valkey_daemon.password)
 ExecStartPre=/bin/bash -c '\
