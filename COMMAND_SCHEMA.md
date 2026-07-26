@@ -694,7 +694,7 @@ Metrics, health checks, error tracking.
 
 | Function | Keys | Args | Returns | Description |
 |----------|------|------|---------|-------------|
-| `GNODE_MONITORING_TRACK_METRIC` | — | site_id, metric_type, value, extra_json | `{ok}` | Track a metric |
+| `GNODE_MONITORING_TRACK_METRIC` | — | site_id, metric_type, value, `extra_json?` | `{ok}` | Track a metric. `extra_json` is OPTIONAL — omit the argument entirely, or pass `''`; both mean absent. Only a non-empty, non-JSON value is an error. |
 | `GNODE_MONITORING_METRICS_AGGREGATE` | — | site_id, metric_type, window_s | `{min, max, avg, count, sum}` | Aggregate over time window |
 | `GNODE_MONITORING_CLEANUP` | — | site_id, max_age_s | `{deleted_count}` | Clean stale metrics |
 | `GNODE_MONITORING_HEALTH_CHECK` | — | site_id | `{status, checks}` | Site health check |

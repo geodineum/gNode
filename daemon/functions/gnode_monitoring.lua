@@ -66,9 +66,10 @@ server.register_function{
         local value = tonumber(args[3]) or 1
         local extra_json = args[4]
         
-        -- Parse extra data if provided
+        -- Parse extra data if provided. An empty string is ABSENT, not
+        -- malformed — in Lua '' is truthy, so this must be tested explicitly.
         local extra = nil
-        if extra_json then
+        if extra_json and extra_json ~= '' then
             local success, parsed = pcall(cjson.decode, extra_json)
             if success then
                 extra = parsed
