@@ -629,6 +629,99 @@ mod tests {
     }
 
     #[test]
+#[test]
+    fn test_signature_is_pinned_for_cross_language_verifiers() {
+        // The daemon signs in Rust; the sign-off script verifies in Python, and
+        // SB-8.88's polyglot clients will verify in other languages again. That
+        // makes the exact signature bytes an interop contract, and interop
+        // contracts break silently: a change to the seed handling, the alg id,
+        // or the canonical byte layout would still round-trip perfectly inside
+        // Rust while every external verifier started rejecting live receipts —
+        // which looks like tampering, not like a regression.
+        //
+        // Ed25519 is deterministic (RFC 8032), so a fixed seed over fixed input
+        // has exactly one correct signature. It is pinned here, and the value
+        // below is confirmed to verify from Python's `cryptography` against the
+        // same canonical bytes.
+        let seed = vec![7u8; 32];
+        let scheme = Ed25519Scheme;
+        let pub_b = scheme.public_from_private(&seed).unwrap();
+        let signer = NodeSigner {
+            scheme: Box::new(Ed25519Scheme),
+            private_bytes: seed,
+            public_bytes: pub_b.clone(),
+        };
+        let mut r = Receipt::for_response(
+            "req-1", "cmd", "ok", None, "site", "node", 42, "ref", "body",
+        );
+        r.sign(&signer).unwrap();
+
+        assert_eq!(
+            hex(&pub_b),
+            "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
+            "public key derivation from the seed changed"
+        );
+        assert_eq!(
+            r.signer, "fe812c12f3ab4ce6",
+            "signer fingerprint (sha256(pubkey)[:8]) changed — verifiers resolve by this"
+        );
+        assert_eq!(
+            r.sig,
+            "c2d062f2cf0cb4525dbf5da86629cf207767bba3164097c8454efbc8d7285715\
+07c3d2aeb328c142ccd3da1b9c631f2e246ac3cc5559a9a59499cf877c61f40c",
+            "signature over the canonical bytes changed — every external \
+             verifier will now reject live receipts"
+        );
+    }
+
+    #[test]
+    fn test_canonical_bytes_are_pinned() {
+        // The signed byte string is a CROSS-LANGUAGE contract, not an internal
+        // detail: the daemon signs it in Rust, the sign-off script verifies it
+        // in Python, and polyglot clients will verify it in whatever they are
+        // written in. Nothing else in this file would notice a reordered field
+        // or a renamed key — every producer and verifier would simply agree on
+        // a new format and every receipt signed before the change would fail
+        // to verify, which reads as tampering rather than as a refactor.
+        //
+        // So the expected value is written out literally. If this test fails,
+        // the wire format changed: bump `v` and update every verifier, or put
+        // the field back.
+        let mut r = Receipt::for_response(
+            "req-1", "cmd", "ok", None, "site", "node", 42, "ref", "body",
+        );
+        r.alg = "ed25519".to_string();
+        assert_eq!(
+            String::from_utf8(r.canonical_bytes()).unwrap(),
+            "v=1\n\
+             alg=ed25519\n\
+             cid=req-1\n\
+             cmd=cmd\n\
+             st=ok\n\
+             e=\n\
+             ss=site\n\
+             sn=node\n\
+             ts=42\n\
+             bref=ref\n\
+             bh=230d8358dc8e8890b4c58deeb62912ee2f20357ae92a5cc861b98e68fe31acb5\n\
+             pid=\n\
+             fid=\n"
+        );
+
+        // Absent optionals sign as the EMPTY STRING, not as an omitted line.
+        // A verifier that skips the line instead produces different bytes and
+        // rejects every receipt that has no error and no lineage — i.e. all of
+        // the healthy ones.
+        r.error = Some("boom".to_string());
+        r.parent_id = Some("p1".to_string());
+        r.flow_id = Some("f1".to_string());
+        let signed = String::from_utf8(r.canonical_bytes()).unwrap();
+        assert!(signed.contains("e=boom\n"));
+        assert!(signed.contains("pid=p1\n"));
+        assert!(signed.contains("fid=f1\n"));
+    }
+
+    #[test]
     fn test_to_fields_omits_empty_optionals() {
         let r = Receipt::for_response(
             "req-1", "cmd", "ok", None, "s", "n", 1, "ref", "body",
