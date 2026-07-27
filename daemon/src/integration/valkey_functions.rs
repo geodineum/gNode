@@ -66,7 +66,15 @@ impl FunctionLibrary {
             "gnode_core.lua" => FunctionLibrary::Core,
             "gnode_geometric.lua" => FunctionLibrary::Geometric,
             "gnode_stream.lua" => FunctionLibrary::Stream,
-            "gnode_batch.lua" | "gnode_batch_resp3.lua" => FunctionLibrary::Batch,
+            // NOT `| "gnode_batch_resp3.lua"`. Those are two DIFFERENT ValKey
+            // libraries — the files declare `#!lua name=gnode_batch` and
+            // `#!lua name=gnode_batch_resp3` — so mapping both onto Batch made
+            // the loader treat the second as already loaded and skip it.
+            // GNODE_BATCH_MGET_RESP3 / MSET_RESP3 / MDEL_RESP3 were therefore
+            // never registered by the daemon on any node whose libraries come
+            // from the daemon rather than from load-valkey-functions.sh.
+            // gnode_batch_resp3.lua now falls through to Custom and loads alone.
+            "gnode_batch.lua" => FunctionLibrary::Batch,
             "gnode_lock.lua" => FunctionLibrary::Lock,
             "gnode_group.lua" => FunctionLibrary::Group,
             "gnode_hash.lua" => FunctionLibrary::Hash,
@@ -265,6 +273,10 @@ pub fn initialize_functions(
         }
     }
     
+    // Files the sweep declined to load, so the count check below can name them.
+    let mut skipped_files: Vec<String> = Vec::new();
+    let mut lua_files_on_disk: usize = 0;
+
     // Check for any custom libraries not in the standard list
     if let Ok(entries) = std::fs::read_dir(functions_path) {
         for entry in entries.filter_map(|e| e.ok()) {
@@ -274,10 +286,25 @@ pub fn initialize_functions(
                     .and_then(|name| name.to_str())
                     .unwrap_or_default();
                 
+                lua_files_on_disk += 1;
                 let library = FunctionLibrary::from_file_name(file_name);
-                
-                // Skip if already loaded from standard list
+
+                // Skip if already loaded from standard list — but SAY SO.
+                // A silent skip here is how three functions went missing for
+                // months: two distinct .lua files mapped to one FunctionLibrary
+                // variant, so the second looked already-loaded and was dropped
+                // without a word. The count on disk and the count loaded
+                // disagreed and nothing compared them. If this fires, either the
+                // file is a genuine duplicate or from_file_name is collapsing
+                // two libraries onto one variant — the latter is a bug.
                 if loaded_functions.contains_key(&library) {
+                    warn!(
+                        "Function library file {} maps to an already-loaded library ({:?}) and was SKIPPED — \
+                         if {} declares its own `#!lua name=`, its functions are NOT registered and \
+                         from_file_name is collapsing two libraries onto one variant",
+                        file_name, library, file_name
+                    );
+                    skipped_files.push(file_name.to_string());
                     continue;
                 }
                 
@@ -296,9 +323,30 @@ pub fn initialize_functions(
         }
     }
     
+    // Assert the tree and the load agree. The daemon reported "Found 23
+    // libraries" for months while daemon/functions/ held 24 `.lua` files, and
+    // nothing in the code ever compared the two numbers — so the discrepancy
+    // was only ever visible to someone who counted the directory by hand.
+    // A count that is never checked is not a check.
+    if lua_files_on_disk > 0 && loaded_functions.len() != lua_files_on_disk {
+        warn!(
+            "LIBRARY COUNT MISMATCH: {} .lua files in {} but {} libraries loaded{}. \
+             Every file declaring its own `#!lua name=` must map to a distinct \
+             FunctionLibrary variant in from_file_name.",
+            lua_files_on_disk,
+            functions_path.display(),
+            loaded_functions.len(),
+            if skipped_files.is_empty() {
+                String::new()
+            } else {
+                format!(" (skipped: {})", skipped_files.join(", "))
+            }
+        );
+    }
+
     // Log results
     if load_count > 0 {
-        info!("Successfully loaded {} ValKey functions from {} libraries", 
+        info!("Successfully loaded {} ValKey functions from {} libraries",
             load_count, loaded_functions.len());
         
         // Store ValKey function manager in shared state
@@ -1431,5 +1479,51 @@ mod tests {
         // This test will only work if the functions directory exists
         let result = initialize_functions(&client, "test", true);
         println!("Initialize functions result: {:?}", result);
+    }
+
+    #[test]
+    fn test_every_lua_file_maps_to_a_distinct_library() {
+        // The loader skips a file whose FunctionLibrary is already loaded, so
+        // two files collapsing onto one variant means the second NEVER loads.
+        // That is exactly what happened: gnode_batch.lua and
+        // gnode_batch_resp3.lua both mapped to Batch, and
+        // GNODE_BATCH_{MGET,MSET,MDEL}_RESP3 were never registered by the
+        // daemon. Both files declare their own `#!lua name=`, so they are two
+        // libraries and must map to two variants.
+        assert_ne!(
+            FunctionLibrary::from_file_name("gnode_batch.lua"),
+            FunctionLibrary::from_file_name("gnode_batch_resp3.lua"),
+            "gnode_batch and gnode_batch_resp3 are distinct ValKey libraries"
+        );
+
+        // And the general rule, checked against the real directory: no two
+        // .lua files may share a variant. A count that is never checked is not
+        // a check — this is the check.
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("functions");
+        if !dir.is_dir() {
+            return; // functions/ not present in this checkout; nothing to assert
+        }
+        let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut files = 0usize;
+        for entry in std::fs::read_dir(&dir).expect("read functions dir").flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("lua") {
+                continue;
+            }
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or_default().to_string();
+            files += 1;
+            let lib = format!("{:?}", FunctionLibrary::from_file_name(&name));
+            if let Some(prev) = seen.insert(lib.clone(), name.clone()) {
+                panic!(
+                    "{} and {} both map to FunctionLibrary::{} — the second will be \
+                     silently skipped by the loader and its functions never registered",
+                    prev, name, lib
+                );
+            }
+        }
+        assert_eq!(
+            seen.len(), files,
+            "every .lua file in functions/ must map to a distinct FunctionLibrary"
+        );
     }
 }
