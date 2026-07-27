@@ -16,10 +16,16 @@
 #                              (scanned from the environment; any env var
 #                              matching the pattern is checked)
 #   GNODE_EXT_DIR            - directory of signed extension subdirs.
-#                              Each subdir must carry a manifest.yaml +
-#                              manifest.sig verified against the public
-#                              key at $AUTHOR_PUBKEY_PEM. Unverified
-#                              subdirs are skipped with a warning.
+#                              Each subdir must carry extension.yaml +
+#                              extension.sig, verified by
+#                              `gnode-daemon verify-extension` (the same
+#                              check build.rs runs). Unverified subdirs are
+#                              skipped with a warning. NOTE: the older
+#                              manifest.yaml/manifest.sig scheme is RETIRED —
+#                              see the verification section below; extensions
+#                              never carried manifest.yaml, so while this
+#                              header described it every extension was
+#                              skipped and no Lua libraries loaded.
 #   AUTHOR_PUBKEY_PEM        - override the default pubkey path
 #                              (default: /etc/geodineum/gnode/ext-author.pub)
 
