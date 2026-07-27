@@ -2734,3 +2734,57 @@ server.register_function{
     flags = {'no-writes'},
     description = 'Gets stream keys and status for a site across all environments'
 }
+-- ---------------------------------------------------------------------------
+-- Keyed-rendezvous reply reader (T-F)
+-- ---------------------------------------------------------------------------
+-- The command stream carries COMMANDS, not responses (receipt-stream contract,
+-- principle 2). A responder writes its reply to `{site}:res:{correlation_id}`;
+-- this reads those replies back, in a batch, for a caller waiting on several.
+--
+-- WHY A NEW FUNCTION RATHER THAN GNODE_CACHE_GET: that one HINCRBYs a hit/miss
+-- metric, so it writes, so it can never carry `no-writes` and can never be
+-- called through FCALL_RO. Callers that hold only `+fcall_ro` — gFlow's
+-- `gnode_client_geodine` among them — therefore cannot use it to poll a reply.
+-- This function only reads, so it is `no-writes` and needs no ACL change.
+--
+-- BATCHED because the caller polls a SET of outstanding ids on a timer. One
+-- round trip for N ids beats N round trips, and it keeps the poll cost flat as
+-- the number of in-flight requests grows.
+--
+-- Returns a flat array [id, value, id, value, ...] for the ids that are
+-- present; absent ids are simply omitted, so "no reply yet" and "no such
+-- request" are the same answer — which is correct here, because a reply key
+-- expires and the caller must treat both as "keep waiting, then time out".
+server.register_function{
+    function_name = 'GNODE_RESPONSE_GET',
+    callback = function(keys, args)
+        if #args < 1 then
+            return server.error_reply("Missing site_id")
+        end
+        if #args < 2 then
+            return server.error_reply("At least one correlation id required")
+        end
+
+        local site_id = args[1]
+        local out = {}
+
+        for i = 2, #args do
+            local cid = args[i]
+            if cid and cid ~= '' then
+                -- Hash-tagged on the site so every key this call touches lives
+                -- in one slot — the same shape the daemon and gNodeClient write
+                -- and read, so there is exactly one spelling of a reply key.
+                local rkey = '{' .. site_id .. '}:res:' .. cid
+                local val = server.call('GET', rkey)
+                if val then
+                    table.insert(out, cid)
+                    table.insert(out, val)
+                end
+            end
+        end
+
+        return out
+    end,
+    flags = {'no-writes'},
+    description = 'Batch-reads keyed-rendezvous replies {site}:res:{id} for a set of correlation ids'
+}
