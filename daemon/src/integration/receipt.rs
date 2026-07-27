@@ -629,21 +629,43 @@ mod tests {
     }
 
     #[test]
-#[test]
     fn test_signature_is_pinned_for_cross_language_verifiers() {
-        // The daemon signs in Rust; the sign-off script verifies in Python, and
-        // SB-8.88's polyglot clients will verify in other languages again. That
-        // makes the exact signature bytes an interop contract, and interop
-        // contracts break silently: a change to the seed handling, the alg id,
-        // or the canonical byte layout would still round-trip perfectly inside
-        // Rust while every external verifier started rejecting live receipts —
-        // which looks like tampering, not like a regression.
+        // Pinned against tests/receipt-vectors.json — the SHARED fixture, not a
+        // literal private to this file. Byte-identical copies live in
+        // Geodineum-COMMS and Geodineum-pro/CONTRACTS, and every producer
+        // asserts against its copy.
         //
-        // Ed25519 is deterministic (RFC 8032), so a fixed seed over fixed input
-        // has exactly one correct signature. It is pinned here, and the value
-        // below is confirmed to verify from Python's `cryptography` against the
-        // same canonical bytes.
-        let seed = vec![7u8; 32];
+        // That matters because the ecosystem deliberately runs several
+        // INDEPENDENT implementations of this format (this daemon, COMMS, and
+        // SB-8.88's Python/C/TypeScript clients, none of which can share a Rust
+        // crate). Shared code is not available as a safety mechanism, so shared
+        // vectors are the safety mechanism. Ed25519 is deterministic (RFC 8032),
+        // so a fixed seed over fixed input has exactly one correct signature.
+        let raw = include_str!("../../tests/receipt-vectors.json");
+        let grab = |key: &str| -> String {
+            let pat = format!("\"{}\"", key);
+            let i = raw.find(&pat).unwrap_or_else(|| panic!("missing key {}", key));
+            let rest = &raw[i + pat.len()..];
+            let c = rest.find(':').expect("no colon");
+            let after = &rest[c + 1..];
+            let q1 = after.find('"').expect("no opening quote");
+            let mut out = String::new();
+            let mut chars = after[q1 + 1..].chars();
+            while let Some(ch) = chars.next() {
+                match ch {
+                    '"' => break,
+                    '\\' => match chars.next() {
+                        Some('n') => out.push('\n'),
+                        Some(other) => out.push(other),
+                        None => break,
+                    },
+                    _ => out.push(ch),
+                }
+            }
+            out
+        };
+
+        let seed = unhex(&grab("seed_hex")).expect("seed hex");
         let scheme = Ed25519Scheme;
         let pub_b = scheme.public_from_private(&seed).unwrap();
         let signer = NodeSigner {
@@ -656,22 +678,14 @@ mod tests {
         );
         r.sign(&signer).unwrap();
 
+        assert_eq!(hex(&pub_b), grab("public_hex"), "public key derivation drifted");
+        assert_eq!(r.signer, grab("signer_id"), "signer fingerprint drifted");
         assert_eq!(
-            hex(&pub_b),
-            "ea4a6c63e29c520abef5507b132ec5f9954776aebebe7b92421eea691446d22c",
-            "public key derivation from the seed changed"
+            String::from_utf8(r.canonical_bytes()).unwrap(),
+            grab("canonical_bytes_utf8"),
+            "canonical bytes drifted from the shared vectors"
         );
-        assert_eq!(
-            r.signer, "fe812c12f3ab4ce6",
-            "signer fingerprint (sha256(pubkey)[:8]) changed — verifiers resolve by this"
-        );
-        assert_eq!(
-            r.sig,
-            "c2d062f2cf0cb4525dbf5da86629cf207767bba3164097c8454efbc8d7285715\
-07c3d2aeb328c142ccd3da1b9c631f2e246ac3cc5559a9a59499cf877c61f40c",
-            "signature over the canonical bytes changed — every external \
-             verifier will now reject live receipts"
-        );
+        assert_eq!(r.sig, grab("signature_hex"), "signature drifted from the shared vectors");
     }
 
     #[test]
