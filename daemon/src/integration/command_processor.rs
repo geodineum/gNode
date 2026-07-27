@@ -1410,8 +1410,10 @@ pub fn process_command_batch(
                 }
 
                 // Durable channel: a signed receipt beside the ephemeral reply.
-                // Additive — the t=r/br stream writes below are untouched until
-                // the receipt is verified live (contract §6, emit-then-remove).
+                // The receipt is now VERIFIED live on both nodes, so the local
+                // t=r/br stream writes it replaced have been removed in step 4
+                // (contract §6, emit-then-remove — the remove half). What remains
+                // below is the RELAY write, which has a live reader in gFlow.
                 let now = crate::integration::receipt::now_ms();
                 let env = crate::integration::receipt::env_from_stream_key(stream_key)
                     .map(String::from)
@@ -1449,15 +1451,32 @@ pub fn process_command_batch(
         }
     }
 
-    // Step 4: Send responses - batch response for batch commands or multiple responses, individual responses otherwise
-    if !optimized_responses.is_empty() {
-        // Relay response routing: if the command was relayed (has _rr field),
-        // send the response to the relay_reply_to stream instead of the local stream.
-        // This is the "belt" in the belt-and-suspenders relay response routing.
-        let response_stream = commands.first()
-            .and_then(|(_, cmd)| cmd.relay_reply_to.as_deref())
-            .unwrap_or(stream_key);
-        let is_relay_response = response_stream != stream_key;
+    // Step 4: legacy stream responses — RELAY ONLY.
+    //
+    // For a LOCAL response this block was a duplicate. Step 3 above already
+    // wrote the keyed reply `{site}:res:{request_id}` — what every audited
+    // caller actually polls — and, beside it, the signed receipt. The `t=r`/`br`
+    // XADDs here had no reader: the gnode-client response consumer group is
+    // retired and the cross-component audit found no other consumer.
+    //
+    // They were kept deliberately, emit-then-remove per the receipt contract §6:
+    // prove the receipt flows, THEN drop what it replaces. That proof is now in
+    // — the receipt layer verified on aesir AND squad, 208 receipts examined per
+    // node, zero unsigned, zero invalid — so the local half goes here.
+    //
+    // The RELAY half stays. When a command carries `_rr`, the XADD to
+    // `relay_reply_to` is not a duplicate, it IS the delivery, and gFlow reads it
+    // today. Removing that is T-F's job, and doing it here would break gFlow.
+    //
+    // Relay response routing: if the command was relayed (has _rr field),
+    // send the response to the relay_reply_to stream instead of the local stream.
+    // This is the "belt" in the belt-and-suspenders relay response routing.
+    let response_stream = commands.first()
+        .and_then(|(_, cmd)| cmd.relay_reply_to.as_deref())
+        .unwrap_or(stream_key);
+    let is_relay_response = response_stream != stream_key;
+
+    if !optimized_responses.is_empty() && is_relay_response {
         // Determine if we need to use batch response format
         let force_batch_response = !batch_commands.is_empty() || optimized_responses.len() > 1;
         
