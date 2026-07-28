@@ -222,8 +222,17 @@ pub fn initialize_functions(
     // Get the standard libraries in order
     let libraries = FunctionLibrary::standard_libraries();
     
-    // Track loaded functions
+    // Track loaded functions, and which FILE claimed each library.
+    //
+    // The second map exists so a re-encounter of the SAME file (the directory
+    // sweep re-reading what the standard pass already loaded) can be told apart
+    // from a genuine two-files-one-variant collision. Recording it only in the
+    // custom branch — as the first version of this did — leaves every standard
+    // library with no recorded claimant, so every one of them looks like a
+    // collision to the check below. That is precisely the false alarm this was
+    // meant to remove, reintroduced one layer down.
     let mut loaded_functions = HashMap::new();
+    let mut library_source: HashMap<FunctionLibrary, String> = HashMap::new();
     let registry_key = format!("{{{0}}}:gcore:gnode:valkey_functions", site_id);
     
     // Clear existing registry
@@ -264,6 +273,7 @@ pub fn initialize_functions(
             Ok(funcs) => {
                 load_count += funcs;
                 info!("Loaded {} functions from library {}", funcs, file_name);
+                library_source.insert(library.clone(), file_name.to_string());
                 loaded_functions.insert(library, funcs);
             },
             Err(e) => {
@@ -276,9 +286,6 @@ pub fn initialize_functions(
     // Files the sweep declined to load, so the count check below can name them.
     let mut skipped_files: Vec<String> = Vec::new();
     let mut lua_files_on_disk: usize = 0;
-    // Which FILE claimed each library, so a re-encounter of the same file can be
-    // told apart from a genuine two-files-one-variant collision.
-    let mut library_source: HashMap<FunctionLibrary, String> = HashMap::new();
 
     // Check for any custom libraries not in the standard list
     if let Ok(entries) = std::fs::read_dir(functions_path) {
