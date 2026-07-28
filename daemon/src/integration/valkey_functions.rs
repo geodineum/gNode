@@ -276,6 +276,9 @@ pub fn initialize_functions(
     // Files the sweep declined to load, so the count check below can name them.
     let mut skipped_files: Vec<String> = Vec::new();
     let mut lua_files_on_disk: usize = 0;
+    // Which FILE claimed each library, so a re-encounter of the same file can be
+    // told apart from a genuine two-files-one-variant collision.
+    let mut library_source: HashMap<FunctionLibrary, String> = HashMap::new();
 
     // Check for any custom libraries not in the standard list
     if let Ok(entries) = std::fs::read_dir(functions_path) {
@@ -298,13 +301,28 @@ pub fn initialize_functions(
                 // file is a genuine duplicate or from_file_name is collapsing
                 // two libraries onto one variant — the latter is a bug.
                 if loaded_functions.contains_key(&library) {
-                    warn!(
-                        "Function library file {} maps to an already-loaded library ({:?}) and was SKIPPED — \
-                         if {} declares its own `#!lua name=`, its functions are NOT registered and \
-                         from_file_name is collapsing two libraries onto one variant",
-                        file_name, library, file_name
-                    );
-                    skipped_files.push(file_name.to_string());
+                    // Only a DIFFERENT file claiming the same variant is a
+                    // collision. The standard-library pass above loads most of
+                    // these by name, and the directory sweep then sees the very
+                    // same file again — warning about that is noise, and it was:
+                    // the first live run of this check shouted about gnode_hash
+                    // and gnode_site, both of which had loaded perfectly well a
+                    // few lines earlier. A warning that fires on the healthy
+                    // path teaches people to ignore the channel, which is the
+                    // failure this warning exists to prevent.
+                    let claimed_by = library_source.get(&library);
+                    if claimed_by.map(String::as_str) != Some(file_name) {
+                        warn!(
+                            "Function library file {} maps to the same library ({:?}) as {} and was SKIPPED — \
+                             if {} declares its own `#!lua name=`, its functions are NOT registered and \
+                             from_file_name is collapsing two libraries onto one variant",
+                            file_name,
+                            library,
+                            claimed_by.map(String::as_str).unwrap_or("the standard-library pass"),
+                            file_name
+                        );
+                        skipped_files.push(file_name.to_string());
+                    }
                     continue;
                 }
                 
@@ -312,6 +330,7 @@ pub fn initialize_functions(
                     Ok(funcs) => {
                         load_count += funcs;
                         info!("Loaded {} functions from custom library {}", funcs, file_name);
+                        library_source.insert(library.clone(), file_name.to_string());
                         loaded_functions.insert(library, funcs);
                     },
                     Err(e) => {
