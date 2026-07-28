@@ -566,3 +566,51 @@ server.register_function{
     flags = {'no-writes'},
     description = 'Returns the full dimension schema with valid values for each dimension'
 }
+
+-- ---------------------------------------------------------------------------
+-- Canonical capability-schema lookup
+-- ---------------------------------------------------------------------------
+-- The dimension count is per TIER, not one global number: service 30, tool 16,
+-- constellation and galaxy 20, each with its own discovery subset. That is
+-- deliberate. What was not deliberate is that every consumer kept its own copy
+-- of the answer — counts of 8, 9, 12, 16, 19, 23 and 25 were all present in the
+-- tree at once, several stale by months, and nothing could say which was true.
+--
+-- The daemon publishes the active schema it actually loaded; this reads it back.
+-- A caller that asks gets the same number the daemon is matching against, by
+-- construction. A caller that hardcodes can only be wrong silently.
+--
+-- Returns the schema hash for the tier, including `dimension_index` — the
+-- name→index map. The count alone is not enough to build a coordinate vector;
+-- the index each named capability occupies is the part that actually drifts.
+--
+-- Usage: FCALL_RO GNODE_SCHEMA_GET 0 <topology_ns> [tier]
+server.register_function{
+    function_name = 'GNODE_SCHEMA_GET',
+    callback = function(keys, args)
+        if not args[1] or args[1] == '' then
+            return server.error_reply("Topology namespace required")
+        end
+
+        local ns = args[1]
+        local tier = args[2]
+        if not tier or tier == '' then tier = 'service' end
+
+        local key = '{' .. ns .. '}:gnode:schema:' .. tier
+        local flat = server.call('HGETALL', key)
+
+        -- Absent is a real answer, not an error: the daemon may not have
+        -- published yet on a cold start. The caller decides whether to wait or
+        -- fall back, and can tell "not published" from "wrong tier" because the
+        -- key it looked for is named in the reply.
+        if not flat or #flat == 0 then
+            return server.error_reply(
+                "No schema published at " .. key ..
+                " — the master publishes it at startup; is the daemon running and is the tier correct?")
+        end
+
+        return flat
+    end,
+    flags = {'no-writes'},
+    description = 'Reads the canonical capability schema (dimension counts + name->index map) for a tier'
+}

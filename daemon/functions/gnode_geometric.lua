@@ -36,7 +36,7 @@ end
 server.register_function{
     function_name = 'GNODE_GEOMETRIC_GET_DIMENSIONS',
     callback = function(keys, args)
-        -- Return standard 23-dimension capability space
+        -- Return the standard service-tier capability space (see gnode_topology.lua DIMENSIONS)
         -- This is now statically configured, not read from blob
         -- Dims 0-18: discovery (used for bucket key hashing)
         -- Dims 19-22: storage-only (visual topology + temporal)

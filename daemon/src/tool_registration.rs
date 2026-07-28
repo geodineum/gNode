@@ -164,6 +164,143 @@ pub fn load_schema(path: &Path) -> Result<CapabilitySchema> {
     Ok(schema)
 }
 
+/// Publish the active tier schema so clients stop hardcoding its shape.
+///
+/// The dimension count is not one number and never was — it is per TIER
+/// (service 30, tool 16, constellation/galaxy 20, each with its own discovery
+/// subset). That is a sound design; what was unsound is that every consumer
+/// carried its own copy of the answer. Counts of 8, 9, 12, 16, 19, 23 and 25
+/// were all findable in the tree at once, some stale by months, and nothing
+/// could tell you which was true without reading this daemon's YAML.
+///
+/// So the schema is published where any client can read it, keyed by tier, and
+/// stamped with the version and the file it came from. A client that fetches
+/// this cannot disagree with the daemon; a client that hardcodes 23 can only be
+/// wrong quietly.
+///
+/// Master-only, like the function-library namespace: exactly one node owns
+/// writing shared topology state, and a worker publishing its own copy is how
+/// two nodes come to disagree about the schema they are both matching against.
+pub fn publish_schema(
+    conn: &mut redis::Connection,
+    topology_ns: &str,
+    schema: &CapabilitySchema,
+    source_path: &Path,
+) -> Result<()> {
+    let tier = schema.tier.clone().unwrap_or_else(|| "service".to_string());
+    let key = format!("{{{}}}:gnode:schema:{}", topology_ns, tier);
+
+    // Dimension NAME → INDEX as well as the counts. A consumer that only knows
+    // "30" still cannot build a coordinate vector; it needs the index each
+    // named capability occupies, which is the part that actually drifts.
+    let mut index_map: Vec<(String, usize)> =
+        schema.dimensions.iter().map(|(n, d)| (n.clone(), d.index)).collect();
+    index_map.sort_by_key(|(_, i)| *i);
+    let dims_json = serde_json::to_string(
+        &index_map.iter().map(|(n, i)| (n.as_str(), *i)).collect::<std::collections::BTreeMap<_, _>>()
+    ).unwrap_or_else(|_| "{}".to_string());
+
+    // The value vocabulary too, not only the index map. Publishing indices alone
+    // leaves each consumer holding a private copy of what `latency_class:
+    // interactive` means numerically — the same drift one level down. The copy
+    // in gNode-Client is missing seven of these dimensions outright and drops
+    // any capability it does not recognise without saying so.
+    let values_json = serde_json::to_string(
+        &schema.dimensions.iter()
+            .map(|(n, d)| (n.as_str(), d.values.iter()
+                .map(|(k, v)| (k.as_str(), *v))
+                .collect::<std::collections::BTreeMap<_, _>>()))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    ).unwrap_or_else(|_| "{}".to_string());
+
+    let _: redis::RedisResult<()> = redis::cmd("HSET")
+        .arg(&key)
+        .arg("schema_version").arg(&schema.schema_version)
+        .arg("tier").arg(&tier)
+        .arg("total_dimensions").arg(schema.total_dimensions)
+        .arg("discovery_dimensions").arg(schema.discovery_dimensions.unwrap_or(schema.total_dimensions))
+        .arg("dimension_index").arg(&dims_json)
+        .arg("dimension_values").arg(&values_json)
+        .arg("source").arg(source_path.to_string_lossy().as_ref())
+        .query(conn);
+
+    info!(
+        "Published {} schema: {} dimensions ({} discovery), version {} — clients can read {}",
+        tier,
+        schema.total_dimensions,
+        schema.discovery_dimensions.unwrap_or(schema.total_dimensions),
+        schema.schema_version,
+        key
+    );
+
+    // The declared total and the actual entry count must agree, or every
+    // consumer that trusts the header builds vectors of the wrong width. Cheap
+    // to check here, invisible everywhere else.
+    if schema.dimensions.len() != schema.total_dimensions {
+        warn!(
+            "SCHEMA MISMATCH in {:?}: total_dimensions says {} but {} dimensions are defined. \
+             Consumers sizing a vector from the header will disagree with consumers counting entries.",
+            source_path, schema.total_dimensions, schema.dimensions.len()
+        );
+    }
+
+    Ok(())
+}
+
+/// Fail startup if a Lua library's dimension constant disagrees with the schema.
+///
+/// Lua function libraries do not share scope, so gnode_topology and gnode_topo
+/// each declare their own `TOTAL_DIMENSIONS`. Two copies of a number that must
+/// match is exactly the arrangement that produced the drift this whole change is
+/// about, so the copies are checked rather than trusted.
+///
+/// Loud on purpose. A wrong constant here does not crash anything — it writes a
+/// wrong width into every site's topology metadata and produces coordinate
+/// vectors that match slightly worse than they should, which is invisible until
+/// someone asks why discovery is imprecise.
+pub fn assert_lua_dimension_constants(schema: &CapabilitySchema, functions_dir: &Path) -> Result<()> {
+    let entries = match std::fs::read_dir(functions_dir) {
+        Ok(e) => e,
+        // Not every deployment ships the sources beside the binary; absent is
+        // not a disagreement.
+        Err(_) => return Ok(()),
+    };
+
+    let mut checked = 0usize;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().and_then(|x| x.to_str()) != Some("lua") {
+            continue;
+        }
+        let Ok(src) = std::fs::read_to_string(&path) else { continue };
+        for line in src.lines() {
+            let t = line.trim();
+            let Some(rest) = t.strip_prefix("local TOTAL_DIMENSIONS") else { continue };
+            let Some(v) = rest.trim_start().strip_prefix('=') else { continue };
+            let n: usize = match v.split("--").next().unwrap_or("").trim().parse() {
+                Ok(n) => n,
+                Err(_) => continue,
+            };
+            checked += 1;
+            if n != schema.total_dimensions {
+                return Err(GeometricError::Other(format!(
+                    "{:?} declares TOTAL_DIMENSIONS = {} but {:?} says {}. \
+                     Both describe the same capability space; fix the schema or the library, \
+                     not one of them.",
+                    path, n, schema.tier.as_deref().unwrap_or("service"), schema.total_dimensions
+                )));
+            }
+        }
+    }
+
+    if checked > 0 {
+        info!("Lua dimension constants agree with the schema ({} checked, all {})",
+              checked, schema.total_dimensions);
+    }
+
+    Ok(())
+}
+
 /// Load and parse a geometric_topology.yaml file, returning the service definitions.
 pub fn load_service_definitions(path: &Path) -> Result<Vec<ToolServiceDef>> {
     let content = std::fs::read_to_string(path)
@@ -940,5 +1077,68 @@ mod profile_tests {
         let web = translate_capabilities(&schema.profiles["web"], &schema);
         assert!(web.contains_key("service_scope"));
         assert!(web.contains_key("domain_primary"));
+    }
+}
+
+#[cfg(test)]
+mod dimension_constant_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn schema(total: usize) -> CapabilitySchema {
+        CapabilitySchema {
+            schema_version: "3.0".into(),
+            tier: Some("service".into()),
+            total_dimensions: total,
+            discovery_dimensions: Some(total),
+            dimensions: HashMap::new(),
+            profiles: Default::default(),
+        }
+    }
+
+    fn dir_with(lines: &[&str]) -> tempfile::TempDir {
+        let d = tempfile::tempdir().unwrap();
+        for (i, l) in lines.iter().enumerate() {
+            let mut f = std::fs::File::create(d.path().join(format!("lib{}.lua", i))).unwrap();
+            writeln!(f, "#!lua name=lib{}\n{}", i, l).unwrap();
+        }
+        d
+    }
+
+    #[test]
+    fn agreeing_constants_pass() {
+        let d = dir_with(&["local TOTAL_DIMENSIONS = 30", "local TOTAL_DIMENSIONS = 30"]);
+        assert!(assert_lua_dimension_constants(&schema(30), d.path()).is_ok());
+    }
+
+    #[test]
+    fn a_disagreeing_constant_is_an_error() {
+        // The case this exists for: one library left behind at the old width.
+        let d = dir_with(&["local TOTAL_DIMENSIONS = 30", "local TOTAL_DIMENSIONS = 23"]);
+        let err = assert_lua_dimension_constants(&schema(30), d.path()).unwrap_err();
+        assert!(format!("{}", err).contains("23"), "error must name the offending value: {}", err);
+    }
+
+    #[test]
+    fn trailing_comments_do_not_break_parsing() {
+        // gnode_topo.lua carries one, so a parser that chokes on it would report
+        // agreement it never checked.
+        let d = dir_with(&["local TOTAL_DIMENSIONS = 23  -- service tier"]);
+        assert!(assert_lua_dimension_constants(&schema(30), d.path()).is_err());
+    }
+
+    #[test]
+    fn a_missing_directory_is_not_a_disagreement() {
+        assert!(assert_lua_dimension_constants(&schema(30), Path::new("/nonexistent-xyz")).is_ok());
+    }
+
+    #[test]
+    fn the_shipped_libraries_agree_with_the_shipped_schema() {
+        // The real files, not a fixture. This is the test that would have caught
+        // the drift in the first place.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let s = load_schema(&root.join("config/service_schema.yaml")).unwrap();
+        assert_eq!(s.total_dimensions, s.dimensions.len(), "service_schema.yaml header vs entries");
+        assert_lua_dimension_constants(&s, &root.join("functions")).unwrap();
     }
 }

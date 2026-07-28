@@ -789,6 +789,41 @@ impl GNodeDaemon {
         info!("Function initialization complete - ValKey: {}",
             if valkey_initialized { "OK" } else { "FAILED" });
 
+        // Publish the capability schema this daemon is actually matching
+        // against, so clients have one place to ask instead of each keeping its
+        // own copy of the dimension count. Master-only for the same reason the
+        // library namespace is: exactly one node owns shared topology state.
+        //
+        // Best-effort. A client that cannot read it falls back to its built-in
+        // default and says so; losing the lookup must never stop the daemon.
+        if self.is_master {
+            match crate::tool_registration::find_schema_path(None) {
+                Some(schema_path) => match crate::tool_registration::load_schema(&schema_path) {
+                    Ok(schema) => {
+                        // Check the Lua side before publishing. Publishing a
+                        // width the function libraries disagree with would put a
+                        // second wrong number into circulation from the very
+                        // mechanism meant to end the drift.
+                        let fdir = crate::integration::path_resolution::find_valkey_functions_directory(false);
+                        if let Err(e) = crate::tool_registration::assert_lua_dimension_constants(
+                            &schema, std::path::Path::new(&fdir),
+                        ) {
+                            error!("SCHEMA/LUA DISAGREEMENT: {}", e);
+                        }
+                        if let Ok(mut conn) = self.client.get_connection() {
+                            if let Err(e) = crate::tool_registration::publish_schema(
+                                &mut conn, &self.topology_namespace, &schema, &schema_path,
+                            ) {
+                                warn!("Schema publish failed — clients will fall back to their built-in default: {}", e);
+                            }
+                        }
+                    },
+                    Err(e) => warn!("Could not load tier schema for publishing: {}", e),
+                },
+                None => warn!("No tier schema found to publish; clients will use their built-in defaults"),
+            }
+        }
+
         // Custom format definitions are restored from ValKey by the native
         // FormatProcessor after it is initialized (see "Initialize format
         // system" below). Built-in formats self-register on registry init, so

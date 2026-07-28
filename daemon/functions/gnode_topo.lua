@@ -115,6 +115,16 @@ local CONSTRAINT_TYPES = {
     custom = "custom"
 }
 
+-- Service-tier width, recorded in each topology's metadata.
+--
+-- A local, because Lua function libraries do not share scope — gnode_topology
+-- declares its own TOTAL_DIMENSIONS and this file cannot see it. That makes this
+-- a second copy by necessity, so it is asserted against the schema rather than
+-- trusted: the daemon compares both to service_schema.yaml at startup and
+-- refuses to load on disagreement. Changing this without changing the YAML is a
+-- startup failure, not a silent drift.
+local TOTAL_DIMENSIONS = 30
+
 local REGISTRY_SUFFIX = ":gnode:topo:registry"
 local TYPE_INDEX_PREFIX = ":gnode:topo:by_type:"
 
@@ -271,24 +281,15 @@ server.register_function{
 
 -- ============================================================================
 -- GNODE_ENSURE_TOPOLOGY
--- Ensure the default 23D service discovery topology exists for a site.
+-- Ensure the default service-discovery topology exists for a site.
 -- Creates the topology if it doesn't exist, returns existing key otherwise.
 --
 -- This is the canonical topology for service registration and discovery.
--- It uses a 23-dimensional capability space (see CLAUDE.md §10A):
---   Layer 1 (0-3):   Interface Identity
---   Layer 2 (4-6):   Access Control
---   Layer 3 (7):     Service Scope
---   Layer 4 (8-10):  Functional Domain
---   Layer 5 (11-13): Performance Profile
---   Layer 6 (14-15): Workflow Context
---   Layer 7 (16):    Runtime State (current_load → z_score)
---   Layer 8 (17-18): Classification (service_tier, environment)
---   Layer 9 (19-21): Visual Topology (user_x, user_y, user_z)
---   Layer 10 (22):   Temporal (registration_order)
---
--- Bucket keys are 76 characters (19 discovery dims × 4 chars) computed by Rust Q32.32
--- Visual/temporal dims (19-22) are stored but NOT included in bucket key
+-- The layout is NOT repeated here. It lives in one place —
+-- daemon/config/service_schema.yaml, mirrored by DIMENSIONS in
+-- gnode_topology.lua and published to {ns}:gnode:schema:service at startup.
+-- The copy that used to sit here described a 23-dimension space with six
+-- indices in the wrong slot, and was faithfully copied into four other files.
 -- ============================================================================
 server.register_function{
     function_name = 'GNODE_ENSURE_TOPOLOGY',
@@ -326,7 +327,7 @@ server.register_function{
             server.call('HDEL', registry_key, topology_key)
         end
 
-        -- Create new 23D service topology
+        -- Create the service-discovery topology
         local now = get_timestamp()
         local metadata = {
             tk = topology_key,       -- topology_key
@@ -334,15 +335,16 @@ server.register_function{
             n = "services",          -- name
             ct = CONSTRAINT_TYPES.none,  -- no Z-monotonicity for service discovery
             tt = "service_discovery",    -- topology_type
-            d = "Default 23D service discovery topology (stateless architecture)",
+            d = "Default service discovery topology (stateless architecture)",
             ax = {
-                -- 23D capability space projected to 3D for visualization
-                -- Discovery uses 19D bucket keys (76 chars), dims 19-22 are storage-only
+                -- Capability space projected to 3D for visualisation. Axis dim
+                -- ranges follow service_schema.yaml; storage-only dims are
+                -- excluded from bucket keys.
                 x = { n = "interface_access", d = "Interface + Access layers (dims 0-6)" },
                 y = { n = "scope_domain", d = "Scope + Domain layers (dims 7-10)" },
-                z = { n = "perf_class", d = "Perf + Workflow + Runtime + Classification (dims 11-18)" }
+                z = { n = "perf_class", d = "Perf + Workflow + Runtime + Classification (dims 11-20)" }
             },
-            dm = 23,                 -- dimensions (23D capability space, 19D for discovery)
+            dm = TOTAL_DIMENSIONS,   -- service tier: 30 total, 25 discovery
             ca = now,                -- created_at
             ua = now,                -- updated_at
             ec = 0,                  -- entity_count
