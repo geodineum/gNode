@@ -447,6 +447,27 @@ pub fn find_schema_path(override_path: Option<&PathBuf>) -> Option<PathBuf> {
     None
 }
 
+/// Locate every tier schema that ships beside the service one.
+///
+/// The daemon loads the service schema at startup because that is the tier it
+/// matches against. But a client asking "how wide is the tool tier" has nowhere
+/// to ask if only service is published, and falls back to its built-in copy —
+/// which is the failure this whole mechanism exists to remove, just moved to a
+/// tier nobody was looking at.
+///
+/// Derived from the service schema's own directory rather than a second
+/// candidate list: the tiers live together, and two path lists that must agree
+/// is the same shape of bug one directory up.
+pub fn find_all_tier_schemas(service_schema: &Path) -> Vec<PathBuf> {
+    let Some(dir) = service_schema.parent() else { return vec![] };
+
+    ["service", "tool", "constellation", "galaxy"]
+        .iter()
+        .map(|t| dir.join(format!("{}_schema.yaml", t)))
+        .filter(|p| p.exists())
+        .collect()
+}
+
 /// Find geometric_topology.yaml from known paths, including extra discovery paths.
 pub fn find_config_path(override_path: Option<&PathBuf>) -> Option<PathBuf> {
     if let Some(p) = override_path {
@@ -1140,5 +1161,44 @@ mod dimension_constant_tests {
         let s = load_schema(&root.join("config/service_schema.yaml")).unwrap();
         assert_eq!(s.total_dimensions, s.dimensions.len(), "service_schema.yaml header vs entries");
         assert_lua_dimension_constants(&s, &root.join("functions")).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tier_discovery_tests {
+    use super::*;
+
+    #[test]
+    fn all_four_shipped_tiers_are_found() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let found = find_all_tier_schemas(&root.join("config/service_schema.yaml"));
+        assert_eq!(found.len(), 4, "expected all four tier schemas, got {:?}", found);
+    }
+
+    #[test]
+    fn every_shipped_tier_is_self_consistent() {
+        // The header and the body of each schema must agree. A tier whose
+        // declared total differs from its entry count publishes a width that
+        // sizes vectors nothing else will match.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for p in find_all_tier_schemas(&root.join("config/service_schema.yaml")) {
+            let s = load_schema(&p).unwrap_or_else(|e| panic!("{:?}: {}", p, e));
+            assert_eq!(s.total_dimensions, s.dimensions.len(), "{:?} header vs entries", p);
+            let disc = s.discovery_dimensions.unwrap_or(s.total_dimensions);
+            assert!(disc <= s.total_dimensions, "{:?}: discovery {} exceeds total {}", p, disc, s.total_dimensions);
+            // Indices must be a contiguous 0..n, or a vector built from the map
+            // has holes the daemon reads as zeroed capabilities.
+            let mut idx: Vec<usize> = s.dimensions.values().map(|d| d.index).collect();
+            idx.sort_unstable();
+            assert_eq!(idx, (0..s.total_dimensions).collect::<Vec<_>>(), "{:?}: indices not contiguous", p);
+        }
+    }
+
+    #[test]
+    fn a_missing_tier_is_skipped_not_fatal() {
+        let d = tempfile::tempdir().unwrap();
+        let svc = d.path().join("service_schema.yaml");
+        std::fs::write(&svc, "schema_version: '3.0'\ntier: service\ntotal_dimensions: 0\ndimensions: {}\n").unwrap();
+        assert_eq!(find_all_tier_schemas(&svc).len(), 1);
     }
 }
