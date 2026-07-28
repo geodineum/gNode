@@ -95,6 +95,9 @@ dimensions:
       lua: 0.45
       bash: 0.60
       c: 0.75
+      # Appended at the free top of the 0.15 ladder rather than inserted, so
+      # no already-registered component's coordinate moves.
+      javascript: 0.90
 
   build_type:
     index: 6
@@ -103,6 +106,9 @@ dimensions:
       none: 0.00
       lua_load: 0.25
       composer: 0.50
+      # Between composer (install only) and cargo_release (install + compile):
+      # npm does both, more work than the former and less than the latter.
+      npm: 0.625
       cargo_release: 0.75
       apt_package: 1.00
 

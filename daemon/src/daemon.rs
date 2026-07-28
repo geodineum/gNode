@@ -1202,7 +1202,7 @@ impl GNodeDaemon {
 
                 // Use idempotent registration: checks if exists first, then registers or heartbeats
                 // Use topology_namespace for node registration (daemon identity, not site-specific)
-                crate::node_config::register_node_with_idempotency(
+                let flat = crate::node_config::register_node_with_idempotency(
                     &mut conn,
                     &self.node_id,
                     &self.node_type.to_string(),
@@ -1210,7 +1210,30 @@ impl GNodeDaemon {
                     &hostname,
                     &ip_address,
                     &node_config,
-                )
+                );
+
+                // …and the same node as a constellation-tier ENTITY. The call
+                // above writes flat hashes, which is a plain registry sitting
+                // beside a geometric one — it is why --node-type could be
+                // parsed, logged, and never affect where work lands.
+                //
+                // Deliberately unconditional, not master-only: every node must
+                // describe ITSELF. A master registering on behalf of workers
+                // would be guessing at their hardware.
+                let node_type = self.node_type.to_string();
+                let facts = crate::constellation_registration::NodeFacts {
+                    node_id: &self.node_id,
+                    node_type: &node_type,
+                    is_master: self.is_master,
+                    config: &node_config,
+                };
+                if let Err(e) = crate::constellation_registration::register_node_geometrically(
+                    &mut conn, &self.topology_namespace, &facts,
+                ) {
+                    warn!("Constellation registration errored: {}", e);
+                }
+
+                flat
             });
 
         match register_result {

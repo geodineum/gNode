@@ -69,6 +69,11 @@ pub mod extensions;
 // Tool registration module for deploy-time registration of tool-tier services
 pub mod tool_registration;
 
+/// Constellation-tier registration: a node announces its role, capacity and
+/// specialisation geometrically, so work can be steered by discovery rather
+/// than by which streams a node happens to consume.
+pub mod constellation_registration;
+
 // Ecosystem bootstrap loader (disk-minimal + ValKey-resident config).
 // Sole entry point for ecosystem config; replaces dotenv calls.
 pub mod ecosystem_config;

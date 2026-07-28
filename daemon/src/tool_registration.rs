@@ -586,7 +586,7 @@ fn inject_classification_dims(
 /// Build the entity JSON for GNODE_REGISTER_CAPABILITY_VECTOR.
 /// Schema-driven: uses total_dims and discovery_dims from the loaded schema.
 /// Returns (entity_json, bucket_key, z_score).
-fn build_entity_data(
+pub(crate) fn build_entity_data(
     _service_id: &str,
     capabilities: &HashMap<String, f64>,
     metadata: &Option<ServiceMetadata>,
@@ -785,15 +785,27 @@ fn find_ecosystem_tools_path(explicit: Option<&PathBuf>) -> Option<PathBuf> {
 
 /// Find tool_schema.yaml in standard locations
 fn find_tool_schema_path(explicit: Option<&PathBuf>) -> Option<PathBuf> {
+    find_tier_schema_path("tool", explicit)
+}
+
+/// Locate a named tier's schema.
+///
+/// Generalised from the tool-only version because `find_schema_path` always
+/// resolves the SERVICE schema regardless of the tier asked for — which is how
+/// `--tier constellation` came to register 30-dimension service entities while
+/// reporting success.
+pub fn find_tier_schema_path(tier: &str, explicit: Option<&PathBuf>) -> Option<PathBuf> {
     if let Some(p) = explicit {
         if p.exists() { return Some(p.clone()); }
     }
-    let candidates = [
-        PathBuf::from("config/tool_schema.yaml"),
-        PathBuf::from("/opt/geodineum/gNode/daemon/config/tool_schema.yaml"),
-        PathBuf::from("daemon/config/tool_schema.yaml"),
-    ];
-    candidates.into_iter().find(|p| p.exists())
+    let file = format!("{}_schema.yaml", tier);
+    [
+        PathBuf::from(format!("config/{}", file)),
+        PathBuf::from(format!("/opt/geodineum/gNode/daemon/config/{}", file)),
+        PathBuf::from(format!("daemon/config/{}", file)),
+    ]
+    .into_iter()
+    .find(|p| p.exists())
 }
 
 // ============================================================================
@@ -802,13 +814,37 @@ fn find_tool_schema_path(explicit: Option<&PathBuf>) -> Option<PathBuf> {
 
 /// Register services for one or more sites, or ecosystem tools globally.
 pub fn run(args: RegisterToolsArgs) -> Result<()> {
-    if args.tier == "tool" {
-        return run_tool_tier(&args);
+    // Match the tier EXHAUSTIVELY. This used to be `if tier == "tool" { … }`
+    // followed by an unconditional fall-through to the service path, so
+    // `--tier constellation`, `--tier galaxy` and `--tier typo` all registered
+    // 30-dimension SERVICE entities against service_schema.yaml and reported
+    // success. An operator had no way to see it: the command exited 0 and the
+    // entities were real, just the wrong tier in the wrong shape.
+    match args.tier.as_str() {
+        "tool" => run_tool_tier(&args),
+        "service" => {
+            if args.profile.is_some() {
+                run_service_profile(&args)
+            } else {
+                run_service_tier(args)
+            }
+        }
+        "constellation" => Err(GeometricError::Other(
+            "constellation-tier entities are not registered by this command — a node \
+             registers itself into its constellation at daemon startup. Nothing to do here."
+                .to_string(),
+        )),
+        "galaxy" => Err(GeometricError::Other(
+            "galaxy-tier registration is not implemented. A constellation joins a galaxy \
+             by publishing into a signed epoch artifact, not through this command."
+                .to_string(),
+        )),
+        other => Err(GeometricError::Other(format!(
+            "unknown tier {:?}. Valid tiers: service, tool (constellation and galaxy are \
+             registered elsewhere).",
+            other
+        ))),
     }
-    if args.profile.is_some() {
-        return run_service_profile(&args);
-    }
-    run_service_tier(args)
 }
 
 /// Register a SINGLE service entity for one site from a named profile
