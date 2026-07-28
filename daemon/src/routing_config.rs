@@ -172,7 +172,12 @@ impl RoutingConfig {
         self.hints_set = Some(self.routing.group_hints.iter().cloned().collect());
     }
 
-    /// Check if a message with the given group_hint should be processed
+    /// Check if a message with the given group_hint should be processed.
+    ///
+    /// NOT WIRED INTO CONSUMPTION — see the warning on
+    /// `ExposureSet::should_process_message` before calling this from anywhere
+    /// near the stream reader. Filtering after XREADGROUP loses work.
+    #[allow(dead_code)]
     pub fn should_process_message(&self, group_hint: Option<&str>) -> bool {
         let gh = group_hint.unwrap_or("");
 
@@ -435,8 +440,30 @@ impl ExposureSet {
         ExposureSet { members, spec: spec.to_string() }
     }
 
-    /// Process an entry if ANY exposure would. Union, never intersection:
-    /// exposure is opt-in, so more exposures means more accepted, not less.
+    /// Would this exposure accept an entry carrying `group_hint`?
+    ///
+    /// DO NOT CALL THIS FROM THE CONSUME OR RECLAIM PATH. It is correct as a
+    /// predicate and wrong as a gate, and the difference silently loses work.
+    ///
+    /// Entries arrive via XREADGROUP, which takes no predicate — so by the time
+    /// this could be asked, the entry is ALREADY CLAIMED by this consumer.
+    /// Rejecting it then leaves two options, both broken: ACK it and the work
+    /// is gone (a shared consumer group delivers each entry to exactly ONE
+    /// consumer, so no other node is ever offered it), or leave it unacked and
+    /// it sits in the pending list until reclaim hands it back — quite possibly
+    /// to this same node, forever.
+    ///
+    /// Filtering only becomes safe once each exposure class has its OWN
+    /// consumer group, because then discarding is local: another group still
+    /// holds its own copy. Until that exists, work is steered by which streams
+    /// a node consumes and by explicit relay targeting.
+    ///
+    /// Kept because it is correct, tested, and needed by that future design —
+    /// not because it is wired in. It is not.
+    ///
+    /// Union across members, never intersection: exposure is opt-in, so more
+    /// exposures means more accepted, not less.
+    #[allow(dead_code)]
     pub fn should_process_message(&self, group_hint: Option<&str>) -> bool {
         self.members.iter().any(|c| c.should_process_message(group_hint))
     }

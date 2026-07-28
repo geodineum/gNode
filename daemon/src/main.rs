@@ -607,7 +607,7 @@ fn main() -> Result<()> {
     info!("  Environment: {}", cli.environment);
     info!("  Daemon Name: {}", display_name);
     info!("  Master mode: {} {}", is_master, if cli.master { "(--master flag)" } else if is_master { "(--daemon-name=master)" } else { "" });
-    info!("  Node Type: {} (message routing filter)", cli.node_type);
+    info!("  Node Type: {} (declared identity — NOT enforced; every node processes every entry on the streams it consumes)", cli.node_type);
     info!("  Stream prefix: {}", cli.stream_prefix);
     info!("  Dimensions: {}", cli.dimensions);
     info!("  Debug mode: {}", cli.debug);

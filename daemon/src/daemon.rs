@@ -67,14 +67,30 @@ pub enum ThreadConfig {
     Fixed(usize),
 }
 
-/// Node type for message routing within consumer groups
+/// A node's DECLARED type. Currently metadata only.
+///
+/// NOT ENFORCED. Nothing consults this when consuming: every daemon processes
+/// every entry on every stream it reads, whatever its type says. The variant
+/// docs below describe the intended behaviour, not the current one.
+///
+/// This is deliberate rather than pending. Enforcing it from the consume path
+/// would need a filter applied BEFORE an entry is claimed, and with a single
+/// shared consumer group that is not expressible: XREADGROUP takes no
+/// predicate, so reading IS claiming. A filter applied after the read would
+/// either ACK the entry — losing work no other node will ever be offered — or
+/// leave it stranded in the pending list for redelivery to the same node.
+///
+/// Work is steered today by WHICH STREAMS a node consumes and by explicit
+/// relay targeting, not by this field. See `RoutingConfig::should_process_message`
+/// for the same warning at the other end.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NodeType {
-    /// Processes all non-inference messages (default)
+    /// INTENDED: all non-inference messages (default). Currently: everything.
     General,
-    /// Only processes messages with _gh:"inference" routing hint
+    /// INTENDED: only messages hinted `_gh:"inference"`. Currently: everything.
     Inference,
-    /// Processes all messages regardless of routing hint
+    /// All messages regardless of routing hint — the only variant whose
+    /// documented behaviour matches what actually happens.
     All,
 }
 
