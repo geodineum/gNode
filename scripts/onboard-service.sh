@@ -293,13 +293,29 @@ if [[ -n "$YAML_PATH" ]]; then
     if [[ -f "$YAML_PATH" ]]; then
         RESOLVED_YAML="$YAML_PATH"
     elif [[ -d "$YAML_PATH" ]]; then
-        # Probe for recognized filenames (same order as daemon)
-        if [[ -f "$YAML_PATH/gnode_services.yaml" ]]; then
+        # Probe for recognized filenames (same order as daemon).
+        #
+        # .geodineum/ is checked FIRST because it is the convention the other
+        # half of this toolchain writes: `geodineum register` creates
+        # .geodineum/gnode_services.yaml in the service root. This script not
+        # looking there meant a service onboarded the paved way could not be
+        # onboarded by the paved tool — you had to know to pass the hidden
+        # subdirectory yourself.
+        if [[ -f "$YAML_PATH/.geodineum/gnode_services.yaml" ]]; then
+            RESOLVED_YAML="$YAML_PATH/.geodineum/gnode_services.yaml"
+        elif [[ -f "$YAML_PATH/gnode_services.yaml" ]]; then
             RESOLVED_YAML="$YAML_PATH/gnode_services.yaml"
+        elif [[ -f "$YAML_PATH/config/gnode_services.yaml" ]]; then
+            RESOLVED_YAML="$YAML_PATH/config/gnode_services.yaml"
         elif [[ -f "$YAML_PATH/geometric_topology.yaml" ]]; then
             RESOLVED_YAML="$YAML_PATH/geometric_topology.yaml"
+        elif [[ -f "$YAML_PATH/config/geometric_topology.yaml" ]]; then
+            RESOLVED_YAML="$YAML_PATH/config/geometric_topology.yaml"
         else
-            log_error "No gnode_services.yaml or geometric_topology.yaml found in: $YAML_PATH"
+            log_error "No manifest found under: $YAML_PATH"
+            log_error "  probed: .geodineum/gnode_services.yaml, gnode_services.yaml,"
+            log_error "          config/gnode_services.yaml, geometric_topology.yaml,"
+            log_error "          config/geometric_topology.yaml"
             exit 1
         fi
     else
