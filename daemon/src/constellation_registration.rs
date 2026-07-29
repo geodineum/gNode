@@ -142,6 +142,56 @@ pub fn constellation_topology_key(topology_ns: &str) -> String {
     format!("{{{}}}:gnode:constellation", topology_ns)
 }
 
+/// Create the constellation topology if it does not exist yet.
+///
+/// GNODE_REGISTER_CAPABILITY_VECTOR registers INTO a topology; it does not
+/// create one. Service tier has GNODE_ENSURE_TOPOLOGY for this and the
+/// constellation tier had nothing, so the first registration failed with
+/// "Topology: not found" — the node booted fine and was simply absent, which
+/// is the failure shape this module's own doc comment warns about.
+///
+/// "Already exists" is SUCCESS. This runs on every node at every start, so
+/// treating a duplicate as an error would make the common path the failing one.
+fn ensure_topology(conn: &mut redis::Connection, topology_ns: &str) -> bool {
+    let topology_key = constellation_topology_key(topology_ns);
+
+    let definition = serde_json::json!({
+        "name": "constellation",
+        "topology_type": "constellation",
+        "description": "Nodes in this constellation: role, declared capacity, specialisation",
+        // No z-monotonic constraint — nodes are peers, not a hierarchy. The
+        // z_score orders them by live load (dim 16), which is not a constraint
+        // on placement.
+        "constraint_type": "none",
+        "axis_semantics": {
+            "x": { "n": "role_compat", "d": "Role + compatibility (dims 0-5)" },
+            "y": { "n": "capacity",    "d": "Declared capacity classes (dims 6-9)" },
+            "z": { "n": "placement",   "d": "Zone, network, specialisation (dims 10-12)" }
+        }
+    })
+    .to_string();
+
+    let result: redis::RedisResult<String> = redis::cmd("FCALL")
+        .arg("GNODE_TOPO_CREATE")
+        .arg(1)
+        .arg(topology_ns)
+        .arg(&topology_key)
+        .arg(&definition)
+        .query(conn);
+
+    match result {
+        Ok(_) => {
+            info!("Created the constellation topology at {}", topology_key);
+            true
+        }
+        Err(e) if e.to_string().contains("already exists") => true,
+        Err(e) => {
+            warn!("Could not create the constellation topology {}: {}", topology_key, e);
+            false
+        }
+    }
+}
+
 /// Register this node as a constellation-tier entity.
 ///
 /// Best-effort by design: a node that cannot describe itself geometrically
@@ -175,8 +225,13 @@ pub fn register_node_geometrically(
                 debug!("node config overrides derived constellation dimension {:?}", dim);
             }
         } else {
-            warn!(
-                "node config declares {:?}, which is not a constellation dimension — ignored",
+            // Not an error. NodeConfig.capabilities.dimensions predates this
+            // module and carries node-TYPE capabilities ("caching",
+            // "stream_processing") in a different vocabulary. Warning per entry
+            // on every start turned a benign overlap into four lines of noise.
+            debug!(
+                "node config declares {:?}, which is not a constellation dimension — \
+                 not applied to the constellation vector",
                 dim
             );
         }
@@ -196,6 +251,9 @@ pub fn register_node_geometrically(
         discovery,
         &dim_map,
     );
+
+    // The topology must exist before anything can register into it.
+    ensure_topology(conn, topology_ns);
 
     let topology_key = constellation_topology_key(topology_ns);
     let result: redis::RedisResult<String> = redis::cmd("FCALL")
