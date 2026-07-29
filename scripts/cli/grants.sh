@@ -83,6 +83,22 @@ request)
         *) PATTERNS+=("$1"); shift;;
     esac; done
     [[ ${#PATTERNS[@]} -gt 0 ]] || die "at least one key pattern required"
+
+    # Refuse an identical request that is already pending. Filing used to be
+    # unconditional, so a provisioning script run three times left six requests
+    # for two actual needs. Nothing broke — they all auto-deny — but an operator
+    # facing six near-identical entries has to work out which are the same ask,
+    # and that is how a security review becomes a formality.
+    _dupe=$("$0" pending 2>/dev/null \
+        | grep "^PENDING" \
+        | grep -F "svc=${SERVICE}  patterns=[${PATTERNS[*]}]" \
+        | head -1 || true)
+    if [[ -n "$_dupe" ]]; then
+        log "identical request already pending: $(awk '{print $2}' <<< "$_dupe") — not filing a duplicate"
+        log "  (use 'grants deny <id>' first if you want to re-file with a different reason)"
+        exit 0
+    fi
+
     RID="gr-$(date +%s)-$RANDOM"
     vk XADD "$REQ_STREAM" '*' \
         req "$RID" svc "$SERVICE" patterns "${PATTERNS[*]}" \

@@ -13,12 +13,16 @@
 //! paths to the whitelist (--discovery-config-paths).
 //!
 //! Config file conventions (when a directory path is whitelisted):
-//! - `gnode_services.yaml`      — Generic convention for any service-tier deployment
+//! - `gnode_discovery.yaml`     — Discovery manifest (preferred name)
+//! - `gnode_services.yaml`      — Same document, legacy name. NOT the same file
+//!                                as `.geodineum/gnode_services.yaml`, which is
+//!                                the ONBOARDING manifest (ACL policy) and uses
+//!                                a different schema entirely.
 //! - `geometric_topology.yaml`  — gCore convention (framework-level tool-tier services)
 //!
 //! The first match per directory wins. Direct file paths bypass this probe.
 //!
-//! Minimal service config (gnode_services.yaml):
+//! Minimal DISCOVERY config (gnode_discovery.yaml):
 //! ```yaml
 //! services:
 //!   - id: "MyService"
@@ -253,8 +257,25 @@ impl ServiceDiscoveryManager {
     /// Directories are probed for recognized filenames; files are used directly.
     fn resolve_path_entry(path: &Path) -> Option<PathBuf> {
         // Recognized config filenames (checked in order when path is a directory)
+        // gnode_discovery.yaml FIRST. Two different documents shared the name
+        // gnode_services.yaml and were never the same schema:
+        //
+        //   .geodineum/gnode_services.yaml — ONBOARDING manifest. ACL policy,
+        //     consumes/produces, read by yq via manifest-policy.sh. This scanner
+        //     does not probe .geodineum/ and could not parse it if it did.
+        //   <root>/gnode_services.yaml     — DISCOVERY manifest. Topology
+        //     entities: services[].id plus capabilities: [{name, value}].
+        //
+        // Putting the onboarding shape at a discovery root registers nothing;
+        // putting the discovery shape in .geodineum/ composes no grants. Both
+        // fail silently, and the operator has no way to tell which document a
+        // given file is meant to be.
+        //
+        // The old name is still accepted so nothing breaks on upgrade; new
+        // deployments should use gnode_discovery.yaml.
         const CONFIG_FILENAMES: &[&str] = &[
-            "gnode_services.yaml",          // Generic convention for any service
+            "gnode_discovery.yaml",         // Discovery manifest (preferred)
+            "gnode_services.yaml",          // Same, legacy name — ambiguous
             "geometric_topology.yaml",      // gCore convention
         ];
 

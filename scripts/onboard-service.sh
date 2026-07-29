@@ -263,7 +263,8 @@ YAML_PATH=""
 # Capability profile for the service's own (C) entity (web|headless|service|
 # system|component). The site registers ONE entity from this profile's 30-dim
 # defaults. Defaults to `web` (the common case); override with --profile.
-PROFILE="${GNODE_SERVICE_PROFILE:-web}"
+PROFILE="${GNODE_SERVICE_PROFILE:-}"
+PROFILE_SOURCE=""
 OWNER=""
 ENVIRONMENT=""
 ENVIRONMENTS=""
@@ -284,7 +285,7 @@ CRED_GROUP="${GNODE_CRED_GROUP:-geodineum}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --yaml)         YAML_PATH="$2"; shift 2 ;;
-        --profile)      PROFILE="$2"; shift 2 ;;
+        --profile)      PROFILE="$2"; PROFILE_SOURCE="--profile"; shift 2 ;;
         --cred-group)   CRED_GROUP="$2"; shift 2 ;;
         --owner)        OWNER="$2"; shift 2 ;;
         --environment)  ENVIRONMENT="$2"; shift 2 ;;
@@ -313,6 +314,20 @@ done
 if [[ -z "$SITE_ID" ]]; then
     log_error "Site ID is required"
     usage
+    exit 1
+fi
+
+# --regrant re-runs registration, which re-stamps dim-20 of the capability
+# vector from ENVIRONMENT. Defaulting that to "testing" on a RE-run silently
+# moves a live service out of production discovery — the grants and the
+# topology entry both still look correct, so nothing reports it. A first
+# onboard may default (gated until promoted); a re-grant may not guess.
+if [[ "$REGRANT" == "true" && -z "$ENVIRONMENT" && -z "$ENVIRONMENTS" ]]; then
+    log_error "--regrant requires --environment explicitly."
+    log_error "  Re-registration re-stamps dim-20 (environment) of the capability"
+    log_error "  vector. Defaulting to 'testing' here would DTAP-gate a service that"
+    log_error "  is already in production, and nothing downstream would say so."
+    log_error "  e.g.  --environment production"
     exit 1
 fi
 
@@ -423,12 +438,44 @@ ENDJSON
 # Summary
 # =============================================================================
 
+# =============================================================================
+# Resolve the capability profile
+# =============================================================================
+# Precedence: --profile > manifest `profile:` > web.
+#
+# The manifest is the right home. No caller in this estate passes --profile —
+# site.sh, register.sh and pipeline.sh all relied on the bare default, which is
+# correct for a website and wrong for everything else, and pipeline.sh onboards
+# SERVICES. A repo that declares its own nature once fixes every caller at the
+# same time, without breaking the web path.
+#
+# `services[].capabilities` looks like it should do this and does not — nothing
+# reads it. The profile is what actually produces the 30-dim vector, so the
+# SOURCE is logged rather than assumed: a service silently registered as a
+# client-facing website gets matched by discovery for work it cannot do.
+if [[ -z "$PROFILE" && -n "$RESOLVED_YAML" ]] && command -v yq >/dev/null 2>&1; then
+    _manifest_profile=$(yq eval '.profile // ""' "$RESOLVED_YAML" 2>/dev/null | tr -d '"')
+    if [[ -n "$_manifest_profile" && "$_manifest_profile" != "null" ]]; then
+        PROFILE="$_manifest_profile"
+        PROFILE_SOURCE="manifest"
+    fi
+fi
+if [[ -z "$PROFILE" ]]; then
+    PROFILE="web"
+    PROFILE_SOURCE="DEFAULT"
+    log_warning "No profile given and none declared in the manifest — defaulting to 'web'."
+    log_warning "  A 'web' vector describes a client-facing HTTP service. If this is an"
+    log_warning "  internal daemon, discovery will match it for work it cannot do."
+    log_warning "  Declare 'profile: service' in the manifest, or pass --profile."
+fi
+
 echo ""
 echo -e "${BOLD}gNode Service Onboarding${NC}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 log_info "Site ID:      $SITE_ID"
 log_info "ACL User:     $ACL_USER"
 log_info "Environments: $ENVIRONMENTS"
+log_info "Profile:      $PROFILE (from ${PROFILE_SOURCE})"
 if [[ -n "$OWNER" ]]; then
     log_info "Owner/Tenant: $OWNER"
 fi
