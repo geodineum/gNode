@@ -823,6 +823,27 @@ pub fn find_tier_schema_path(tier: &str, explicit: Option<&PathBuf>) -> Option<P
 
 /// Register services for one or more sites, or ecosystem tools globally.
 pub fn run(args: RegisterToolsArgs) -> Result<()> {
+    // Fail BEFORE doing the work, not after. A URL with no credential loads the
+    // schema, reads the catalogue, computes the whole pyramid layout and logs
+    // every component's coordinates — then fails each write with NOAUTH and
+    // reports "0/N registered" beneath a page of healthy-looking output. The
+    // dry run passes either way because it never connects, so the preview gives
+    // no warning.
+    //
+    // The check is on the URL shape rather than a connection attempt: no
+    // credential means no '@' before the host, and that is knowable instantly
+    // without a round trip.
+    if !args.dry_run && !args.redis_url.contains('@') {
+        return Err(GeometricError::Other(format!(
+            "ValKey URL carries no credential ({}). Registration writes would all \
+             fail NOAUTH after the layout is computed. Pass --redis-auth-file and \
+             --redis-user (env: GNODE_REDIS_AUTH_FILE / VALKEY_USER), e.g.\n  \
+             GNODE_REDIS_AUTH_FILE=/etc/geodineum/credentials/valkey_daemon.password \
+             VALKEY_USER=gnode_daemon gnode-daemon register-tools --tier {}",
+            args.redis_url, args.tier
+        )));
+    }
+
     // Match the tier EXHAUSTIVELY. This used to be `if tier == "tool" { … }`
     // followed by an unconditional fall-through to the service path, so
     // `--tier constellation`, `--tier galaxy` and `--tier typo` all registered
@@ -1245,5 +1266,43 @@ mod tier_discovery_tests {
         let svc = d.path().join("service_schema.yaml");
         std::fs::write(&svc, "schema_version: '3.0'\ntier: service\ntotal_dimensions: 0\ndimensions: {}\n").unwrap();
         assert_eq!(find_all_tier_schemas(&svc).len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod preflight_tests {
+    use super::*;
+
+    fn args(url: &str, dry: bool) -> RegisterToolsArgs {
+        RegisterToolsArgs {
+            site: None, config_path: None, schema_path: None,
+            dry_run: dry, redis_url: url.to_string(),
+            topology_namespace: "geodineum".into(), tier: "tool".into(),
+            profile: None, environment: None,
+        }
+    }
+
+    #[test]
+    fn an_unauthenticated_url_fails_before_doing_the_work() {
+        // The case this exists for: every write NOAUTHs after the full layout
+        // is computed and logged, reporting "0/N registered" under healthy output.
+        let e = run(args("redis://127.0.0.1:47445", false)).unwrap_err();
+        let msg = format!("{}", e);
+        assert!(msg.contains("no credential"), "must name the cause: {}", msg);
+        assert!(msg.contains("GNODE_REDIS_AUTH_FILE"), "must name the fix: {}", msg);
+    }
+
+    #[test]
+    fn a_dry_run_is_exempt_because_it_never_connects() {
+        // Refusing here would break the preview, which is the one thing that
+        // works without a credential.
+        let r = run(args("redis://127.0.0.1:47445", true));
+        assert!(!format!("{:?}", r).contains("no credential"));
+    }
+
+    #[test]
+    fn an_authenticated_url_passes_the_preflight() {
+        let e = run(args("redis://user:pw@127.0.0.1:47445", false));
+        assert!(!format!("{:?}", e).contains("no credential"));
     }
 }

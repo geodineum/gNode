@@ -100,6 +100,35 @@ fi
 # relay's lane, with its own authorization (relay/policy.rs).
 apply_service_grants() {
     local _key_grants=() _channel_grants=() _use_manifest=false
+
+    # A manifest that DECLARES grants but cannot be READ must never fall back
+    # to the broad legacy set. policy_manifest_has_data returns false both when
+    # a manifest declares nothing and when yq is absent — indistinguishable to
+    # the caller, and the second case hands out
+    # {testing,staging,acceptance,production}:gnode:*, ~gnode:*, ~topology:*,
+    # ~template:*, ~membership:* to a service that asked for five patterns.
+    #
+    # Detected with grep rather than yq, precisely because yq is what might be
+    # missing. Three services were onboarded this way and every own-namespace
+    # ACL check still passed, so nothing looked wrong.
+    if [[ -n "$RESOLVED_YAML" ]] && grep -qE '^[[:space:]]*(consumes|produces):' "$RESOLVED_YAML" 2>/dev/null; then
+        if ! command -v yq >/dev/null 2>&1; then
+            log_error "Manifest declares consumes/produces but yq is not on PATH."
+            log_error "  Falling back to the broad legacy grant set would silently give"
+            log_error "  this service far more than it asked for, and every own-namespace"
+            log_error "  check would still pass. Refusing."
+            log_error "  Fix: install yq system-wide (e.g. /usr/local/bin/yq), then re-run"
+            log_error "       with --regrant."
+            exit 1
+        fi
+        if ! declare -F policy_manifest_has_data >/dev/null 2>&1; then
+            log_error "Manifest declares consumes/produces but manifest-policy.sh was not"
+            log_error "  sourced (looked in ${_GEO_LIB_DIR}). Refusing rather than granting"
+            log_error "  the legacy set."
+            exit 1
+        fi
+    fi
+
     if [[ -n "$RESOLVED_YAML" ]] && declare -F policy_manifest_has_data >/dev/null 2>&1 \
        && policy_manifest_has_data "$RESOLVED_YAML"; then
         log_info "Manifest declarations detected: $RESOLVED_YAML"
