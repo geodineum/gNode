@@ -774,8 +774,17 @@ fn find_ecosystem_tools_path(explicit: Option<&PathBuf>) -> Option<PathBuf> {
         if p.exists() { return Some(p.clone()); }
     }
     let candidates = [
-        PathBuf::from("/opt/geodineum/Geodineum/config/ecosystem_tools.yaml"),
+        // Operator-local FIRST, shipped default second — the /etc-over-/usr
+        // precedence every other config in this estate follows.
+        //
+        // This is not a preference. A host may run the PUBLIC installer while
+        // participating in a constellation that includes private components,
+        // and a private component must not be added to a public repository to
+        // become registerable. /etc is outside every git repo, so it is the
+        // only correct home for that entry. With the old order the shipped
+        // copy always won and the override could never take effect.
         PathBuf::from("/etc/geodineum/ecosystem_tools.yaml"),
+        PathBuf::from("/opt/geodineum/Geodineum/config/ecosystem_tools.yaml"),
         // Dev fallback
         PathBuf::from("../Geodineum/config/ecosystem_tools.yaml"),
         PathBuf::from("../../Geodineum/config/ecosystem_tools.yaml"),
