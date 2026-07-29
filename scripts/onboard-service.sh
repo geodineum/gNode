@@ -241,6 +241,11 @@ ENVIRONMENTS=""
 NOTIFY_EMAIL=""
 DRY_RUN="false"
 FORCE="false"
+# Re-apply manifest grants WITHOUT rotating the credential. Distinct from
+# --force, which regenerates the password: recomposing policy is not the same
+# operation as re-minting an identity, and conflating them means every policy
+# fix costs a rotation.
+REGRANT="false"
 # Per-component cred isolation: the single-member group that may read THIS
 # component's cred (only its own runtime identity). Defaults to the shared
 # geodineum group for back-compat; `register component` passes the component's
@@ -258,6 +263,7 @@ while [[ $# -gt 0 ]]; do
         --notify-email) NOTIFY_EMAIL="$2"; shift 2 ;;
         --dry-run)      DRY_RUN="true"; shift ;;
         --force)        FORCE="true"; shift ;;
+        --regrant)      REGRANT="true"; shift ;;
         -h|--help)      usage; exit 0 ;;
         -*)             log_error "Unknown option: $1"; usage; exit 1 ;;
         *)
@@ -429,8 +435,17 @@ if valkey_admin_cli ACL GETUSER "$ACL_USER" >/dev/null 2>&1; then
     ACL_EXISTS="true"
 fi
 
-if [[ "$ACL_EXISTS" == "true" && "$PASSWORD_EXISTS" == "true" && "$FORCE" != "true" ]]; then
-    log_success "ACL user already provisioned (skipping)"
+if [[ "$ACL_EXISTS" == "true" && "$PASSWORD_EXISTS" == "true" && "$REGRANT" == "true" ]]; then
+    # The identity is fine; only the POLICY is stale. This exists because the
+    # skip below is silent about grants: a service onboarded while yq was
+    # missing holds the broad legacy powerset, and re-running produced
+    # "already provisioned (skipping)" without ever recomposing it. The ACL
+    # looked correct on every own-namespace check and was wider than declared.
+    log_info "Re-applying grants from the manifest (credential untouched)"
+    apply_service_grants
+    log_success "Grants recomposed for ${ACL_USER}"
+elif [[ "$ACL_EXISTS" == "true" && "$PASSWORD_EXISTS" == "true" && "$FORCE" != "true" ]]; then
+    log_success "ACL user already provisioned (skipping — use --regrant to re-apply manifest policy)"
 elif [[ "$PASSWORD_EXISTS" == "true" && "$ACL_EXISTS" == "false" ]]; then
     log_warning "Password file exists but ACL user missing — recreating user"
     if [[ "$DRY_RUN" == "true" ]]; then
