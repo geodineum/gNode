@@ -679,6 +679,21 @@ if [[ "$DRY_RUN" != "true" ]]; then
             "$DAEMON_BIN" register-tools --tier service --site "$SITE_ID" --profile "$PROFILE" \
             ${PRIMARY_ENV:+--environment "$PRIMARY_ENV"} >/dev/null 2>&1; then
         log_success "Registered '$SITE_ID' now — '$PROFILE'-profile capability vector (C) + snapshot (B)"
+        # Declare the INTENT alongside the entity. The entity is derived from
+        # (intent x schema); recording the intent is what lets the daemon
+        # re-derive it later instead of leaving it frozen at whatever schema
+        # was current today. Without this the registration is one-shot: a
+        # schema change moves dimension indices and nothing recomputes.
+        _intent_key="{${TOPOLOGY_NS}}:gnode:registrations"
+        _intent_json=$(printf '{"site":"%s","profile":"%s","environment":"%s","declared_at":%s,"declared_by":"%s"}' \
+            "$SITE_ID" "$PROFILE" "${PRIMARY_ENV:-production}" "$(date +%s)" \
+            "onboard-service.sh@$(hostname)")
+        if valkey_daemon_cli HSET "$_intent_key" "$SITE_ID" "$_intent_json" >/dev/null 2>&1; then
+            log_success "Registration intent declared (profile=$PROFILE env=${PRIMARY_ENV:-production})"
+        else
+            log_warning "Could not record registration intent — this entity will not be"
+            log_warning "  re-derived when the schema changes. Registration itself is fine."
+        fi
     else
         log_info "Immediate registration skipped — service registers on the next daemon scan (~120s) or restart"
     fi
@@ -730,9 +745,24 @@ if [[ -n "$NOTIFY_EMAIL" ]]; then
         fi
     fi
 else
-    log_step "Step 5: COMMS Channel Setup (skipped — no --notify-email)"
-    log_info "Pass --notify-email to configure email notifications"
-    log_info "Or configure later via wp-admin → Geodineum → Notification Settings"
+    # Report what IS, not just what this step declined to do. "skipped" alone
+    # reads as "this site has no COMMS config", which is a different claim and
+    # frequently false — the config is usually set separately (set-comms-
+    # recipients.sh, or wp-admin) and this step has no opinion about it.
+    log_step "Step 5: COMMS Channel Setup"
+    _comms_key="{${SITE_ID}}:comms:config"
+    if [[ "$DRY_RUN" != "true" ]] && valkey_daemon_cli EXISTS "$_comms_key" 2>/dev/null | grep -q '^1$'; then
+        _rcpts=$(valkey_daemon_cli GET "$_comms_key" 2>/dev/null \
+            | python3 -c 'import sys,json;
+d=json.load(sys.stdin)
+print(",".join(r.get("email","?") for r in d.get("channels",{}).get("email",{}).get("recipients",[])) or "none")' 2>/dev/null || echo "unreadable")
+        log_success "Existing config found at ${_comms_key} — left untouched (recipients: ${_rcpts})"
+        log_info "Change with: set-comms-recipients.sh ${SITE_ID} <email...> --apply"
+    else
+        log_info "No config at ${_comms_key} — this site cannot deliver notifications yet"
+        log_info "Set one with: set-comms-recipients.sh ${SITE_ID} <email...> --apply"
+        log_info "(--notify-email here would also do it, with defaults)"
+    fi
 fi
 
 # =============================================================================

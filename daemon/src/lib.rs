@@ -74,6 +74,12 @@ pub mod tool_registration;
 /// than by which streams a node happens to consume.
 pub mod constellation_registration;
 
+/// Registration intent: a site declares what it is once, and its capability
+/// vector is DERIVED from that intent times the current schema — so a schema
+/// change re-derives every entity instead of leaving them at whatever layout
+/// was current the day they were onboarded.
+pub mod registration_intent;
+
 // Ecosystem bootstrap loader (disk-minimal + ValKey-resident config).
 // Sole entry point for ecosystem config; replaces dotenv calls.
 pub mod ecosystem_config;

@@ -2029,6 +2029,27 @@ impl GNodeDaemon {
                                 }
                                 Err(e) => warn!("Service discovery lock poisoned: {}", e),
                             }
+
+                            // Re-derive every declared entity from (intent x
+                            // current schema) and compare. Master-only: exactly
+                            // one node owns shared topology state, same rule as
+                            // schema publication.
+                            //
+                            // REPORT-ONLY unless GNODE_RECONCILE_REGISTRATIONS=apply.
+                            // This has the power to overwrite every service
+                            // entity in the estate on a timer, so it earns that
+                            // by first showing in the log that what it would
+                            // write matches what is there.
+                            if self.is_master {
+                                let apply = std::env::var("GNODE_RECONCILE_REGISTRATIONS")
+                                    .map(|v| v.eq_ignore_ascii_case("apply"))
+                                    .unwrap_or(false);
+                                if let Err(e) = crate::registration_intent::reconcile(
+                                    &mut conn, &self.topology_namespace, apply,
+                                ) {
+                                    warn!("Registration reconcile failed: {}", e);
+                                }
+                            }
                         }
                     }
                 }

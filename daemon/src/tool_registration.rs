@@ -882,6 +882,67 @@ pub fn run(args: RegisterToolsArgs) -> Result<()> {
 /// schema's `profiles:` section and supplies the 30-dim capability defaults, so
 /// a site gets ONE discoverable (C) entity (itself) — not a loop of framework
 /// components. Used by onboard Step 3.5. Honors --schema/--config overrides.
+/// Derive the ONE service entity a site is, from (profile, environment, schema).
+///
+/// Extracted so intent-driven re-assertion and the CLI share a single
+/// derivation. Two implementations of "what vector does this site have" would
+/// drift, and the drift would be invisible — the entity looks equally valid
+/// whichever produced it.
+///
+/// This is the pure half: no connection, no writes. Given the same inputs it
+/// yields the same TranslatedService, which is what makes the stored entity a
+/// derived projection rather than a record.
+pub fn derive_profile_entity(
+    site: &str,
+    profile: &str,
+    environment: Option<&str>,
+    schema: &CapabilitySchema,
+) -> Result<TranslatedService> {
+    let mut caps = schema.profiles.get(profile).cloned().ok_or_else(|| {
+        let avail: Vec<&String> = schema.profiles.keys().collect();
+        GeometricError::Other(format!(
+            "Profile '{}' not found in schema profiles (available: {:?})",
+            profile, avail
+        ))
+    })?;
+
+    if let Some(env) = environment {
+        let env_dim = schema.dimensions.get("environment");
+        let valid = env_dim.map(|d| d.values.contains_key(env)).unwrap_or(false);
+        if !valid {
+            let allowed: Vec<&String> =
+                env_dim.map(|d| d.values.keys().collect()).unwrap_or_default();
+            return Err(GeometricError::Other(format!(
+                "Invalid environment '{}' (allowed: {:?})",
+                env, allowed
+            )));
+        }
+        caps.retain(|e| e.name != "environment");
+        caps.push(CapabilityEntry {
+            name: "environment".to_string(),
+            value: serde_yaml::Value::String(env.to_string()),
+        });
+    }
+
+    let def = ToolServiceDef {
+        id: site.to_string(),
+        metadata: Some(ServiceMetadata {
+            class: None,
+            description: Some(format!("{} ({} profile)", site, profile)),
+            service_type: Some(profile.to_string()),
+            tier: Some("SERVICE".to_string()),
+            schema_keys: None,
+        }),
+        capabilities: caps,
+        depends_on: Vec::new(),
+    };
+
+    translate_all_services(&[def], schema)
+        .into_iter()
+        .next()
+        .ok_or_else(|| GeometricError::Other(format!("translation produced nothing for '{}'", site)))
+}
+
 fn run_service_profile(args: &RegisterToolsArgs) -> Result<()> {
     let profile = args.profile.as_deref().unwrap_or("web");
     let site = args.site.as_deref().ok_or_else(|| {
