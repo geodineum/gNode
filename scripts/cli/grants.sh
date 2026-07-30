@@ -61,7 +61,13 @@ notify() {
         environment production \
         priority 2 \
         content "{\"subject\":$(printf '%s' "$subject" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))'),\"body\":$(printf '%s' "$body" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')}" \
-        dispatch '{"channels":["email"]}' >/dev/null \
+        dispatch "$(python3 -c '
+import json, sys
+d = {"channels": ["email", "telegram"]}
+m = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else ""
+if m:
+    d["reply_markup"] = json.loads(m)
+print(json.dumps(d))' "${NOTIFY_MARKUP:-}")" >/dev/null \
         && log "notification queued via COMMS ({${NOTIFY_SITE}})" \
         || log "WARN: COMMS notification failed (loop still functional via CLI)"
 }
@@ -111,6 +117,13 @@ request)
         reason "${REASON:-none given}" ttl_hours "$TTL" \
         ts "$(date -Iseconds)" requester "${SUDO_USER:-$(whoami)}@$(hostname)" >/dev/null
     log "request $RID filed: $SERVICE → ${PATTERNS[*]} (auto-deny after ${TTL}h)"
+    NOTIFY_MARKUP=$(python3 -c '
+import json, sys
+rid = sys.argv[1]
+print(json.dumps({"inline_keyboard": [[
+    {"text": "\u2713 Approve", "callback_data": "grant:approve:" + rid},
+    {"text": "\u2717 Deny",    "callback_data": "grant:deny:" + rid},
+]]}))' "$RID")
     notify "[geodineum] grant request $RID: $SERVICE" \
 "Service '$SERVICE' requests ValKey access:
 
@@ -135,6 +148,65 @@ pending)
         rid="${line%% *}"
         d=$("$0" __decision "$rid")
         [[ -z "$d" ]] && echo "PENDING  $line" || echo "$(echo "$d" | tr a-z A-Z)  $line"
+    done
+    ;;
+
+watch)
+    # Consume Telegram approve/deny callbacks and apply them.
+    #
+    #   geodineum grants watch [--once]
+    #
+    # MASTER ONLY, because applying a decision needs the ACL admin credential.
+    #
+    # WHY A BUTTON AND NOT A LINK. A token in a URL is a bearer capability in
+    # a medium that forwards, indexes and archives itself — and mail and chat
+    # clients FETCH urls to build previews, so a state-changing GET can fire
+    # with nobody clicking. A callback carries no capability at all: Telegram
+    # reports the pressing user's id and that id is checked here.
+    #
+    # THE ALLOWLIST IS CHECKED TWICE, DELIBERATELY. The receiver rejects
+    # unauthorized users before writing to the inbound stream, but that stream
+    # is a ValKey key — anything holding a grant on it could inject an entry
+    # that never passed through Telegram at all. Trusting an upstream check
+    # you cannot see from here is how a defence becomes decorative.
+    ONCE=false
+    [[ "${1:-}" == "--once" ]] && ONCE=true
+    ADMINS="${GEODINEUM_GRANT_ADMINS:-}"
+    if [[ -z "$ADMINS" ]]; then
+        die "GEODINEUM_GRANT_ADMINS is unset — refusing to apply callbacks with no allowlist.
+  Set it to a comma-separated list of Telegram user ids permitted to decide grants,
+  e.g. in /etc/geodineum/components/geodineum-comms/geodineum-comms.env"
+    fi
+    STREAM="{${NOTIFY_SITE}}:gnode:comms:inbound:production"
+    GROUP=grants-watch
+    vk XGROUP CREATE "$STREAM" "$GROUP" '$' MKSTREAM >/dev/null 2>&1 || true
+    log "watching ${STREAM} (admins: ${ADMINS})"
+    while :; do
+        # One entry at a time: a decision that applies an ACL change should be
+        # readable in the log as one line per decision.
+        RAW=$(vk XREADGROUP GROUP "$GROUP" "$(hostname)" COUNT 1 BLOCK 5000 STREAMS "$STREAM" '>' 2>/dev/null)
+        if [[ -n "$RAW" ]]; then
+            EID=$(grep -oE '^[0-9]+-[0-9]+$' <<< "$RAW" | head -1)
+            FIELDS=$(printf '%s\n' "$RAW")
+            is_cb=$(awk '/^is_callback$/{getline; print}' <<< "$FIELDS")
+            txt=$(awk '/^text$/{getline; print}'        <<< "$FIELDS")
+            op=$(awk '/^operator_id$/{getline; print}'  <<< "$FIELDS")
+            if [[ "$is_cb" == "true" && "$txt" == grant:* ]]; then
+                action="${txt#grant:}"; action="${action%%:*}"
+                rid="${txt##*:}"
+                if [[ ",${ADMINS}," != *",${op},"* ]]; then
+                    log "REFUSED ${action} ${rid}: operator ${op} is not in GEODINEUM_GRANT_ADMINS"
+                elif [[ "$action" != "approve" && "$action" != "deny" ]]; then
+                    log "ignored callback with unknown action: ${txt}"
+                else
+                    log "operator ${op} pressed ${action} for ${rid}"
+                    "$0" "$action" "$rid" --reason "via Telegram by operator ${op}" || \
+                        log "WARN: ${action} ${rid} failed"
+                fi
+            fi
+            [[ -n "$EID" ]] && vk XACK "$STREAM" "$GROUP" "$EID" >/dev/null 2>&1
+        fi
+        [[ "$ONCE" == "true" ]] && break
     done
     ;;
 
