@@ -26,12 +26,41 @@ VCLI="$GNODE_SCRIPTS/valkey-cli-secure.sh"
 NS="${GNODE_TOPOLOGY_NAMESPACE:-geodineum}"
 REQ_STREAM="{${NS}}:gnode:grants:requests"
 LEDGER_STREAM="{${NS}}:gnode:grants:ledger"
-NOTIFY_SITE="${GEODINEUM_GRANTS_SITE:-geodineum_com}"
 DEFAULT_TTL_HOURS="${GEODINEUM_GRANTS_TTL_HOURS:-72}"
 CRED_DIR="${GNODE_CREDENTIAL_DIR:-/etc/geodineum/credentials}"
+COMMS_ENV=/etc/geodineum/components/geodineum-comms/geodineum-comms.env
 
 log()  { echo "[grants] $*"; }
 die()  { echo "[grants] ERROR: $*" >&2; exit 1; }
+
+# Read one variable out of the COMMS environment file. Unreadable (not root,
+# not in the group) is not an error — every caller has a fallback.
+comms_env() {
+    [[ -r "$COMMS_ENV" ]] || return 0
+    grep -E "^${1}=" "$COMMS_ENV" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"''
+}
+
+# The site whose channels carry a grant notification.
+#
+# Prefer the OPERATOR channel — the site the bot is bound to — over a public
+# website. Approval buttons need a telegram channel, telegram channels need a
+# bot token in the site config (bot.rs:33-39, no env fallback), and a token
+# sitting on a website's config is readable by that website's own ValKey
+# credential. The operator channel is not a website and nothing public reads it.
+#
+# Falls back to geodineum_com when the operator channel has no config, so a
+# fresh install that never set one still notifies somewhere real.
+resolve_notify_site() {
+    if [[ -n "${GEODINEUM_GRANTS_SITE:-}" ]]; then
+        printf '%s' "$GEODINEUM_GRANTS_SITE"; return
+    fi
+    local ib
+    ib="$(comms_env COMMS_INBOUND_SITE)"; ib="${ib:-geodine}"
+    if [[ "$(vk EXISTS "{${ib}}:comms:config" 2>/dev/null | tr -d '[:space:]')" == "1" ]]; then
+        printf '%s' "$ib"; return
+    fi
+    printf '%s' geodineum_com
+}
 
 # Daemon-tier for reads/request-writes (every node); admin for ACL mutation.
 # The wrapper resolves the daemon TIER from VALKEY_USER (env), loading that
@@ -48,6 +77,7 @@ vk_admin() {
 # site's configured recipients). Sentinel-safe: explicit email channel.
 notify() {
     local subject="$1" body="$2"
+    local NOTIFY_SITE; NOTIFY_SITE="$(resolve_notify_site)"
     # type=alert, NOT system. COMMS acks and DROPS system messages without
     # dispatching them (Geodineum-COMMS/src/main.rs:566-570), so every grant
     # request since this loop shipped was queued successfully and then silently
@@ -186,11 +216,6 @@ watch)
     # should be NARROWER than chatting with the bot. It can only narrow in
     # practice: an id absent from COMMS_ADMIN_IDS never reaches the inbound
     # stream, so listing it here grants nothing.
-    COMMS_ENV=/etc/geodineum/components/geodineum-comms/geodineum-comms.env
-    comms_env() {
-        [[ -r "$COMMS_ENV" ]] || return 0
-        grep -E "^${1}=" "$COMMS_ENV" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"''
-    }
     ADMINS="${GEODINEUM_GRANT_ADMINS:-${COMMS_ADMIN_IDS:-$(comms_env COMMS_ADMIN_IDS)}}"
     if [[ -z "$ADMINS" ]]; then
         die "No admin allowlist — refusing to apply callbacks.
@@ -199,8 +224,8 @@ watch)
   stream approve their own ACL grant, so this refuses instead."
     fi
 
-    # The inbound stream is NOT under NOTIFY_SITE. Outbound notification is
-    # per-site; inbound is ONE bot bound to ONE site by COMMS_INBOUND_SITE,
+    # The inbound stream is NOT under the notifying site. Outbound notification
+    # is per-site; inbound is ONE bot bound to ONE site by COMMS_INBOUND_SITE,
     # which defaults to "geodine" (Geodineum-COMMS/src/config.rs:238,266) —
     # so watching the notifying site would block forever on a stream nothing
     # ever writes, and every press would look like it did nothing.
