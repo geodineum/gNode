@@ -63,7 +63,12 @@ notify() {
         content "{\"subject\":$(printf '%s' "$subject" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))'),\"body\":$(printf '%s' "$body" | python3 -c 'import json,sys;print(json.dumps(sys.stdin.read()))')}" \
         dispatch "$(python3 -c '
 import json, sys
-d = {"channels": ["email", "telegram"]}
+# NO "channels" key on purpose. Naming channels OVERRIDES the site routing
+# (Geodineum-COMMS/src/router/dispatcher.rs:181-185), so asking for telegram
+# on a site that has not configured it turns every grant notification into a
+# per-channel failure and retry churn. The dispatch block exists here only to
+# carry the buttons; where the message goes stays the site operator|s call.
+d = {}
 m = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else ""
 if m:
     d["reply_markup"] = json.loads(m)
@@ -171,15 +176,47 @@ watch)
     # you cannot see from here is how a defence becomes decorative.
     ONCE=false
     [[ "${1:-}" == "--once" ]] && ONCE=true
-    ADMINS="${GEODINEUM_GRANT_ADMINS:-}"
+    # Reuse COMMS_ADMIN_IDS — the allowlist that already gates who may talk to
+    # the bot at all (Geodineum-COMMS/src/config.rs:285). A SECOND list would
+    # drift from it, and two allowlists that disagree is worse than one:
+    # whichever is looser becomes the real policy while the other reads as
+    # protection.
+    #
+    # GEODINEUM_GRANT_ADMINS overrides it, for the case where deciding grants
+    # should be NARROWER than chatting with the bot. It can only narrow in
+    # practice: an id absent from COMMS_ADMIN_IDS never reaches the inbound
+    # stream, so listing it here grants nothing.
+    COMMS_ENV=/etc/geodineum/components/geodineum-comms/geodineum-comms.env
+    comms_env() {
+        [[ -r "$COMMS_ENV" ]] || return 0
+        grep -E "^${1}=" "$COMMS_ENV" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '"'"'"''
+    }
+    ADMINS="${GEODINEUM_GRANT_ADMINS:-${COMMS_ADMIN_IDS:-$(comms_env COMMS_ADMIN_IDS)}}"
     if [[ -z "$ADMINS" ]]; then
-        die "GEODINEUM_GRANT_ADMINS is unset — refusing to apply callbacks with no allowlist.
-  Set it to a comma-separated list of Telegram user ids permitted to decide grants,
-  e.g. in /etc/geodineum/components/geodineum-comms/geodineum-comms.env"
+        die "No admin allowlist — refusing to apply callbacks.
+  Looked at: GEODINEUM_GRANT_ADMINS, COMMS_ADMIN_IDS, and ${COMMS_ENV}
+  Defaulting to permissive here would let anyone who can write the inbound
+  stream approve their own ACL grant, so this refuses instead."
     fi
-    STREAM="{${NOTIFY_SITE}}:gnode:comms:inbound:production"
+
+    # The inbound stream is NOT under NOTIFY_SITE. Outbound notification is
+    # per-site; inbound is ONE bot bound to ONE site by COMMS_INBOUND_SITE,
+    # which defaults to "geodine" (Geodineum-COMMS/src/config.rs:238,266) —
+    # so watching the notifying site would block forever on a stream nothing
+    # ever writes, and every press would look like it did nothing.
+    INBOUND_SITE="${COMMS_INBOUND_SITE:-$(comms_env COMMS_INBOUND_SITE)}"
+    INBOUND_SITE="${INBOUND_SITE:-geodine}"
+    STREAM="{${INBOUND_SITE}}:gnode:comms:inbound:production"
     GROUP=grants-watch
-    vk XGROUP CREATE "$STREAM" "$GROUP" '$' MKSTREAM >/dev/null 2>&1 || true
+    # From 0, not $: a press that lands before this loop starts must still be
+    # honoured. Replay is safe — approve/deny refuses a request the ledger has
+    # already decided, so a re-read decides nothing twice.
+    vk XGROUP CREATE "$STREAM" "$GROUP" 0 MKSTREAM >/dev/null 2>&1 || true
+    if [[ "$(vk EXISTS "$STREAM" 2>/dev/null | tr -d '[:space:]')" != "1" ]]; then
+        log "WARN: ${STREAM} does not exist yet — no inbound message has ever"
+        log "      been written to it. If presses do nothing, COMMS_INBOUND_SITE"
+        log "      is not '${INBOUND_SITE}'; check ${COMMS_ENV}."
+    fi
     log "watching ${STREAM} (admins: ${ADMINS})"
     while :; do
         # One entry at a time: a decision that applies an ACL change should be
