@@ -48,9 +48,15 @@ vk_admin() {
 # site's configured recipients). Sentinel-safe: explicit email channel.
 notify() {
     local subject="$1" body="$2"
+    # type=alert, NOT system. COMMS acks and DROPS system messages without
+    # dispatching them (Geodineum-COMMS/src/main.rs:566-570), so every grant
+    # request since this loop shipped was queued successfully and then silently
+    # discarded — the CLI logged "notification queued via COMMS", which was
+    # true and useless. An approval loop whose notification never arrives is an
+    # approval loop that auto-denies everything after 72h.
     vk XADD "{${NOTIFY_SITE}}:gnode:comms:production" '*' \
         id "grants-$(date +%s)-$RANDOM" \
-        type system \
+        type alert \
         timestamp "$(date -Iseconds)" \
         environment production \
         priority 2 \

@@ -173,6 +173,19 @@ apply_service_grants() {
     else
         valkey_admin_cli ACL SETUSER "$ACL_USER" resetchannels "&*" >/dev/null
     fi
+
+    # PERSIST. ACL SETUSER is in-memory until ACL SAVE writes the aclfile, so
+    # without this a ValKey restart silently reverts to whatever was last
+    # persisted. That happened: --regrant recomposed three services correctly,
+    # the box restarted, and all three came back holding the broad legacy set
+    # with nothing reporting it — the ACL simply WAS the old one again.
+    #
+    # Saved HERE rather than at each call site, because the function that
+    # mutates the grants is the one that must durably record them. The create
+    # paths also save after setting COMMAND grants; a second save is harmless
+    # and idempotent, and is cheaper than a call site forgetting.
+    valkey_admin_cli ACL SAVE >/dev/null 2>&1 \
+        || log_warning "ACL SAVE failed — grants are live but will NOT survive a ValKey restart"
 }
 
 # Daemon password for non-ACL operations (topology registration). Every node
