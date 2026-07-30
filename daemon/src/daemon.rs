@@ -1968,6 +1968,8 @@ impl GNodeDaemon {
             // Keep the main thread alive with periodic saves and heartbeat
             // Check shutdown flag and exit gracefully
             info!("gNode daemon main loop started");
+            // Reconciliation cadence, independent of the service-discovery scan.
+            let mut _last_reconcile: Option<std::time::Instant> = None;
             while !is_shutdown_requested() {
                 // Sleep in 1-second intervals to check shutdown flag (vs 1 hour)
                 for _ in 0..60 {
@@ -2007,6 +2009,43 @@ impl GNodeDaemon {
                           discovery.site_count(), discovery.stream_count());
                 }
 
+                // Registration reconciliation — its OWN cadence, deliberately.
+                //
+                // This was first attached to the service-discovery scan for
+                // convenience and inherited that scan's gating:
+                // needs_scan() returns false when service discovery is
+                // DISABLED, so on any node with discovery off, registration
+                // reconciliation would silently never run at all. Two
+                // unrelated concerns, one condition — and the failure is
+                // invisible, because "no drift reported" and "never checked"
+                // look identical in a log.
+                //
+                // Master-only, like schema publication: exactly one node owns
+                // shared topology state.
+                //
+                // REPORT-ONLY unless GNODE_RECONCILE_REGISTRATIONS=apply. It
+                // can overwrite every service entity in the estate on a timer,
+                // so it earns that power by first showing in the log that what
+                // it would write matches what is already there.
+                if self.is_master {
+                    let due = _last_reconcile
+                        .map(|t: std::time::Instant| t.elapsed().as_secs() >= 120)
+                        .unwrap_or(true);
+                    if due {
+                        _last_reconcile = Some(std::time::Instant::now());
+                        if let Ok(mut conn) = crate::integration::connection_manager::get_connection() {
+                            let apply = std::env::var("GNODE_RECONCILE_REGISTRATIONS")
+                                .map(|v| v.eq_ignore_ascii_case("apply"))
+                                .unwrap_or(false);
+                            if let Err(e) = crate::registration_intent::reconcile(
+                                &mut conn, &self.topology_namespace, apply,
+                            ) {
+                                warn!("Registration reconcile failed: {}", e);
+                            }
+                        }
+                    }
+                }
+
                 // Periodic service discovery scan (if enabled and due)
                 {
                     let needs_scan = self.service_discovery.read()
@@ -2030,26 +2069,6 @@ impl GNodeDaemon {
                                 Err(e) => warn!("Service discovery lock poisoned: {}", e),
                             }
 
-                            // Re-derive every declared entity from (intent x
-                            // current schema) and compare. Master-only: exactly
-                            // one node owns shared topology state, same rule as
-                            // schema publication.
-                            //
-                            // REPORT-ONLY unless GNODE_RECONCILE_REGISTRATIONS=apply.
-                            // This has the power to overwrite every service
-                            // entity in the estate on a timer, so it earns that
-                            // by first showing in the log that what it would
-                            // write matches what is there.
-                            if self.is_master {
-                                let apply = std::env::var("GNODE_RECONCILE_REGISTRATIONS")
-                                    .map(|v| v.eq_ignore_ascii_case("apply"))
-                                    .unwrap_or(false);
-                                if let Err(e) = crate::registration_intent::reconcile(
-                                    &mut conn, &self.topology_namespace, apply,
-                                ) {
-                                    warn!("Registration reconcile failed: {}", e);
-                                }
-                            }
                         }
                     }
                 }
