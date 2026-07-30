@@ -32,6 +32,13 @@ dimensions:
     index: 0
     query_type: equality
     values:
+      # Reads the estate, serves nothing, and must never be SELECTED for work.
+      # An operator's workstation node watching live status is a member of the
+      # constellation but not part of its capacity. `headless` was the closest
+      # existing value and means "serves without a UI", which is the opposite
+      # claim. Placed at 0.10 rather than re-spacing the ladder, so no already
+      # registered node moves.
+      observer: 0.10
       headless: 0.00
       edge: 0.20
       replica: 0.40
