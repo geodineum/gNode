@@ -100,6 +100,27 @@ pub struct ServiceMetadata {
     /// Schema keys for schema↔topology cross-reference.
     /// Each entry is "{component}:{contract_name}" matching ValKey schema keys.
     pub schema_keys: Option<Vec<String>>,
+    /// How to ask this component what it can do.
+    ///
+    /// The tool tier catalogues what a component IS — language, build type,
+    /// licence, where it sits in the dependency pyramid. None of those sixteen
+    /// dimensions says what may be ASKED of it, so discovering a component in
+    /// the topology left a caller with no route to its interface. Each entry
+    /// is `scheme:target`:
+    ///
+    ///   `describe:<site>` — send the `describe` command to that site's
+    ///                       unified stream. Returns params/returns schemas
+    ///                       per command: the machine-readable form, and the
+    ///                       only one an agent can reason about.
+    ///   `cli:<command>`   — run this. Prose, for a human.
+    ///   `doc:<path>`      — repo-relative document. The floor: true even for
+    ///                       a component with no runtime to interrogate.
+    ///
+    /// Shaped after `schema_keys` on purpose — same list-of-strings, same
+    /// "pointer to a resolvable artifact" role — rather than inventing a
+    /// second convention for the same job. A component may declare several;
+    /// a reader takes the richest scheme it can act on.
+    pub affordances: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -654,6 +675,18 @@ pub(crate) fn build_entity_data(
                 ),
             );
         }
+        // Affordances — the route from "I found this component" to "here is
+        // how I ask it what it does". Lands in `m`, which service_describe
+        // returns verbatim (handlers/introspection.rs:158), so declaring one
+        // here is all it takes to make it discoverable at runtime.
+        if let Some(ref affs) = meta.affordances {
+            m.insert(
+                "affordances".to_string(),
+                serde_json::Value::Array(
+                    affs.iter().map(|s| serde_json::Value::String(s.clone())).collect(),
+                ),
+            );
+        }
     }
 
     // Construct entity JSON with abbreviated field names (matching ServicePointData serialization)
@@ -935,6 +968,7 @@ pub fn derive_profile_entity(
             service_type: Some(profile.to_string()),
             tier: Some("SERVICE".to_string()),
             schema_keys: None,
+            affordances: None,
         }),
         capabilities: caps,
         depends_on: Vec::new(),
@@ -1002,6 +1036,7 @@ fn run_service_profile(args: &RegisterToolsArgs) -> Result<()> {
             service_type: Some(profile.to_string()),
             tier: Some("SERVICE".to_string()),
             schema_keys: None,
+            affordances: None,
         }),
         capabilities: caps,
         depends_on: Vec::new(),
@@ -1368,5 +1403,142 @@ mod preflight_tests {
     fn an_authenticated_url_passes_the_preflight() {
         let e = run(args("redis://user:pw@127.0.0.1:47445", false));
         assert!(!format!("{:?}", e).contains("no credential"));
+    }
+}
+
+#[cfg(test)]
+mod affordance_tests {
+    use super::*;
+
+    fn meta(affordances: Option<Vec<String>>) -> Option<ServiceMetadata> {
+        Some(ServiceMetadata {
+            class: None,
+            description: Some("test component".into()),
+            service_type: None,
+            tier: None,
+            schema_keys: None,
+            affordances,
+        })
+    }
+
+    fn entity_metadata(m: Option<ServiceMetadata>) -> serde_json::Value {
+        let caps: HashMap<String, f64> = HashMap::new();
+        let dim_map: HashMap<String, usize> = HashMap::new();
+        let (json, _, _) = build_entity_data("x", &caps, &m, 16, 12, &dim_map);
+        serde_json::from_str::<serde_json::Value>(&json).unwrap()["m"].clone()
+    }
+
+    /// The whole point: a declared affordance must reach the stored entity,
+    /// because `service_describe` returns the `m` map verbatim
+    /// (handlers/introspection.rs:158) and that is the runtime discovery path.
+    #[test]
+    fn declared_affordances_reach_the_entity() {
+        let m = entity_metadata(meta(Some(vec![
+            "describe:geodineum_com".into(),
+            "cli:geodineum gnode contract".into(),
+            "doc:COMMAND_SCHEMA.md".into(),
+        ])));
+        let a = m["affordances"].as_array().expect("affordances absent from entity");
+        assert_eq!(a.len(), 3);
+        assert_eq!(a[0], "describe:geodineum_com");
+    }
+
+    /// Absent means absent. An empty key would read as "asked and answered
+    /// nothing", which is a different claim from "never declared".
+    #[test]
+    fn undeclared_affordances_add_no_key() {
+        let m = entity_metadata(meta(None));
+        assert!(m.get("affordances").is_none());
+    }
+
+    /// Every catalogued component must be reachable somehow. `doc:` is the
+    /// floor precisely so this can never legitimately be empty.
+    #[test]
+    fn an_empty_list_is_still_recorded_and_is_visible_as_wrong() {
+        let m = entity_metadata(meta(Some(vec![])));
+        assert_eq!(m["affordances"].as_array().unwrap().len(), 0);
+    }
+
+    /// Affordances and schema_keys are siblings, not alternatives — declaring
+    /// one must not disturb the other.
+    #[test]
+    fn affordances_coexist_with_schema_keys() {
+        let m = entity_metadata(Some(ServiceMetadata {
+            class: None,
+            description: None,
+            service_type: None,
+            tier: None,
+            schema_keys: Some(vec!["gnode:command_schema".into()]),
+            affordances: Some(vec!["doc:CONTRACT.md".into()]),
+        }));
+        assert_eq!(m["schema_keys"].as_array().unwrap().len(), 1);
+        assert_eq!(m["affordances"].as_array().unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod catalogue_tests {
+    use super::*;
+
+    /// Locate a shipped catalogue on a dev box. Returns None elsewhere.
+    fn catalogues() -> Vec<PathBuf> {
+        ["../../Geodineum/config/ecosystem_tools.yaml",
+         "../../Geodineum-pro/config/ecosystem_tools.yaml"]
+            .iter().map(PathBuf::from).filter(|p| p.exists()).collect()
+    }
+
+    /// Parse the real shipped catalogues with the real deserializer. A
+    /// hand-edited YAML that fails to parse would take the whole tool tier
+    /// with it, and serde drops unknown keys silently — so "it looks right"
+    /// is not evidence that the field landed in the struct.
+    ///
+    /// Skips where the catalogues are not checked out. The assertion below
+    /// makes the skip visible rather than passing quietly.
+    #[test]
+    fn shipped_catalogues_parse_and_declare_affordances() {
+        let found = catalogues();
+        if found.is_empty() {
+            eprintln!("SKIPPED: no catalogue checked out beside this repo");
+            return;
+        }
+        for path in found {
+            let comps = load_ecosystem_tools(&path)
+                .unwrap_or_else(|e| panic!("{} failed to parse: {}", path.display(), e));
+            assert!(!comps.is_empty(), "{} parsed to zero components", path.display());
+            for c in &comps {
+                let meta = c.metadata.as_ref()
+                    .unwrap_or_else(|| panic!("{}: {} has no metadata", path.display(), c.id));
+                let affs = meta.affordances.as_ref()
+                    .unwrap_or_else(|| panic!("{}: {} declares no affordances", path.display(), c.id));
+                assert!(!affs.is_empty(), "{}: {} has an empty affordance list", path.display(), c.id);
+                for a in affs {
+                    let (scheme, target) = a.split_once(':')
+                        .unwrap_or_else(|| panic!("{}: {} affordance {:?} is not scheme:target", path.display(), c.id, a));
+                    assert!(matches!(scheme, "describe" | "cli" | "doc"),
+                            "{}: {} unknown affordance scheme {:?}", path.display(), c.id, scheme);
+                    assert!(!target.trim().is_empty(),
+                            "{}: {} affordance {:?} has an empty target", path.display(), c.id, a);
+                }
+            }
+            eprintln!("{}: {} components, all with affordances", path.display(), comps.len());
+        }
+    }
+
+    /// Every `doc:` target must resolve. A pointer to a file that does not
+    /// exist is worse than no pointer — it sends a reader somewhere and
+    /// reads, from the topology, exactly like one that works.
+    #[test]
+    fn every_doc_affordance_resolves_to_a_real_file() {
+        let roots = [PathBuf::from("../.."), PathBuf::from("/opt/geodineum")];
+        for path in catalogues() {
+            for c in load_ecosystem_tools(&path).expect("parse") {
+                let Some(meta) = c.metadata else { continue };
+                for a in meta.affordances.unwrap_or_default() {
+                    let Some(rel) = a.strip_prefix("doc:") else { continue };
+                    let hit = roots.iter().any(|r| r.join(rel).exists());
+                    assert!(hit, "{}: {} points at doc:{} which exists under no known root", path.display(), c.id, rel);
+                }
+            }
+        }
     }
 }

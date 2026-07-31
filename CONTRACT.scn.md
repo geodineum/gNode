@@ -10,7 +10,8 @@ gNode = the **Sun** of each Constellation. Stateless (tokio async) Rust daemon `
 - Aliases: t/type · id/request_id · c/cmd/command/command_name · p/params/parameters · ss/source_site/service_id/site_id/st · sn/source_node/node_id/n · ds/dest_site · dn/dest_node · st/s/status(resp) · r/result · e/error · ri · ts/timestamp · bi · tc · _rt(relay_target) · _rr(relay_reply_to) · _gh(group_hint).
 - Types: `Command`{id,command,parameters:Value,site_id,node_id,ts} · `Response`{id,status,result,error,ts,batch_id,sequence} · `Lane`{Concurrent|Ordered} (handlers/types.rs) · `CommandDescriptor` · `RelayDecision`{Forward{target_site_id,target_stream_key,target_entity_id}|Local|NotFound|Error} · `OptimizedCommand` · `ComputeRequest/Response` · `CustomTopology`{name,dimensions,schema,entities,edges,metadata}.
 - Counts: 60 base cmds / 11 categories + 23 CMS cmds. 23 Lua libs / 203 fns + 1 CMS lib (gnode_asset.lua) / 10 = **213** FCALL fns (COMMAND_SCHEMA.md).
-- Tiers: service:30D · tool:16D · constellation:20D · galaxy:20D + custom (arbitrary D) → custom_topology.rs.
+- Tiers: service · tool · constellation · galaxy + custom (arbitrary D) → custom_topology.rs. **Dim counts NOT quoted** — `FCALL_RO GNODE_SCHEMA_GET <tier>`; prose copies drift silently. Registrable: service, tool, constellation. galaxy = schema published, registration refused by design (tool_registration.rs:867) — design frozen, unbuilt.
+- Tool-tier affordances: `entity.m.affordances` = [`scheme:target`] — `describe:<component>` (machine-readable cmd schemas) | `cli:<command>` (prose) | `doc:<repo>/<path>` (floor). Returned verbatim by `service_describe`.m. Sibling of `schema_keys`, same pointer-to-artifact role. Declared in config/ecosystem_tools.yaml.
 - Ext: ext_author.rs (AUTHOR_PUBKEY `2ff9966fcad06b6d`) + ext_verify.rs (verify_strict) + extensions/mod.rs; load from `$GNODE_EXT_DIR`.
 
 ## ::ARCHITECTURE
