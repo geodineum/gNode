@@ -84,7 +84,7 @@ pub fn register(
         returns_schema: json!({"oneOf": [{"type": "boolean", "description": "true when no message provided"}, {"type": "string", "description": "Echoed message"}]}),
         example: r#"{"cmd":"ping","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "status",
@@ -94,7 +94,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "properties": {"version": {"type": "string"}, "uptime": {"type": "integer"}, "timestamp": {"type": "number"}}}),
         example: r#"{"cmd":"status","params":{"detail":"full"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "health",
@@ -104,7 +104,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "properties": {"status": {"type": "string", "enum": ["healthy", "unhealthy"]}, "checks": {"type": "object"}}}),
         example: r#"{"cmd":"health","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "version",
@@ -114,7 +114,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "properties": {"version": {"type": "string"}, "build_date": {"type": "string"}, "rust_version": {"type": "string"}}}),
         example: r#"{"cmd":"version","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "echo",
@@ -124,7 +124,7 @@ pub fn register(
         returns_schema: json!({"description": "The message value or full parameters object"}),
         example: r#"{"cmd":"echo","params":{"message":"hello"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "get_node_info",
@@ -134,7 +134,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "description": "Node configuration and status from ValKey"}),
         example: r#"{"cmd":"get_node_info","params":{"node_id":"default"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "get_site_info",
@@ -144,7 +144,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "description": "Site registration metadata from ValKey"}),
         example: r#"{"cmd":"get_site_info","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "load_update",
@@ -162,7 +162,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "properties": {"service_id": {"type": "string"}, "load_factor": {"type": "number"}, "score": {"type": "number"}, "updated": {"type": "boolean"}}}),
         example: r#"{"cmd":"load_update","params":{"service_id":"web1","load_factor":0.4}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "describe",
@@ -179,7 +179,7 @@ pub fn register(
         ]}),
         example: r#"{"cmd":"describe","params":{"command":"ping"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "extension_list",
@@ -198,7 +198,7 @@ pub fn register(
         }}),
         example: r#"{"cmd":"extension_list","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "extension_info",
@@ -210,7 +210,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "description": "Full extension status including commands, Lua deps, and operational details"}),
         example: r#"{"cmd":"extension_info","params":{"name":"cms"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 }
 

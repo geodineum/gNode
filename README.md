@@ -61,7 +61,7 @@ Most PHP callers never touch the wire at all - they use the reference client,
 - **Inter-service routing** - a command tagged with a relay target is resolved,
   policy-checked, optionally format-translated, and forwarded to the target's
   stream, so the sender needs no ACL on the target's keyspace.
-- **Two execution lanes** - Fast (async-spawned, unordered, the default) and
+- **Two execution lanes** - Concurrent (async-spawned, unordered, the default) and
   Ordered (synchronous inline) for commands with cross-request ordering
   semantics.
 - **Stateless multi-tenancy** - one daemon serves many `(site, environment)`

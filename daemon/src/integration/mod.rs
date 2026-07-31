@@ -115,10 +115,10 @@ pub use command_handler::{
 
 pub mod command_processor;
 
-// Fast lane: async-spawned dispatch for Lane::Fast commands.
+// Concurrent lane: async-spawned dispatch for Lane::Concurrent commands.
 // Owns a shared tokio runtime + redis Client. See module doc-comment
-// for the Fast vs Ordered design rationale.
-pub mod fast_lane;
+// for the Concurrent vs Ordered design rationale.
+pub mod concurrent_lane;
 // The response-polling contract both lanes write through, so neither can
 // diverge from it independently.
 pub mod response_key;

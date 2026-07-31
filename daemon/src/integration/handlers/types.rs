@@ -363,7 +363,7 @@ pub fn calculate_euclidean_distance(
 /// The daemon executes commands through one of two pipelines, declared
 /// per-command rather than per-code-path:
 ///
-/// - `Fast`     — async-spawned execution. The consumer-group reader
+/// - `Concurrent`     — async-spawned execution. The consumer-group reader
 ///                hands the command to a tokio task and immediately
 ///                reads the next batch. Many in-flight per consumer
 ///                thread, no ordering guarantee between requests.
@@ -384,7 +384,7 @@ pub fn calculate_euclidean_distance(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Lane {
     /// Async-spawned, unordered, high-throughput. Safe default.
-    Fast,
+    Concurrent,
     /// Synchronous inline, ordering preserved. Use only when caller
     /// semantics demand it.
     Ordered,
@@ -392,10 +392,10 @@ pub enum Lane {
 
 impl Default for Lane {
     fn default() -> Self {
-        // Fast is the safe default — most commands are idempotent
+        // Concurrent is the safe default — most commands are idempotent
         // FCALL wrappers or read-only and don't need ordering. Opt
         // into Ordered explicitly in the handler registration.
-        Lane::Fast
+        Lane::Concurrent
     }
 }
 
@@ -420,8 +420,8 @@ pub struct CommandDescriptor {
     pub example: &'static str,
     /// Whether the command has an async handler
     pub async_capable: bool,
-    /// Execution lane (Fast = async-spawned, Ordered = synchronous inline).
-    /// Defaults to Fast — opt into Ordered for commands with
+    /// Execution lane (Concurrent = async-spawned, Ordered = synchronous inline).
+    /// Defaults to Concurrent — opt into Ordered for commands with
     /// cross-request ordering semantics. See `Lane` doc above.
     #[serde(default)]
     pub lane: Lane,

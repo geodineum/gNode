@@ -1301,15 +1301,15 @@ pub fn process_command_batch(
             // Lane lookup — every command declares its execution lane
             // via CommandDescriptor.lane, wired into
             // actual routing:
-            //   Lane::Fast    — if an async handler exists AND the
-            //                   Fast-lane runtime is initialized, hand
+            //   Lane::Concurrent    — if an async handler exists AND the
+            //                   Concurrent-lane runtime is initialized, hand
             //                   the command off to tokio::spawn and
             //                   move on immediately. Response gets
             //                   written by the spawned task.
             //   Lane::Ordered — keep the synchronous inline call as
             //                   before; ordering preserved across the
             //                   batch.
-            //   Fallback      — if Fast-lane runtime isn't initialized
+            //   Fallback      — if Concurrent-lane runtime isn't initialized
             //                   (tests, single-shot tools), or if no
             //                   async handler is registered, fall
             //                   through to the synchronous path.
@@ -1317,28 +1317,28 @@ pub fn process_command_batch(
             let async_available = registry.has_async(&command.command);
             if debug_level >= LogLevel::Info {
                 info!(
-                    "Dispatching {} (lane={:?}, async_available={}, fast_lane_initialized={})",
+                    "Dispatching {} (lane={:?}, async_available={}, concurrent_lane_initialized={})",
                     command.command,
                     lane,
                     async_available,
-                    crate::integration::fast_lane::is_initialized()
+                    crate::integration::concurrent_lane::is_initialized()
                 );
             }
 
-            // Fast-lane spawn — fire-and-forget. The spawned task
+            // Concurrent-lane spawn — fire-and-forget. The spawned task
             // writes its own response to the polling key; nothing more
             // to do here. Increment counter and skip to next message.
-            if matches!(lane, crate::integration::handlers::types::Lane::Fast)
+            if matches!(lane, crate::integration::handlers::types::Lane::Concurrent)
                 && async_available
-                && crate::integration::fast_lane::is_initialized()
+                && crate::integration::concurrent_lane::is_initialized()
             {
                 let cmd_owned = command.clone();
                 let site_owned = site_id.to_string();
                 let topology_clone = topology.clone();
                 let env_owned = crate::integration::receipt::env_from_stream_key(stream_key)
                     .map(String::from);
-                let spawned = crate::integration::fast_lane::try_spawn_fast(
-                    crate::integration::fast_lane::dispatch(
+                let spawned = crate::integration::concurrent_lane::try_spawn_concurrent(
+                    crate::integration::concurrent_lane::dispatch(
                         cmd_owned,
                         site_owned,
                         topology_clone,
@@ -1350,12 +1350,12 @@ pub fn process_command_batch(
                     processed_count += 1;
                     continue;
                 }
-                // try_spawn_fast returned false (race: runtime dropped
+                // try_spawn_concurrent returned false (race: runtime dropped
                 // between is_initialized() and the spawn). Fall through
                 // to the synchronous path as a safety net.
             }
 
-            // Synchronous (Ordered lane, or Fast fallback) dispatch.
+            // Synchronous (Ordered lane, or Concurrent fallback) dispatch.
             let handler_opt = registry.get_handler(&command.command);
             let result = match handler_opt {
                 Some(handler) => {
@@ -1373,7 +1373,7 @@ pub fn process_command_batch(
             let response = result.to_response(&command.id);
 
             // Where the reply goes, what it contains and how long it lives are
-            // decided in integration::response_key, which the Fast lane also
+            // decided in integration::response_key, which the Concurrent lane also
             // calls. This block once carried its own copy of that rule and the
             // copy was missing the command.id fallback, so an Ordered-lane
             // command with a top-level id and no _request_id wrote its reply

@@ -46,7 +46,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "properties": {"key": {"type": "string"}, "value": {"description": "The configuration value (type varies by key)"}}}),
         example: r#"{"cmd":"config_get","params":{"key":"log_level"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "config_set",
@@ -69,7 +69,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "properties": {"configuration": {"type": "object", "description": "Map of configuration key/value pairs"}, "runtime_info": {"type": "object"}}}),
         example: r#"{"cmd":"config_list","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 }
 

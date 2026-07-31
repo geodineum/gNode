@@ -5,16 +5,16 @@
 gNode = the **Sun** of each Constellation. Stateless (tokio async) Rust daemon `gnode-daemon v0.1.0`, edition 2021. Owns: RESP3 command-stream wire protocol + unified multi-tenant routing + geometric topology + signed-extension pipeline, sitting between PHP services and ValKey. State-aware-not-stateful: ∀ state ∈ ValKey; nothing in-process survives restart.
 
 ## ::ANCHOR
-- Stream keys: `{site_id}:gnode:unified:{env}` (cmds, config.rs) · `{ss}:res:{id}` `EX 10` (response poll, fast_lane.rs) · `{site_id}:gnode:receipts:{env}` (signed receipts, MINID 30d, receipt.rs) · `{topology_ns}:gnode:receipt_pubkeys` (HASH signer_id→`alg:pubkey_hex`) · `{site_id}:gnode:health:{env}` (config.rs) · `{site_id}:gnode:broadcast` (env-indep, config.rs) · `{site_id}:gnode:comms:{env}` (COMMS-owned, gNode provisions) · `{topology_ns}:gnode:topology` (registry).
+- Stream keys: `{site_id}:gnode:unified:{env}` (cmds, config.rs) · `{ss}:res:{id}` `EX 10` (response poll, concurrent_lane.rs) · `{site_id}:gnode:receipts:{env}` (signed receipts, MINID 30d, receipt.rs) · `{topology_ns}:gnode:receipt_pubkeys` (HASH signer_id→`alg:pubkey_hex`) · `{site_id}:gnode:health:{env}` (config.rs) · `{site_id}:gnode:broadcast` (env-indep, config.rs) · `{site_id}:gnode:comms:{env}` (COMMS-owned, gNode provisions) · `{topology_ns}:gnode:topology` (registry).
 - Wire resolver: `utils::field_names` canonical alias lists utils.rs; `utils::get_field(map,keys)` utils.rs.
 - Aliases: t/type · id/request_id · c/cmd/command/command_name · p/params/parameters · ss/source_site/service_id/site_id/st · sn/source_node/node_id/n · ds/dest_site · dn/dest_node · st/s/status(resp) · r/result · e/error · ri · ts/timestamp · bi · tc · _rt(relay_target) · _rr(relay_reply_to) · _gh(group_hint).
-- Types: `Command`{id,command,parameters:Value,site_id,node_id,ts} · `Response`{id,status,result,error,ts,batch_id,sequence} · `Lane`{Fast|Ordered} (handlers/types.rs) · `CommandDescriptor` · `RelayDecision`{Forward{target_site_id,target_stream_key,target_entity_id}|Local|NotFound|Error} · `OptimizedCommand` · `ComputeRequest/Response` · `CustomTopology`{name,dimensions,schema,entities,edges,metadata}.
+- Types: `Command`{id,command,parameters:Value,site_id,node_id,ts} · `Response`{id,status,result,error,ts,batch_id,sequence} · `Lane`{Concurrent|Ordered} (handlers/types.rs) · `CommandDescriptor` · `RelayDecision`{Forward{target_site_id,target_stream_key,target_entity_id}|Local|NotFound|Error} · `OptimizedCommand` · `ComputeRequest/Response` · `CustomTopology`{name,dimensions,schema,entities,edges,metadata}.
 - Counts: 60 base cmds / 11 categories + 23 CMS cmds. 23 Lua libs / 203 fns + 1 CMS lib (gnode_asset.lua) / 10 = **213** FCALL fns (COMMAND_SCHEMA.md).
 - Tiers: service:30D · tool:16D · constellation:20D · galaxy:20D + custom (arbitrary D) → custom_topology.rs.
 - Ext: ext_author.rs (AUTHOR_PUBKEY `2ff9966fcad06b6d`) + ext_verify.rs (verify_strict) + extensions/mod.rs; load from `$GNODE_EXT_DIR`.
 
 ## ::ARCHITECTURE
-Rust + tokio. Single-threaded consumer-group dispatch loop: `XREADGROUP` unified streams → parse field-aliased RESP3 via `utils::field_names` (command_processor.rs) → dispatch to 60 cmds in 11 handler categories (system, geometric, topology, service, config, stream, +direct_channel, relay_ops, introspection, diagnostic, custom_topology). **Lane::Fast** = spawn async task (fast_lane.rs), write resp async to `{ss}:res:{id}`. **Lane::Ordered** (7 cmds: topo_create, topo_delete, channel_open, channel_close, relay_policy_set, relay_policy_remove, config_set) = synchronous inline, BLOCKS consumer thread. Topology state stateless in ValKey under `{topology_ns}:gnode:*` + `{site_id}:gnode:*`. Geometric precision = g_math 0.4.0 Q64.64 fixed-point → deterministic cross-node bucket keys + Z-scores. Relay (relay_ops.rs) resolves `_rt` → entity_id→site | site_id→direct | JSON capability→geometric discovery. Stream discovery (stream_discovery.rs) auto-subscribes ∀ registered (site,env). 
+Rust + tokio. Single-threaded consumer-group dispatch loop: `XREADGROUP` unified streams → parse field-aliased RESP3 via `utils::field_names` (command_processor.rs) → dispatch to 60 cmds in 11 handler categories (system, geometric, topology, service, config, stream, +direct_channel, relay_ops, introspection, diagnostic, custom_topology). **Lane::Concurrent** = spawn async task (concurrent_lane.rs), write resp async to `{ss}:res:{id}`. **Lane::Ordered** (7 cmds: topo_create, topo_delete, channel_open, channel_close, relay_policy_set, relay_policy_remove, config_set) = synchronous inline, BLOCKS consumer thread. Topology state stateless in ValKey under `{topology_ns}:gnode:*` + `{site_id}:gnode:*`. Geometric precision = g_math 0.4.0 Q64.64 fixed-point → deterministic cross-node bucket keys + Z-scores. Relay (relay_ops.rs) resolves `_rt` → entity_id→site | site_id→direct | JSON capability→geometric discovery. Stream discovery (stream_discovery.rs) auto-subscribes ∀ registered (site,env). 
 Philosophy: stateless (all state ValKey) · ONE canonical wire resolver (utils::field_names) · one-shot discovery, no cross-restart cache · fail-soft ext load (reduced feature set) · alias backward-compat (st/n/site_id/node_id ≡ ss/sn) · async-first + sync fallback · RESP3-native FCALL (pcall-wrapped JSON) · pre-XADD schema validation · per-site rate-limit + circuit-breaker · explicit DTAP gating (non-prod never auto-provisions) · relay default=ALLOW (explicit *:* DENY to fail-closed) · runtime-introspectable schemas (`describe`).
 
 ## ::IO
@@ -36,8 +36,8 @@ CONSUMES ← ValKey 7.2+ (FUNCTION LOAD, RESP3, consumer groups, streams) | Lua 
 - Health: GNODE_NODE_HEARTBEAT → GNODE_NODE_AGGREGATE_METRICS → health/topology_heatmap.
 
 ## ::LIMITATIONS
-- No cross-request ordering on Fast lane (only within one synchronous client batch).
-- Response poll TTL fixed 10s (fast_lane.rs) → silent expiry on slow poll, no retry.
+- No cross-request ordering on Concurrent lane (only within one synchronous client batch).
+- Response poll TTL fixed 10s (concurrent_lane.rs) → silent expiry on slow poll, no retry.
 - 7 Ordered cmds block whole consumer thread, no per-cmd timeout → 1 slow handler stalls all tenants.
 - Single hardcoded ed25519 pubkey (ext_author.rs); rotation = recompile, no key versioning.
 - Custom topo dims user-supplied + unversioned → semantic change invalidates coords, no schema evolution.
@@ -60,7 +60,7 @@ RISK: relay default=ALLOW fail-open ⚠ · `st` overloaded source_site(t=c)|stat
 ## ::LATENT
 - "ONE canonical wire resolver — utils::field_names, ss/sn over legacy st/n, st overloaded by message type t"
 - "stateless Sun: all topology/registry/telemetry rediscovered from ValKey on restart, nothing in-process"
-- "Lane::Fast async-to-{ss}:res:{id}-EX10 vs Lane::Ordered 7-cmds-block-consumer-thread"
+- "Lane::Concurrent async-to-{ss}:res:{id}-EX10 vs Lane::Ordered 7-cmds-block-consumer-thread"
 - "Q64.64 g_math fixed-point → deterministic cross-node bucket keys + Z-scores → geometric capability discovery"
 - "relay `_rt` resolve entity→site→policy(default ALLOW)→forward to {target}:gnode:unified:{env}, `_rr` overrides reply"
 - "213 FCALL fns GNODE_* pcall-wrapped JSON strings, allowlist ^(GNODE|GCUBE|COMMS|GC)_"

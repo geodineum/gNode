@@ -1,15 +1,15 @@
-// Fast Lane — async-spawned command dispatch
+// Concurrent Lane — async-spawned command dispatch
 //
-// The "Fast lane" is one of two execution lanes the daemon supports (the
+// The "Concurrent lane" is one of two execution lanes the daemon supports (the
 // other is "Ordered", which runs handlers synchronously inline in the
 // consumer-group thread). The lane choice is declared per command via
 // `CommandDescriptor.lane` (see handlers/types.rs::Lane) — most commands
-// are idempotent FCALL wrappers or read-only and live on the Fast lane;
+// are idempotent FCALL wrappers or read-only and live on the Concurrent lane;
 // a small set with cross-request causal semantics opt into Ordered.
 //
 // This module owns a single multi-threaded tokio runtime, lazily
 // initialized at daemon startup via `init()`. Worker threads in the
-// consumer-group dispatch loop call `try_spawn_fast()` to hand a
+// consumer-group dispatch loop call `try_spawn_concurrent()` to hand a
 // command's async handler over to this runtime. The spawn is
 // fire-and-forget: the handler writes its own response to the
 // `{ss}:res:{request_id}` polling key and the worker thread immediately
@@ -27,7 +27,7 @@
 // Why fail-soft (init() is optional):
 //   - Tests, single-shot CLI tools, and the asset_builder path call
 //     process_command_batch without setting up a runtime — they should
-//     keep working, just always-synchronous. `try_spawn_fast` returns
+//     keep working, just always-synchronous. `try_spawn_concurrent` returns
 //     false in that case and the caller falls back to the sync handler.
 
 use std::sync::Arc;
@@ -42,15 +42,15 @@ use crate::daemon::Command;
 use crate::GeometricTopology;
 use std::sync::RwLock;
 
-/// The Fast-lane runtime. Initialized once at daemon startup via `init()`.
-static FAST_LANE_RUNTIME: OnceLock<Runtime> = OnceLock::new();
+/// The Concurrent-lane runtime. Initialized once at daemon startup via `init()`.
+static CONCURRENT_LANE_RUNTIME: OnceLock<Runtime> = OnceLock::new();
 
 /// Shared redis::Client for async-connection construction inside spawned
 /// tasks. Cheap to clone (just an Arc<...> internally). Initialized
 /// alongside the runtime.
-static FAST_LANE_CLIENT: OnceLock<Arc<Client>> = OnceLock::new();
+static CONCURRENT_LANE_CLIENT: OnceLock<Arc<Client>> = OnceLock::new();
 
-/// Initialize the Fast-lane runtime + client. Call ONCE at daemon
+/// Initialize the Concurrent-lane runtime + client. Call ONCE at daemon
 /// startup, before any consumer worker spawns.
 ///
 /// Idempotent: subsequent calls are no-ops (logs a warning).
@@ -60,51 +60,51 @@ static FAST_LANE_CLIENT: OnceLock<Arc<Client>> = OnceLock::new();
 /// * `client` - Shared redis::Client; spawned tasks use this to acquire
 ///              MultiplexedConnections for response writes.
 /// * `worker_threads` - Size of the runtime's worker pool. 2-4 is
-///                      typically sufficient — Fast-lane handlers are
+///                      typically sufficient — Concurrent-lane handlers are
 ///                      mostly I/O-bound FCALLs.
 ///
 /// # Returns
 ///
 /// `Ok(())` on success, `Err(...)` if the runtime couldn't be built.
 pub fn init(client: Arc<Client>, worker_threads: usize) -> Result<(), String> {
-    if FAST_LANE_RUNTIME.get().is_some() {
-        warn!("fast_lane::init() called more than once — ignoring");
+    if CONCURRENT_LANE_RUNTIME.get().is_some() {
+        warn!("concurrent_lane::init() called more than once — ignoring");
         return Ok(());
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(worker_threads.max(1))
-        .thread_name("gnode-fast-lane")
+        .thread_name("gnode-concurrent-lane")
         .enable_all()
         .build()
-        .map_err(|e| format!("Failed to build Fast-lane tokio runtime: {}", e))?;
+        .map_err(|e| format!("Failed to build Concurrent-lane tokio runtime: {}", e))?;
 
-    FAST_LANE_RUNTIME
+    CONCURRENT_LANE_RUNTIME
         .set(rt)
-        .map_err(|_| "Fast-lane runtime was set concurrently".to_string())?;
-    FAST_LANE_CLIENT
+        .map_err(|_| "Concurrent-lane runtime was set concurrently".to_string())?;
+    CONCURRENT_LANE_CLIENT
         .set(client)
-        .map_err(|_| "Fast-lane client was set concurrently".to_string())?;
+        .map_err(|_| "Concurrent-lane client was set concurrently".to_string())?;
 
-    info!("Fast lane initialized ({} worker threads)", worker_threads);
+    info!("Concurrent lane initialized ({} worker threads)", worker_threads);
     Ok(())
 }
 
-/// Check whether the Fast lane has been initialized.
+/// Check whether the Concurrent lane has been initialized.
 pub fn is_initialized() -> bool {
-    FAST_LANE_RUNTIME.get().is_some()
+    CONCURRENT_LANE_RUNTIME.get().is_some()
 }
 
-/// Spawn a future onto the Fast-lane runtime. Returns `true` if the
+/// Spawn a future onto the Concurrent-lane runtime. Returns `true` if the
 /// runtime was available and the future was queued, `false` otherwise
 /// (caller should fall back to synchronous dispatch).
 ///
 /// The future must be `'static + Send` — own everything it uses.
-pub fn try_spawn_fast<F>(future: F) -> bool
+pub fn try_spawn_concurrent<F>(future: F) -> bool
 where
     F: Future<Output = ()> + Send + 'static,
 {
-    match FAST_LANE_RUNTIME.get() {
+    match CONCURRENT_LANE_RUNTIME.get() {
         Some(rt) => {
             rt.spawn(future);
             true
@@ -113,8 +113,8 @@ where
     }
 }
 
-/// Dispatch a command via the Fast lane. Used by command_processor's
-/// dispatch loop for `Lane::Fast` commands that have an async handler
+/// Dispatch a command via the Concurrent lane. Used by command_processor's
+/// dispatch loop for `Lane::Concurrent` commands that have an async handler
 /// registered.
 ///
 /// The function:
@@ -129,7 +129,7 @@ where
 /// Errors are logged but never propagated — the worker thread that
 /// spawned this task has already moved on, so there's no caller to
 /// surface to. Failures here are operationally visible via the
-/// "[fast_lane]" log prefix.
+/// "[concurrent_lane]" log prefix.
 pub async fn dispatch(
     command: Command,
     site_id: String,
@@ -137,10 +137,10 @@ pub async fn dispatch(
     environment: Option<String>,
     debug_mode: bool,
 ) {
-    let client = match FAST_LANE_CLIENT.get() {
+    let client = match CONCURRENT_LANE_CLIENT.get() {
         Some(c) => c,
         None => {
-            error!("[fast_lane] dispatch called but client not initialized — dropping command {}", command.command);
+            error!("[concurrent_lane] dispatch called but client not initialized — dropping command {}", command.command);
             return;
         }
     };
@@ -149,7 +149,7 @@ pub async fn dispatch(
         Ok(c) => c,
         Err(e) => {
             error!(
-                "[fast_lane] failed to acquire async connection for command {}: {}",
+                "[concurrent_lane] failed to acquire async connection for command {}: {}",
                 command.command, e
             );
             return;
@@ -162,17 +162,17 @@ pub async fn dispatch(
         Some(handler) => {
             if debug_mode {
                 debug!(
-                    "[fast_lane] dispatching {} (id={}, site={})",
+                    "[concurrent_lane] dispatching {} (id={}, site={})",
                     command.command, command.id, site_id
                 );
             }
             handler(&command, &mut conn, &topology, &site_id, debug_mode).await
         }
         None => {
-            // Defensive: try_spawn_fast should only be reached after
+            // Defensive: try_spawn_concurrent should only be reached after
             // has_async() returned true, so this is a logic bug.
             error!(
-                "[fast_lane] no async handler for {} despite has_async=true at dispatch time",
+                "[concurrent_lane] no async handler for {} despite has_async=true at dispatch time",
                 command.command
             );
             return;
@@ -206,11 +206,11 @@ pub async fn dispatch(
 
         if let Err(e) = write_result {
             error!(
-                "[fast_lane] failed to write response to {}: {}",
+                "[concurrent_lane] failed to write response to {}: {}",
                 response_key, e
             );
         } else if debug_mode {
-            debug!("[fast_lane] response written to {}", response_key);
+            debug!("[concurrent_lane] response written to {}", response_key);
         }
 
         // Durable channel: a signed receipt beside the ephemeral reply
@@ -233,13 +233,13 @@ pub async fn dispatch(
             {
                 Ok(id) => crate::integration::receipt::log_first_emission(
                     &crate::integration::receipt::receipt_stream_key(key_site, &env), &id),
-                Err(e) => warn!("[fast_lane] receipt emit failed for {}: {}", request_id, e),
+                Err(e) => warn!("[concurrent_lane] receipt emit failed for {}: {}", request_id, e),
             }
         }
     } else {
         if debug_mode {
             debug!(
-                "[fast_lane] command {} had no id and no _request_id — skipping response write",
+                "[concurrent_lane] command {} had no id and no _request_id — skipping response write",
                 command.command
             );
         }

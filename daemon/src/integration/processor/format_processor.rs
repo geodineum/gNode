@@ -171,7 +171,7 @@ impl FormatProcessor {
         Ok(())
     }
 
-    /// Async counterpart of `persist_format`, for the fast-lane async command
+    /// Async counterpart of `persist_format`, for the concurrent-lane async command
     /// handlers (which hold a multiplexed async connection). Same key scheme.
     pub async fn persist_format_async(
         &self,

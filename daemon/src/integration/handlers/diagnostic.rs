@@ -58,7 +58,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "properties": {"debug_info": {"type": "object", "properties": {"site_id": {"type": "string"}, "debug_mode": {"type": "boolean"}, "topology": {"type": "object"}, "system": {"type": "object"}}}}}),
         example: r#"{"cmd":"debug_info","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "memory_stats",
@@ -68,7 +68,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "properties": {"memory_stats": {"type": "object", "properties": {"process_memory_kb": {"type": "integer"}, "available_cores": {"type": "integer"}, "heap_estimate": {"type": "string"}}}}}),
         example: r#"{"cmd":"memory_stats","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "thread_status",
@@ -78,7 +78,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "properties": {"thread_status": {"type": "object", "properties": {"available_cores": {"type": "integer"}, "active_threads": {"type": "string"}, "max_threads": {"type": "integer"}, "status": {"type": "string"}}}}}),
         example: r#"{"cmd":"thread_status","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "connection_status",
@@ -88,7 +88,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "properties": {"connection_status": {"type": "object", "properties": {"valkey_connected": {"type": "boolean"}, "pool_size": {"type": "integer"}, "active_connections": {"type": "integer"}, "idle_connections": {"type": "integer"}, "connection_health": {"type": "string"}}}}}),
         example: r#"{"cmd":"connection_status","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "performance_metrics",
@@ -98,7 +98,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "properties": {"performance_metrics": {"type": "object", "properties": {"commands_per_second": {"type": "string"}, "batch_commands_per_second": {"type": "string"}, "avg_response_time_ms": {"type": "string"}, "memory_usage_mb": {"type": "integer"}, "uptime_seconds": {"type": "integer"}}}}}),
         example: r#"{"cmd":"performance_metrics","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "security_status",
@@ -108,7 +108,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "properties": {"security_status": {"type": "object", "properties": {"valkey_auth": {"type": "string"}, "tls": {"type": "string"}, "access_control": {"type": "string"}, "audit_logging": {"type": "string"}, "security_level": {"type": "string"}}}}}),
         example: r#"{"cmd":"security_status","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "topology_status",
@@ -118,7 +118,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "properties": {"topology_status": {"type": "object", "properties": {"services_registered": {"type": "integer"}, "capabilities_defined": {"type": "integer"}, "dimensions": {"type": "integer"}, "load_order_calculated": {"type": "boolean"}, "topology_health": {"type": "string"}}}}}),
         example: r#"{"cmd":"topology_status","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 }
 

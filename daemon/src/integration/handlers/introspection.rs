@@ -63,7 +63,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"service_describe","params":{"entity_id":"SecurityManager"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 }
 

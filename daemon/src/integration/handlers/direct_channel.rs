@@ -83,7 +83,7 @@ pub fn register(
         async_capable: true,
         // Ordered: creates a channel resource (stream + consumer groups +
         // metadata key) that subsequent inter-service ops on this client
-        // depend on. A Fast-lane channel_open could let a follow-up send
+        // depend on. A Concurrent-lane channel_open could let a follow-up send
         // start before the stream exists.
         lane: Lane::Ordered,
     });
@@ -103,7 +103,7 @@ pub fn register(
         example: r#"{"cmd":"channel_close","params":{"channel_id":"ch_a1b2c3d4"}}"#,
         async_capable: true,
         // Ordered: destructive cleanup. Pending sends on this channel
-        // should observe the closed state; Fast lane could let a send
+        // should observe the closed state; Concurrent lane could let a send
         // arrive against a half-deleted channel.
         lane: Lane::Ordered,
     });
@@ -122,7 +122,7 @@ pub fn register(
         returns_schema: json!({"type": "object"}),
         example: r#"{"cmd":"channel_info","params":{"channel_id":"ch_a1b2c3d4"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -139,7 +139,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "properties": {"channels": {"type": "array"}, "count": {"type": "integer"}}}),
         example: r#"{"cmd":"channel_list","params":{"site_id":"my_app"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 }
 

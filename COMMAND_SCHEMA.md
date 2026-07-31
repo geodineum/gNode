@@ -74,7 +74,7 @@ Where `<json>` = `{"id":..., "status":"ok|error", "result":..., "error":..., "ti
 
 The `request_id` is taken from `_request_id` inside the parameters
 object (the key `pollForResponse` writes and polls on); if that is
-absent it falls back to the top-level `id` field. The Fast and Ordered
+absent it falls back to the top-level `id` field. The Concurrent and Ordered
 lanes resolve it identically, so either form returns a polling response
 — a message carrying only a top-level `id` (no `_request_id`) is written
 to `{ss}:res:{id}` on both lanes.
@@ -93,7 +93,7 @@ is declared per command in source (see `CommandDescriptor.lane` in
 the `describe` command's response — operators can introspect the daemon
 to see exactly which lane each command takes.
 
-### Fast lane (default)
+### Concurrent lane (default)
 
 - **Execution**: async-spawned onto a shared tokio runtime. The consumer
   thread reads a command, hands it to `tokio::spawn`, and immediately
@@ -138,15 +138,15 @@ descriptor's call site.
 | `relay_policy_remove` | Same rationale as `relay_policy_set`. |
 | `config_set` | Daemon-behaviour change — pending `config_get` reads must observe new value. |
 
-All other commands default to **Lane::Fast**.
+All other commands default to **Lane::Concurrent**.
 
 ### Fallbacks
 
-- If the Fast lane runtime fails to initialize at daemon startup, every
+- If the Concurrent lane runtime fails to initialize at daemon startup, every
   command falls back to synchronous dispatch (today's previously
   behaviour). The daemon still serves correctly, just without the
   async throughput improvement.
-- If a Lane::Fast command has no async handler registered (rare —
+- If a Lane::Concurrent command has no async handler registered (rare —
   defensive case for signed extensions), it also falls back to
   synchronous dispatch.
 

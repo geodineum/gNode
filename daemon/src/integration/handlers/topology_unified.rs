@@ -138,7 +138,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"topo_register","params":{"topology":"services","entity_id":"auth-svc","x":0.2,"y":0.5,"z":0.1,"metadata":{"version":"2.0"}}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -162,7 +162,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"topo_deregister","params":{"topology":"services","entity_id":"auth-svc"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -190,7 +190,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"topo_add_edge","params":{"topology":"services","from":"api-gw","to":"auth-svc","metadata":{"weight":1.0}}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -217,7 +217,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"topo_discover","params":{"topology":"services","x":0.2,"y":0.5,"z":0.1,"limit":5}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -241,7 +241,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"topo_z_order","params":{"topology":"services","direction":"asc"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -266,7 +266,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"topo_z_range","params":{"topology":"services","min_z":0.0,"max_z":0.5}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -294,7 +294,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"topo_chain","params":{"topology":"services","entity_id":"api-gw","direction":"outgoing","max_depth":5}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -319,7 +319,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"topo_stats","params":{"topology":"services"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -339,7 +339,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"topo_list","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -363,7 +363,7 @@ pub fn register(
         example: r#"{"cmd":"topo_delete","params":{"topology":"services"}}"#,
         async_capable: true,
         // Ordered: destructive. Pending reads must observe post-delete state
-        // (entities, edges, voxel buckets, z_order all gone) — a Fast-lane
+        // (entities, edges, voxel buckets, z_order all gone) — a Concurrent-lane
         // read that started during the delete could observe inconsistent
         // intermediate state.
         lane: Lane::Ordered,
@@ -394,7 +394,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"topo_get_entity","params":{"topology":"services","entity_id":"auth-svc"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -422,7 +422,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"topo_validate_edge","params":{"topology":"services","from":"api-gw","to":"auth-svc"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 }
 

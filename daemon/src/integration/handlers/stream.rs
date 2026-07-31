@@ -50,7 +50,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "description": "XINFO STREAM output"}),
         example: r#"{"cmd":"stream_info","params":{"stream":"mysite:gnode:unified:production"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "stream_group_info",
@@ -60,7 +60,7 @@ pub fn register(
         returns_schema: json!({"type": "array", "description": "Array of consumer group info objects"}),
         example: r#"{"cmd":"stream_group_info","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "stream_consumer_info",
@@ -70,7 +70,7 @@ pub fn register(
         returns_schema: json!({"type": "array", "description": "Array of consumer info objects"}),
         example: r#"{"cmd":"stream_consumer_info","params":{"group":"gnode-daemon"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
     descriptors.push(CommandDescriptor {
         name: "stream_pending",
@@ -80,7 +80,7 @@ pub fn register(
         returns_schema: json!({"type": "object", "properties": {"summary": {"description": "Pending summary"}, "details": {"type": "array", "description": "Detailed pending entries (if count > 0)"}}}),
         example: r#"{"cmd":"stream_pending","params":{"count":10}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 }
 

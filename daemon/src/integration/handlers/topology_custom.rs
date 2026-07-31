@@ -68,7 +68,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"custom_topology_discover","params":{"topology":"services","capabilities":{"compute":0.8},"limit":10}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -92,7 +92,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"custom_topology_distance","params":{"topology":"services","entity_a":"svc-auth","entity_b":"svc-gateway"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -117,7 +117,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"custom_topology_knn","params":{"topology":"services","entity_id":"svc-auth","k":5}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -142,7 +142,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"custom_topology_similarity","params":{"topology":"services","entity_id":"svc-auth","threshold":0.8}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 }
 

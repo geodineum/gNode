@@ -1597,26 +1597,26 @@ impl GNodeDaemon {
         info!("═══════════════════════════════════════════════════════════════");
 
         // ========================================
-        // Fast lane initialization (lane-aware dispatch)
+        // Concurrent lane initialization (lane-aware dispatch)
         // ========================================
-        // Initialize ONCE before any consumer worker spawns. The Fast
+        // Initialize ONCE before any consumer worker spawns. The Concurrent
         // lane owns a shared tokio runtime + redis::Client used to
-        // dispatch Lane::Fast commands asynchronously, so consumer
+        // dispatch Lane::Concurrent commands asynchronously, so consumer
         // workers don't block waiting for each handler to finish.
-        // See integration/fast_lane.rs for the design rationale.
+        // See integration/concurrent_lane.rs for the design rationale.
         //
         // Worker count: 2 is sufficient for typical loads. Each worker
-        // can hold many concurrent async tasks (Fast lane handlers are
+        // can hold many concurrent async tasks (Concurrent lane handlers are
         // mostly I/O-bound on FCALL round-trips, not CPU-bound).
-        if let Err(e) = crate::integration::fast_lane::init(
+        if let Err(e) = crate::integration::concurrent_lane::init(
             std::sync::Arc::new(self.client.clone()),
             2,
         ) {
-            // Non-fatal: if Fast-lane init fails, every command falls
+            // Non-fatal: if Concurrent-lane init fails, every command falls
             // back to synchronous dispatch (today's behaviour). The
             // daemon still serves correctly, just without the async
             // throughput improvement.
-            warn!("Fast-lane init failed: {} — all commands will run synchronously", e);
+            warn!("Concurrent-lane init failed: {} — all commands will run synchronously", e);
         }
 
         // ========================================

@@ -149,19 +149,19 @@ impl CommandHandlerRegistry {
     /// Get the execution lane declared for a command.
     ///
     /// Returns the lane from the registered CommandDescriptor, or
-    /// `Lane::Fast` as a safe default if the command has no descriptor
+    /// `Lane::Concurrent` as a safe default if the command has no descriptor
     /// (defensive — every base-catalog command HAS a descriptor; this
     /// only matters for signed extensions that may register handlers
     /// without descriptors).
     ///
-    /// Dispatchers use this to route messages: Fast commands get
+    /// Dispatchers use this to route messages: Concurrent commands get
     /// tokio::spawn'd via the async handler path; Ordered commands
     /// run synchronously inline. See `handlers::types::Lane` for the
     /// full semantic contract.
     pub fn get_lane(&self, command_name: &str) -> Lane {
         self.get_descriptor(command_name)
             .map(|d| d.lane)
-            .unwrap_or(Lane::Fast)
+            .unwrap_or(Lane::Concurrent)
     }
 
     /// Get all descriptors grouped by category

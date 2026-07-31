@@ -77,7 +77,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"topology_heatmap","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -103,7 +103,7 @@ pub fn register(
         example: r#"{"cmd":"relay_policy_set","params":{"pattern":"site_a:site_b","action":"deny","reason":"Maintenance window"}}"#,
         async_capable: true,
         // Ordered: changes routing policy. Subsequent relay decisions must
-        // observe the new policy — Fast lane could let a relay attempt
+        // observe the new policy — Concurrent lane could let a relay attempt
         // through while the policy write is still pending.
         lane: Lane::Ordered,
     });
@@ -116,7 +116,7 @@ pub fn register(
         returns_schema: json!({"type": "object"}),
         example: r#"{"cmd":"relay_policy_list","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {

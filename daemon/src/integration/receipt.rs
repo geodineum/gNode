@@ -462,7 +462,7 @@ pub fn emit_receipt(
     Ok(id)
 }
 
-/// Async twin of [`emit_receipt`] for the Fast lane's multiplexed connection.
+/// Async twin of [`emit_receipt`] for the Concurrent lane's multiplexed connection.
 pub async fn emit_receipt_async(
     conn: &mut redis::aio::MultiplexedConnection,
     receipt: &Receipt,
@@ -498,7 +498,7 @@ pub async fn emit_receipt_async(
 
 /// The daemon-wide emission identity: this node's signer plus the identity and
 /// default environment receipts carry. Set once at startup, read by every
-/// response path (the Fast lane's spawned tasks included, hence the static).
+/// response path (the Concurrent lane's spawned tasks included, hence the static).
 pub struct ReceiptContext {
     pub signer: NodeSigner,
     pub node_id: String,

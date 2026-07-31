@@ -92,7 +92,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"geometric_discover","params":{"capabilities":{"compute":0.8,"memory":0.5},"limit":10}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -121,7 +121,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"geometric_discover_range","params":{"capabilities":{"compute":0.5},"range":0.3,"limit":5}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -143,7 +143,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"geometric_store_topology","params":{"topology":{"services":{}}}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -169,7 +169,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"geometric_load_sequence","params":{"points":[{"id":"svc1","coords":[0.5,0.3]}]}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -200,7 +200,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"geometric_distance","params":{"point_a":{"compute":0.8},"point_b":{"compute":0.3}}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -216,7 +216,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"geometric_dimensions","params":{}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 }
 

@@ -13,13 +13,13 @@
 | Daemon commands | command | 60 base commands across 10 categories (system, geometric, topology, service, config, stream, relay, diagnostic, direct_channel, custom_topology) + 23 CMS extension commands, delivered via RESP3 `XADD` to the unified stream | COMMAND_SCHEMA.md, daemon/src/integration/handlers/ |
 | ValKey Lua functions | fcall | `FCALL <function_name> <numkeys> [keys...] [args...]` — 23 base libraries (203 functions) + 1 CMS library (10 functions) = **213** total, registered via `FUNCTION LOAD` (ValKey 7.2+) | COMMAND_SCHEMA.md, daemon/functions/*.lua |
 | Unified stream | stream | `{site_id}:gnode:unified:{environment}` — RESP3 command stream, field aliases resolved by `utils::field_names` | config.rs, COMMAND_SCHEMA.md |
-| Response polling key | stream (kv) | `SET {ss}:res:{request_id} '<json>' EX 10` — written by daemon after execution | COMMAND_SCHEMA.md, integration/fast_lane.rs |
+| Response polling key | stream (kv) | `SET {ss}:res:{request_id} '<json>' EX 10` — written by daemon after execution | COMMAND_SCHEMA.md, integration/concurrent_lane.rs |
 | Receipt stream | stream | `XADD {site_id}:gnode:receipts:{environment}` — signed durable receipt per keyed response (ed25519 per-node key; verifiers resolve `signer` via `{topology_ns}:gnode:receipt_pubkeys` HASH), MINID age-trim 30 d | integration/receipt.rs, installer CONTRACTS/receipt-stream.md |
 | Health stream | stream | `{site_id}:gnode:health:{environment}` — optional health-check consumer groups | config.rs, integration/processor/health_processor.rs |
 | Broadcast stream | stream | `{site_id}:gnode:broadcast` — one-to-many, environment-independent | config.rs, integration/processor/broadcast_reader.rs |
 | Field-alias resolver | method | `utils::get_field(map, keys) -> String` — resolves canonical alias lists | utils.rs (alias lists) |
 | Inter-service routing | command | Commands carrying `_rt` (relay target) are routed to the target site's unified stream; `_rr` overrides the reply-to stream. Resolution: entity lookup → `site_id` direct → JSON capability query | README.md, integration/relay/router.rs |
-| Lane execution | method | `Lane::Fast` (async-spawned, no ordering) vs `Lane::Ordered` (synchronous inline). 7 Ordered commands: `topo_create`, `topo_delete`, `channel_open`, `channel_close`, `relay_policy_set`, `relay_policy_remove`, `config_set` | COMMAND_SCHEMA.md, integration/handlers/types.rs |
+| Lane execution | method | `Lane::Concurrent` (async-spawned, no ordering) vs `Lane::Ordered` (synchronous inline). 7 Ordered commands: `topo_create`, `topo_delete`, `channel_open`, `channel_close`, `relay_policy_set`, `relay_policy_remove`, `config_set` | COMMAND_SCHEMA.md, integration/handlers/types.rs |
 | Batch wrapper | command | `c=batch`, `p='{"commands":[{"id":...,"c":...,"p":{}}]}'` — groups commands for atomic-ish processing | COMMAND_SCHEMA.md |
 | Topology schema tiers | data | 4 canonical tiers — service:30D, tool:16D, constellation:20D, galaxy:20D — plus user-defined custom topologies with arbitrary dimensions | README.md, daemon/config/service_schema.yaml, daemon/src/custom_topology.rs |
 | Signed-extension loader | method | Loads ed25519-signed `.so` extensions from `$GNODE_EXT_DIR`; validates against the public key constant in `ext_author.rs` | daemon/src/extensions/mod.rs, ext_author.rs, ext_verify.rs |
@@ -124,7 +124,7 @@ All field names are **canonical aliases** resolved EXACTLY by `daemon/src/utils.
 ```text
 daemon::Command            { id, command, parameters: serde_json::Value, site_id, node_id, timestamp }
 daemon::Response           { id, status: ok|error, result: Option<Value>, error: Option<String>, timestamp, batch_id, sequence }
-handlers::types::Lane      enum { Fast (default, async-spawned), Ordered (synchronous inline) }
+handlers::types::Lane      enum { Concurrent (default, async-spawned), Ordered (synchronous inline) }
 handlers::types::CommandDescriptor
                            { name, category, description, params_schema: JSONSchema, returns_schema: JSONSchema, example, async_capable, lane }
 integration::RelayDecision enum { Forward { target_site_id, target_stream_key, target_entity_id }, Local, NotFound(String), Error(String) }
@@ -198,7 +198,7 @@ Verified-aligned (from ecosystem cross-check):
 Operator-relevant risks (design, not divergence):
 - ⚠️ **Relay policy default = ALLOW (fail-open).** To lock down, operators must explicitly set `*:*` DENY (relay/policy.rs).
 - ⚠️ **`st` overloaded** between source_site (`t=c`) and status (`t=r`); disambiguated by `t`. New writers use `ss`. (COMMAND_SCHEMA.md)
-- ⚠️ **Response polling key TTL = 10s** (fast_lane.rs). Slow/late pollers silently lose the response; no retry. Poll within a few seconds, handle 404 gracefully.
+- ⚠️ **Response polling key TTL = 10s** (concurrent_lane.rs). Slow/late pollers silently lose the response; no retry. Poll within a few seconds, handle 404 gracefully.
 - ⚠️ **`Lane::Ordered` commands block the consumer thread** with no per-command timeout; a slow handler stalls subsequent messages, including other tenants' (intentional per COMMAND_SCHEMA.md).
 
 Latent inconsistency (not a live mismatch):

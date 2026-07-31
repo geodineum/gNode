@@ -81,7 +81,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"registerService","params":{"service_id":"my-svc","capabilities":{"compute":0.8,"memory":0.5},"metadata":{"type":"worker"}}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -104,7 +104,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"deregisterService","params":{"service_id":"my-svc"}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 
     descriptors.push(CommandDescriptor {
@@ -142,7 +142,7 @@ pub fn register(
         }),
         example: r#"{"cmd":"discover_with_endpoints","params":{"capabilities":{"compute":0.7},"limit":5,"include_endpoints":true}}"#,
         async_capable: true,
-        lane: Lane::Fast,
+        lane: Lane::Concurrent,
     });
 }
 
@@ -188,7 +188,7 @@ fn default_limit() -> usize { 10 }
 //
 // Rust/gMath does the heavy lifting (capability vector, bucket key, z-score);
 // the result is captured in ValKey. Reused by BOTH the sync handler (batch/
-// pending dispatch) and the async handler (fast-lane) so all transports write
+// pending dispatch) and the async handler (concurrent-lane) so all transports write
 // the SAME canonical (C) representation — `{site_id}:gnode:services:entities`
 // + voxel. The connection I/O (sync `query` vs async `query_async`) is NOT
 // shared because the sync/async connection types differ; only the COMPUTE is.
@@ -288,7 +288,7 @@ pub fn handle_register_service(
         }
     };
 
-    // Validate + compute (shared with async fast-lane)
+    // Validate + compute (shared with async concurrent-lane)
     let plan = match plan_registration(&params, site_id) {
         Ok(p) => p,
         Err(e) => return CommandResult::error(e),

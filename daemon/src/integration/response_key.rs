@@ -2,7 +2,7 @@
 //!
 //! A command's reply is written to `{site}:res:{request_id}` with a short TTL,
 //! and the client polls that key. Two dispatch lanes produce that reply — the
-//! Fast lane asynchronously (`fast_lane.rs`) and the Ordered lane inline
+//! Concurrent lane asynchronously (`concurrent_lane.rs`) and the Ordered lane inline
 //! (`command_processor.rs`) — but the lane is a daemon-internal scheduling
 //! decision. A caller sees one protocol and must not be able to tell which
 //! lane served it.
