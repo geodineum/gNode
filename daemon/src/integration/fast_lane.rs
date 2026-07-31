@@ -181,47 +181,26 @@ pub async fn dispatch(
 
     let response = result.to_response(&command.id);
 
-    // Write response to the polling key — same shape PHP clients consume.
-    // Resolve the request id exactly like the synchronous path does:
-    // parameters._request_id first (what pollForResponse keys on), then
-    // command.id. command.id is only trustworthy when the reader parsed
-    // the wire "id" field into it — a reader that falls back to the
-    // stream entry id would send responses to a key no client ever
-    // polls, hanging every polled fast-lane command to timeout.
-    let rid: Option<String> = command
-        .parameters
-        .get("_request_id")
-        .and_then(|v| v.as_str())
-        .map(String::from)
-        .or_else(|| {
-            if !command.id.is_empty() {
-                Some(command.id.clone())
-            } else {
-                None
-            }
-        });
-
-    if let Some(request_id) = rid {
+    // Where the reply goes, what it contains and how long it lives are decided
+    // in integration::response_key, which the Ordered lane also calls. The lane
+    // a command took must not be observable to the caller, and that only stays
+    // true if neither lane owns a copy of this rule.
+    if let Some(plan) = crate::integration::response_key::plan(&command, site_id.as_str(), &response)
+    {
+        let request_id = plan.request_id;
+        let response_key = plan.key;
+        let response_json = plan.json;
         let key_site = if command.site_id.is_empty() {
             site_id.as_str()
         } else {
             command.site_id.as_str()
         };
-        let response_key = format!("{{{}}}:res:{}", key_site, request_id);
-        let response_json = serde_json::json!({
-            "id": response.id,
-            "status": response.status,
-            "result": response.result,
-            "error": response.error,
-            "timestamp": response.timestamp,
-        })
-        .to_string();
 
         let write_result: redis::RedisResult<()> = redis::cmd("SET")
             .arg(&response_key)
             .arg(&response_json)
             .arg("EX")
-            .arg(10)
+            .arg(plan.ttl_secs)
             .query_async(&mut conn)
             .await;
 

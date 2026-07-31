@@ -119,6 +119,9 @@ pub mod command_processor;
 // Owns a shared tokio runtime + redis Client. See module doc-comment
 // for the Fast vs Ordered design rationale.
 pub mod fast_lane;
+// The response-polling contract both lanes write through, so neither can
+// diverge from it independently.
+pub mod response_key;
 pub mod receipt;
 
 // Per-site rate limiting (GN-D2.03 — Tier-2 commit 2.1.c).

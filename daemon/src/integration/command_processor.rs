@@ -1372,38 +1372,21 @@ pub fn process_command_batch(
             // Convert result to response
             let response = result.to_response(&command.id);
 
-            // Write response to ValKey key for poll-based clients. Prefer the
-            // client-supplied _request_id in parameters (what pollForResponse
-            // keys on); fall back to command.id — the wire "id" the reader now
-            // parses — so top-level-id callers get a response too. This mirrors
-            // the Fast lane; without the fallback, any Ordered-lane command sent
-            // with a top-level id but no _request_id hangs the poll to timeout.
-            let rid: Option<String> = command
-                .parameters
-                .get("_request_id")
-                .and_then(|v| v.as_str())
-                .map(String::from)
-                .or_else(|| {
-                    if !command.id.is_empty() {
-                        Some(command.id.clone())
-                    } else {
-                        None
-                    }
-                });
-            if let Some(request_id) = rid {
+            // Where the reply goes, what it contains and how long it lives are
+            // decided in integration::response_key, which the Fast lane also
+            // calls. This block once carried its own copy of that rule and the
+            // copy was missing the command.id fallback, so an Ordered-lane
+            // command with a top-level id and no _request_id wrote its reply
+            // nowhere and hung the caller's poll to timeout.
+            if let Some(plan) = crate::integration::response_key::plan(&command, site_id, &response) {
+                let request_id = plan.request_id;
+                let response_key = plan.key;
+                let response_json = plan.json;
                 let key_site = if command.site_id.is_empty() { site_id } else { &command.site_id };
-                let response_key = format!("{{{}}}:res:{}", key_site, request_id);
-                let response_json = serde_json::json!({
-                    "id": response.id,
-                    "status": response.status,
-                    "result": response.result,
-                    "error": response.error,
-                    "timestamp": response.timestamp
-                }).to_string();
                 let _ = redis::cmd("SET")
                     .arg(&response_key)
                     .arg(&response_json)
-                    .arg("EX").arg(10) // 10 second TTL
+                    .arg("EX").arg(plan.ttl_secs)
                     .query::<()>(conn);
                 if debug_level >= LogLevel::Info {
                     info!("Wrote response to polling key: {}", response_key);
