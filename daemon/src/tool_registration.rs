@@ -112,7 +112,13 @@ pub struct ServiceMetadata {
     ///                       unified stream. Returns params/returns schemas
     ///                       per command: the machine-readable form, and the
     ///                       only one an agent can reason about.
-    ///   `cli:<command>`   — run this. Prose, for a human.
+    ///   `cli:<repo>/geodeploy.yaml`
+    ///                     — the manifest DECLARING this component's CLI
+    ///                       commands. Deliberately not a list of commands:
+    ///                       copying them here would put the same facts in two
+    ///                       places, and `geodineum --help` already renders
+    ///                       every manifest-registered command with its
+    ///                       category and description.
     ///   `doc:<path>`      — repo-relative document. The floor: true even for
     ///                       a component with no runtime to interrogate.
     ///
@@ -1524,17 +1530,20 @@ mod catalogue_tests {
         }
     }
 
-    /// Every `doc:` target must resolve. A pointer to a file that does not
-    /// exist is worse than no pointer — it sends a reader somewhere and
-    /// reads, from the topology, exactly like one that works.
+    /// Every file-shaped target must resolve. A pointer to a file that does
+    /// not exist is worse than no pointer — it sends a reader somewhere and
+    /// reads, from the topology, exactly like one that works. Covers `cli:`
+    /// as well as `doc:`, since a cli affordance names the manifest that
+    /// declares the commands rather than a command to run.
     #[test]
-    fn every_doc_affordance_resolves_to_a_real_file() {
+    fn every_file_affordance_resolves_to_a_real_file() {
         let roots = [PathBuf::from("../.."), PathBuf::from("/opt/geodineum")];
         for path in catalogues() {
             for c in load_ecosystem_tools(&path).expect("parse") {
                 let Some(meta) = c.metadata else { continue };
                 for a in meta.affordances.unwrap_or_default() {
-                    let Some(rel) = a.strip_prefix("doc:") else { continue };
+                    let Some(rel) = a.strip_prefix("doc:").or_else(|| a.strip_prefix("cli:"))
+                    else { continue };
                     let hit = roots.iter().any(|r| r.join(rel).exists());
                     assert!(hit, "{}: {} points at doc:{} which exists under no known root", path.display(), c.id, rel);
                 }
