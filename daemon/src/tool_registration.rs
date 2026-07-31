@@ -7,7 +7,10 @@
 //!    capability name → f64 coordinate mapping. Service tier is the default.
 //! 2. Reads geometric_topology.yaml (service definitions with human-readable capabilities)
 //! 3. Translates capabilities to N-D coordinate vectors using Q64.64 fixed-point,
-//!    where N is the tier's total_dimensions (30 service / 16 tool / 20 constellation / 20 galaxy).
+//!    where N is the tier's total_dimensions. The counts live in the YAML,
+//!    never in prose here: a number written into a comment drifts from the
+//!    schema silently, which is how three different dimension counts once
+//!    circulated for the same tier.
 //! 4. Registers each service to site topologies via FCALL.
 //!
 //! Custom topologies (created via topo_create / gNode-TOPO extension) have
@@ -167,7 +170,7 @@ pub fn load_schema(path: &Path) -> Result<CapabilitySchema> {
 /// Publish the active tier schema so clients stop hardcoding its shape.
 ///
 /// The dimension count is not one number and never was — it is per TIER
-/// (service 30, tool 16, constellation/galaxy 20, each with its own discovery
+/// (one YAML per tier, each with its own discovery
 /// subset). That is a sound design; what was unsound is that every consumer
 /// carried its own copy of the answer. Counts of 8, 9, 12, 16, 19, 23 and 25
 /// were all findable in the tree at once, some stale by months, and nothing

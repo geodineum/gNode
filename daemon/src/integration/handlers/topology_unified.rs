@@ -92,7 +92,7 @@ pub fn register(
             "properties": {
                 "name": {"type": "string", "description": "Topology name"},
                 "constraint_type": {"type": "string", "enum": ["none", "z_monotonic", "bidirectional"], "default": "none", "description": "Edge constraint type"},
-                "dimensions": {"type": "integer", "minimum": 1, "description": "Number of dimensions in this custom topology. No default — declare your topology's dim count explicitly. Service tier uses 30; tool tier 16; constellation/galaxy 20. Custom topologies can use any count >= 1."},
+                "dimensions": {"type": "integer", "minimum": 1, "description": "Number of dimensions in this custom topology. No default — declare your topology's dim count explicitly. For the built-in tiers read the published schema (FCALL_RO GNODE_SCHEMA_GET <tier>) rather than a number quoted here. Custom topologies can use any count >= 1."},
                 "axis_semantics": {"type": "object", "description": "Optional axis labels for x, y, z"}
             },
             "required": ["name"]
