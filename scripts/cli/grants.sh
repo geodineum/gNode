@@ -242,33 +242,66 @@ watch)
         log "      been written to it. If presses do nothing, COMMS_INBOUND_SITE"
         log "      is not '${INBOUND_SITE}'; check ${COMMS_ENV}."
     fi
+    # Clear the inline keyboard on the ORIGINAL message once its decision is
+    # applied (or found already-decided). Cleared at APPLY time, not press
+    # time: a press from a non-allowlisted id is refused and its buttons must
+    # survive. Best-effort — a failed edit never blocks the decision.
+    tg_clear_buttons() {
+        local chat="$1" mid="$2" tok
+        tok="$(comms_env TELEGRAM_BOT_TOKEN)"
+        [[ -n "$tok" && -n "$chat" && -n "$mid" ]] || return 0
+        curl -sS --max-time 8 "https://api.telegram.org/bot${tok}/editMessageReplyMarkup" \
+            -d chat_id="$chat" -d message_id="$mid" \
+            -d reply_markup='{"inline_keyboard":[]}' >/dev/null 2>&1 || true
+    }
+
     log "watching ${STREAM} (admins: ${ADMINS})"
     while :; do
         # One entry at a time: a decision that applies an ACL change should be
-        # readable in the log as one line per decision.
+        # readable in the log as one line per decision. In --once mode this
+        # loop still DRAINS non-grant entries (the bot's whole chat history
+        # shares this stream, and the group reads from 0) and stops only after
+        # handling one grant callback — "once" means one DECISION, not one
+        # stream entry.
         RAW=$(vk XREADGROUP GROUP "$GROUP" "$(hostname)" COUNT 1 BLOCK 5000 STREAMS "$STREAM" '>' 2>/dev/null)
-        if [[ -n "$RAW" ]]; then
-            EID=$(grep -oE '^[0-9]+-[0-9]+$' <<< "$RAW" | head -1)
-            FIELDS=$(printf '%s\n' "$RAW")
-            is_cb=$(awk '/^is_callback$/{getline; print}' <<< "$FIELDS")
-            txt=$(awk '/^text$/{getline; print}'        <<< "$FIELDS")
-            op=$(awk '/^operator_id$/{getline; print}'  <<< "$FIELDS")
-            if [[ "$is_cb" == "true" && "$txt" == grant:* ]]; then
-                action="${txt#grant:}"; action="${action%%:*}"
-                rid="${txt##*:}"
-                if [[ ",${ADMINS}," != *",${op},"* ]]; then
-                    log "REFUSED ${action} ${rid}: operator ${op} is not in GEODINEUM_GRANT_ADMINS"
-                elif [[ "$action" != "approve" && "$action" != "deny" ]]; then
-                    log "ignored callback with unknown action: ${txt}"
-                else
-                    log "operator ${op} pressed ${action} for ${rid}"
-                    "$0" "$action" "$rid" --reason "via Telegram by operator ${op}" || \
-                        log "WARN: ${action} ${rid} failed"
-                fi
+        if [[ -z "$RAW" ]]; then
+            if [[ "$ONCE" == "true" ]]; then
+                log "inbound stream drained — no grant press waiting"
+                break
             fi
-            [[ -n "$EID" ]] && vk XACK "$STREAM" "$GROUP" "$EID" >/dev/null 2>&1
+            continue
         fi
-        [[ "$ONCE" == "true" ]] && break
+        EID=$(grep -oE '^[0-9]+-[0-9]+$' <<< "$RAW" | head -1)
+        FIELDS=$(printf '%s\n' "$RAW")
+        is_cb=$(awk '/^is_callback$/{getline; print}' <<< "$FIELDS")
+        txt=$(awk '/^text$/{getline; print}'        <<< "$FIELDS")
+        op=$(awk '/^operator_id$/{getline; print}'  <<< "$FIELDS")
+        chat=$(awk '/^chat_id$/{getline; print}'    <<< "$FIELDS")
+        cmid=$(awk '/^callback_message_id$/{getline; print}' <<< "$FIELDS")
+        HANDLED=false
+        if [[ "$is_cb" == "true" && "$txt" == grant:* ]]; then
+            action="${txt#grant:}"; action="${action%%:*}"
+            rid="${txt##*:}"
+            if [[ ",${ADMINS}," != *",${op},"* ]]; then
+                log "REFUSED ${action} ${rid}: operator ${op} is not in the admin allowlist"
+                HANDLED=true
+            elif [[ "$action" != "approve" && "$action" != "deny" ]]; then
+                log "ignored callback with unknown action: ${txt}"
+            else
+                log "operator ${op} pressed ${action} for ${rid}"
+                if [[ -n "$(decision_for "$rid")" ]]; then
+                    log "already decided — clearing stale buttons"
+                    tg_clear_buttons "$chat" "$cmid"
+                elif "$0" "$action" "$rid" --reason "via Telegram by operator ${op}"; then
+                    tg_clear_buttons "$chat" "$cmid"
+                else
+                    log "WARN: ${action} ${rid} failed"
+                fi
+                HANDLED=true
+            fi
+        fi
+        [[ -n "$EID" ]] && vk XACK "$STREAM" "$GROUP" "$EID" >/dev/null 2>&1
+        [[ "$ONCE" == "true" && "$HANDLED" == "true" ]] && break
     done
     ;;
 
@@ -309,8 +342,9 @@ approve|deny)
     else
         log "DENIED $RID (${REASON:-no reason given})"
     fi
-    notify "[geodineum] grant $RID ${ACTION}d" \
-"Request $RID for '$SVC' was ${ACTION}d by operator:${SUDO_USER:-$(whoami)}.
+    VERB=$([[ "$ACTION" == "approve" ]] && echo approved || echo denied)
+    notify "[geodineum] grant $RID ${VERB}" \
+"Request $RID for '$SVC' was ${VERB} by operator:${SUDO_USER:-$(whoami)}.
 patterns: $PATTERNS
 reason: ${REASON:-—}"
     ;;
