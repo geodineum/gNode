@@ -75,7 +75,10 @@ Where `<json>` = `{"id":..., "status":"ok|error", "result":..., "error":..., "ti
 The `request_id` is taken from `_request_id` inside the parameters
 object (the key `pollForResponse` writes and polls on); if that is
 absent it falls back to the top-level `id` field. The Concurrent and Ordered
-lanes resolve it identically, so either form returns a polling response
+lanes resolve it identically (one shared implementation:
+`integration/response_key.rs`), so either form returns a polling response.
+An empty-string `_request_id` is treated as absent — it falls through to the
+top-level `id` rather than producing the shared key `{site}:res:`
 — a message carrying only a top-level `id` (no `_request_id`) is written
 to `{ss}:res:{id}` on both lanes.
 
