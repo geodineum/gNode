@@ -79,9 +79,10 @@ response-key layout, required ValKey capabilities, and the signed-extension
 expectation - is in **[`CONTRACT.md`](CONTRACT.md)**. Agents should prime from
 **[`CONTRACT.scn.md`](CONTRACT.scn.md)**. The exhaustive command and function
 catalogue is **[`COMMAND_SCHEMA.md`](COMMAND_SCHEMA.md)**. Building a fully
-integrated service? Start at
-**[`docs/BUILD_WITH_GNODE.md`](docs/BUILD_WITH_GNODE.md)** — the map of every
-subsystem's canonical doc plus the full-integration checklist.
+integrated service? Start at the installer repo's
+**[`docs/BUILD_WITH_GNODE.md`](https://github.com/geodineum/Geodineum/blob/main/docs/BUILD_WITH_GNODE.md)**
+— the map of every subsystem's canonical doc plus the full-integration
+checklist. Onboarding canon is the same repo's `CONTRACTS/SERVICE_ONBOARDING.md`.
 
 ## Quick start
 
