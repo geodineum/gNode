@@ -39,11 +39,16 @@ while IFS= read -r k; do
     [[ -n "$k" ]] || continue
     printf '%s\t%s\n' "$k" "$(vk GET "$k" | tr -d '\n')" >> "$T/hb"
 done < "$T/hbkeys" 
+# Services = UNION of the sites registry (every onboarded site — the ten
+# WordPress sites predate the intent mechanism) and the intent hash. A site
+# IS a service; listing only intents silently hid most of production.
+vk SMEMBERS "gnode:sites:registry" > "$T/sites" || true
+vk HGET "{${NS}}:gnode:schema:service" dimension_values > "$T/dimvals" || true
 : > "$T/svc_ent"
-while IFS= read -r site; do
+{ cat "$T/sites"; awk 'NR % 2 == 1' "$T/reg"; } | sort -u | while IFS= read -r site; do
     [[ -n "$site" ]] || continue
-    printf '%s\t%s\n' "$site" "$(vk HEXISTS "{${site}}:gnode:services:entities" "$site" | tr -d '[:space:]')" >> "$T/svc_ent"
-done < <(awk 'NR % 2 == 1' "$T/reg")
+    printf '%s\t%s\n' "$site" "$(vk HGET "{${site}}:gnode:services:entities" "$site" | tr -d '\n')" >> "$T/svc_ent"
+done
 
 MODE="$MODE" NS="$NS" python3 - "$T" <<'PYEOF'
 import json, os, sys, time
@@ -57,10 +62,20 @@ def pairs(path):
 
 nodes_reg = pairs(f"{T}/ents")           # node_id -> entity json
 intents   = pairs(f"{T}/reg")            # site   -> intent json
-svc_ent = {}
+svc_ent = {}                              # site -> entity json string ('' = absent)
 for line in open(f"{T}/svc_ent"):
     if "\t" in line:
-        s, v = line.rstrip("\n").split("\t", 1); svc_ent[s] = v == "1"
+        s, v = line.rstrip("\n").split("\t", 1); svc_ent[s] = v
+try:
+    dimvals = json.load(open(f"{T}/dimvals"))
+except Exception:
+    dimvals = {}
+env_vocab = dimvals.get("environment", {})   # label -> float, from the PUBLISHED schema
+
+def env_label(x):
+    if x is None: return None
+    best = min(env_vocab.items(), key=lambda kv: abs(kv[1] - x), default=None)
+    return best[0] if best and abs(best[1] - x) < 0.05 else f"{x:g}"
 try:
     tools = int(open(f"{T}/tools").read().strip() or 0)
 except Exception:
@@ -97,14 +112,23 @@ for h in hb:
             n[f] = h.get(f)
 
 services = []
-for site, raw in sorted(intents.items()):
-    try: it = json.loads(raw)
+for site in sorted(set(svc_ent) | set(intents)):
+    try: it = json.loads(intents.get(site, "") or "{}")
     except Exception: it = {}
+    ent_raw = svc_ent.get(site, "")
+    env = it.get("environment")
+    if env is None and ent_raw:
+        # Legacy site (no intent): environment from the stored entity's own
+        # capability map, labeled via the published schema vocabulary.
+        try:
+            env = env_label(json.loads(ent_raw).get("c", {}).get("environment"))
+        except Exception:
+            env = None
     mine = [h for h in hb if h["comp"] == site and h["age_s"] is not None]
     best = min(mine, key=lambda h: h["age_s"]) if mine else None
     services.append({"service": site,
-                     "profile": it.get("profile"), "env": it.get("environment"),
-                     "entity": svc_ent.get(site, False),
+                     "profile": it.get("profile"), "env": env,
+                     "entity": bool(ent_raw),
                      "hb_age_s": best["age_s"] if best else None,
                      "hb_node": best["node"] if best else None})
 
@@ -129,9 +153,9 @@ print(f"{'NODE':<17}{'HB':<6}{'LOAD':<10}{'MEM':<12}RUNS")
 for n in out["nodes"]:
     print(f"{n['node']:<17}{age(n['hb_age_s']):<6}{load(n['la1'], n['cores']):<10}"
           f"{mem(n['mem_used_mb'], n['mem_total_mb']):<12}{' '.join(n['runs']) or '—'}")
-print(f"{'SERVICE':<14}{'PROFILE':<10}{'ENV':<12}{'ENTITY':<8}HB")
+print(f"{'SERVICE':<20}{'PROFILE':<10}{'ENV':<12}{'ENTITY':<8}HB")
 for s in out["services"]:
     where = f"{age(s['hb_age_s'])}@{s['hb_node']}" if s["hb_node"] else "—"
-    print(f"{s['service']:<14}{s['profile'] or '?':<10}{s['env'] or '?':<12}"
+    print(f"{s['service']:<20}{s['profile'] or '—':<10}{s['env'] or '—':<12}"
           f"{'✓' if s['entity'] else '✗':<8}{where}")
 PYEOF
