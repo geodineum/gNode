@@ -1871,7 +1871,7 @@ impl GNodeDaemon {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let hb_val = crate::integration::heartbeat::heartbeat_value("gnode-daemon", &self.node_id, hb_ts, pid);
+            let hb_val = crate::integration::heartbeat::node_heartbeat_value("gnode-daemon", &self.node_id, hb_ts, pid);
             let _: redis::RedisResult<()> = redis::cmd("SETEX").arg(&hb_key)
                 .arg(crate::integration::heartbeat::HEARTBEAT_TTL_SECS).arg(&hb_val).query(&mut conn);
         }
@@ -2002,7 +2002,7 @@ impl GNodeDaemon {
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
-                    let hb_val = crate::integration::heartbeat::heartbeat_value(
+                    let hb_val = crate::integration::heartbeat::node_heartbeat_value(
                         "gnode-daemon", &self.node_id, hb_ts, std::process::id());
                     let _: redis::RedisResult<()> = redis::cmd("SETEX").arg(&hb_key)
                         .arg(crate::integration::heartbeat::HEARTBEAT_TTL_SECS).arg(&hb_val).query(&mut conn);

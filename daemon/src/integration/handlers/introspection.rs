@@ -30,10 +30,30 @@ pub fn register(
     // Sync handlers
     handlers.insert("service_describe".to_string(), handle_service_describe as CommandHandlerFn);
     handlers.insert("SERVICE_DESCRIBE".to_string(), handle_service_describe as CommandHandlerFn);
+    handlers.insert("constellation_status".to_string(), handle_constellation_status as CommandHandlerFn);
+    handlers.insert("CONSTELLATION_STATUS".to_string(), handle_constellation_status as CommandHandlerFn);
 
     // Async handlers
     async_handlers.insert("service_describe".to_string(), handle_service_describe_async as AsyncCommandHandlerFn);
     async_handlers.insert("SERVICE_DESCRIBE".to_string(), handle_service_describe_async as AsyncCommandHandlerFn);
+
+    descriptors.push(CommandDescriptor {
+        name: "constellation_status",
+        category: "system",
+        description: "Constellation at a glance: nodes with liveness + resources (from the daemon heartbeat), which components run where, registered service intents, tool count. The agent-facing twin of `geodineum status` (same JSON shape).",
+        params_schema: json!({"type": "object", "properties": {}}),
+        returns_schema: json!({"type": "object", "properties": {
+            "constellation": {"type": "string"},
+            "ts": {"type": "number"},
+            "nodes": {"type": "array"},
+            "services": {"type": "array"},
+            "tools": {"type": "number"},
+            "components_live": {"type": "number"}
+        }}),
+        example: r#"{"cmd":"constellation_status","params":{}}"#,
+        async_capable: false,
+        lane: Lane::Concurrent,
+    });
 
     // Command descriptor
     descriptors.push(CommandDescriptor {
@@ -349,4 +369,118 @@ pub fn handle_service_describe_async<'a>(
             }
         }
     })
+}
+
+
+/// Constellation at a glance: the agent-facing twin of `geodineum status`.
+///
+/// An agent cannot sudo and must not hold credentials for every key it would
+/// need; it CAN send one command to its own unified stream. The daemon reads
+/// under its own authority and answers with the same JSON shape the CLI
+/// renders, so an operator's table and an agent's function-call result never
+/// disagree about the estate.
+pub fn handle_constellation_status(
+    command: &Command,
+    conn: &mut Connection,
+    _topology: &Arc<RwLock<GeometricTopology>>,
+    _site_id: &str,
+    debug_mode: bool,
+) -> CommandResult {
+    if debug_mode {
+        debug!("Handling constellation_status command: {}", command.id);
+    }
+    let ns = std::env::var("GNODE_TOPOLOGY_NAMESPACE").unwrap_or_else(|_| "geodineum".to_string());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+
+    let ent_ids: Vec<String> = redis::cmd("HKEYS")
+        .arg(format!("{{{}}}:gnode:constellation:entities", ns))
+        .query(conn).unwrap_or_default();
+
+    // Heartbeat family via SCAN (cursor-iterated; never KEYS).
+    let mut hb_keys: Vec<String> = Vec::new();
+    let mut cursor: u64 = 0;
+    loop {
+        let (next, batch): (u64, Vec<String>) = match redis::cmd("SCAN")
+            .arg(cursor).arg("MATCH").arg(format!("{{{}}}:gnode:heartbeat:*", ns))
+            .arg("COUNT").arg(200).query(conn)
+        {
+            Ok(r) => r,
+            Err(e) => return CommandResult::error(format!("heartbeat scan failed: {}", e)),
+        };
+        hb_keys.extend(batch);
+        if next == 0 { break; }
+        cursor = next;
+    }
+
+    #[derive(Default)]
+    struct Node {
+        hb_age_s: Option<u64>, la1: Option<f64>, cores: Option<u64>,
+        mem_used_mb: Option<u64>, mem_total_mb: Option<u64>, runs: Vec<String>,
+    }
+    let mut nodes: std::collections::BTreeMap<String, Node> = ent_ids.into_iter()
+        .map(|n| (n, Node::default())).collect();
+    let mut beats: Vec<(String, String, Option<u64>)> = Vec::new();
+    let mut live = 0u64;
+
+    for k in &hb_keys {
+        let seg: Vec<&str> = k.split(':').collect();
+        if seg.len() < 6 { continue; } // legacy flat key
+        let (comp, node) = (seg[4].to_string(), seg[5..].join(":"));
+        let val: Option<String> = redis::cmd("GET").arg(k).query(conn).ok();
+        let d: Value = val.and_then(|v| serde_json::from_str(&v).ok()).unwrap_or(json!({}));
+        let age = d.get("ts").and_then(Value::as_u64).map(|ts| now.saturating_sub(ts));
+        if age.map_or(false, |a| a <= 120) { live += 1; }
+        let n = nodes.entry(node.clone()).or_default();
+        if !n.runs.contains(&comp) { n.runs.push(comp.clone()); }
+        if let Some(a) = age {
+            if n.hb_age_s.map_or(true, |cur| a < cur) { n.hb_age_s = Some(a); }
+        }
+        if comp == "gnode-daemon" {
+            n.la1 = d.get("la1").and_then(Value::as_f64);
+            n.cores = d.get("cores").and_then(Value::as_u64);
+            n.mem_used_mb = d.get("mem_used_mb").and_then(Value::as_u64);
+            n.mem_total_mb = d.get("mem_total_mb").and_then(Value::as_u64);
+        }
+        beats.push((comp, node, age));
+    }
+
+    let intents: std::collections::HashMap<String, String> = redis::cmd("HGETALL")
+        .arg(format!("{{{}}}:gnode:registrations", ns))
+        .query(conn).unwrap_or_default();
+    let mut services: Vec<Value> = Vec::new();
+    let mut sites: Vec<&String> = intents.keys().collect();
+    sites.sort();
+    for site in sites {
+        let it: Value = serde_json::from_str(&intents[site]).unwrap_or(json!({}));
+        let entity: bool = redis::cmd("HEXISTS")
+            .arg(format!("{{{}}}:gnode:services:entities", site)).arg(site)
+            .query(conn).unwrap_or(false);
+        let best = beats.iter()
+            .filter(|(c, _, a)| c == site && a.is_some())
+            .min_by_key(|(_, _, a)| a.unwrap());
+        services.push(json!({
+            "service": site,
+            "profile": it.get("profile"),
+            "env": it.get("environment"),
+            "entity": entity,
+            "hb_age_s": best.and_then(|(_, _, a)| *a),
+            "hb_node": best.map(|(_, n, _)| n.clone()),
+        }));
+    }
+
+    let tools: u64 = redis::cmd("HLEN")
+        .arg("{ecosystem}:gnode:services:entities").query(conn).unwrap_or(0);
+
+    CommandResult::success(json!({
+        "constellation": ns,
+        "ts": now,
+        "nodes": nodes.into_iter().map(|(name, n)| json!({
+            "node": name, "hb_age_s": n.hb_age_s, "la1": n.la1, "cores": n.cores,
+            "mem_used_mb": n.mem_used_mb, "mem_total_mb": n.mem_total_mb, "runs": n.runs,
+        })).collect::<Vec<_>>(),
+        "services": services,
+        "tools": tools,
+        "components_live": live,
+    }))
 }

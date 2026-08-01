@@ -29,6 +29,11 @@ dirty-tree:
 
 cli:
   commands:
+    - name: status
+      handler: scripts/cli/status.sh
+      description: Constellation at a glance — nodes (liveness, load, mem), what runs where, services, tools; --json for machines
+      requires_sudo: true
+      category: Constellation
     - name: daemon contract
       handler: scripts/cli/daemon-contract.sh
       description: Print the daemon contract (commands, Lua functions, wire format); `daemon contract <ext>` prints a signed extension's contract (cms|broker|observe|topo|signals)

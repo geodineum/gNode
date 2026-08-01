@@ -50,6 +50,58 @@ pub fn heartbeat_value(component: &str, node: &str, ts_secs: u64, pid: u32) -> S
     )
 }
 
+/// Node resources, read from /proc. Never fails — a field that cannot be
+/// read is omitted, and readers treat every resource field as optional.
+pub struct NodeResources {
+    pub load1: Option<f64>,
+    pub cores: Option<usize>,
+    pub mem_used_mb: Option<u64>,
+    pub mem_total_mb: Option<u64>,
+}
+
+pub fn read_node_resources() -> NodeResources {
+    let load1 = std::fs::read_to_string("/proc/loadavg")
+        .ok()
+        .and_then(|s| s.split_whitespace().next().and_then(|v| v.parse().ok()));
+    let cores = std::thread::available_parallelism().ok().map(|n| n.get());
+    let (mut total, mut avail) = (None, None);
+    if let Ok(mi) = std::fs::read_to_string("/proc/meminfo") {
+        for line in mi.lines() {
+            let mut it = line.split_whitespace();
+            match it.next() {
+                Some("MemTotal:") => total = it.next().and_then(|v| v.parse::<u64>().ok()),
+                Some("MemAvailable:") => avail = it.next().and_then(|v| v.parse::<u64>().ok()),
+                _ => {}
+            }
+        }
+    }
+    let mem_total_mb = total.map(|kb| kb / 1024);
+    let mem_used_mb = match (total, avail) {
+        (Some(t), Some(a)) => Some((t.saturating_sub(a)) / 1024),
+        _ => None,
+    };
+    NodeResources { load1, cores, mem_used_mb, mem_total_mb }
+}
+
+/// The DAEMON's heartbeat value: the base fields plus node resources.
+///
+/// Resources ride only the daemon's heartbeat, by design — the daemon is the
+/// node's authority ("every node describes ITSELF"), one component per node
+/// reporting hardware keeps the numbers from disagreeing, and the other five
+/// writers stay four-field simple. Additive per CONTRACTS/heartbeat.md:
+/// readers judge liveness by ts and treat every other field as optional.
+pub fn node_heartbeat_value(component: &str, node: &str, ts_secs: u64, pid: u32) -> String {
+    let r = read_node_resources();
+    let mut v = serde_json::json!({
+        "ts": ts_secs, "pid": pid, "comp": component, "node": node,
+    });
+    if let Some(l) = r.load1 { v["la1"] = serde_json::json!(l); }
+    if let Some(c) = r.cores { v["cores"] = serde_json::json!(c); }
+    if let Some(m) = r.mem_used_mb { v["mem_used_mb"] = serde_json::json!(m); }
+    if let Some(m) = r.mem_total_mb { v["mem_total_mb"] = serde_json::json!(m); }
+    v.to_string()
+}
+
 /// Short hostname — first dot-label of the kernel hostname, verbatim case.
 /// The fallback for components that carry no declared node id of their own.
 /// The daemon itself must NOT use this: its identity is the configured
@@ -84,6 +136,18 @@ mod tests {
     fn the_gnode_segment_cannot_be_configured_away() {
         let k = heartbeat_key("ns", "e", "c", "n");
         assert!(k.contains(":gnode:heartbeat:"), "{}", k);
+    }
+
+    /// The daemon's value carries resources; on any Linux box /proc yields
+    /// all four. Base fields must survive unchanged beside them.
+    #[test]
+    fn node_value_carries_resources_beside_the_base_fields() {
+        let v: serde_json::Value =
+            serde_json::from_str(&node_heartbeat_value("gnode-daemon", "aesir", 9, 1)).unwrap();
+        assert_eq!(v["comp"], "gnode-daemon");
+        assert_eq!(v["ts"], 9);
+        assert!(v["mem_total_mb"].as_u64().unwrap_or(0) > 0);
+        assert!(v["la1"].is_number());
     }
 
     #[test]
