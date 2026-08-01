@@ -24,11 +24,21 @@ T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 vk HGETALL "{${NS}}:gnode:constellation:entities" > "$T/ents"   || true
 vk HGETALL "{${NS}}:gnode:registrations"          > "$T/reg"    || true
 vk HLEN    "{ecosystem}:gnode:services:entities"  > "$T/tools"  || true
+
+# The scan must fail LOUDLY. With stderr swallowed, an ACL that denies SCAN
+# renders a confident empty table — "0 live components" — indistinguishable
+# from a quiet estate, which is worse than no status command at all.
+if ! VALKEY_USER=gnode_daemon "$VCLI" --scan --pattern "{${NS}}:gnode:heartbeat:*" > "$T/hbkeys" 2> "$T/scanerr"; then
+    echo "status: heartbeat scan failed as gnode_daemon:" >&2
+    cat "$T/scanerr" >&2
+    echo "status: refusing to render a table that would read as 'nothing running'" >&2
+    exit 1
+fi
 : > "$T/hb"
 while IFS= read -r k; do
     [[ -n "$k" ]] || continue
     printf '%s\t%s\n' "$k" "$(vk GET "$k" | tr -d '\n')" >> "$T/hb"
-done < <(vk --scan --pattern "{${NS}}:gnode:heartbeat:*")
+done < "$T/hbkeys" 
 : > "$T/svc_ent"
 while IFS= read -r site; do
     [[ -n "$site" ]] || continue
