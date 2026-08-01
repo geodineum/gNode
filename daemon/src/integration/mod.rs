@@ -122,6 +122,9 @@ pub mod concurrent_lane;
 // The response-polling contract both lanes write through, so neither can
 // diverge from it independently.
 pub mod response_key;
+// The component-liveness heartbeat contract — key, value, TTL — shared by
+// every writer so the wire form cannot diverge per component.
+pub mod heartbeat;
 pub mod receipt;
 
 // Per-site rate limiting (GN-D2.03 — Tier-2 commit 2.1.c).

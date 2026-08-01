@@ -85,7 +85,7 @@ ExecStart=/bin/bash -c '\
   PASS_FILE="${VALKEY_PASSWORD_FILE:-/etc/geodineum/credentials/valkey_daemon.password}"; \
   export GNODE_REDIS_AUTH="$(cat $PASS_FILE)"; \
   exec ${GNODE_DAEMON_BIN:-/opt/geodineum/gNode/daemon/target/release/gnode-daemon} \
-  --node-id "${GNODE_NODE_ID:-master}" \
+  --node-id "${GNODE_NODE_ID:-$(hostname -s)}" \
   --node-type "${GNODE_NODE_TYPE:-general}" \
   start'
 

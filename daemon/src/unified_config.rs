@@ -445,7 +445,12 @@ pub struct IdentityConfig {
     pub master: bool,
 }
 
-fn default_node_id() -> String { "default".to_string() }
+// The node's IDENTITY (also its consumer name and constellation entity id).
+// Short hostname, not "master": master is a ROLE, modeled at node_role
+// (constellation schema dim 0), and a role in an identity slot changes the
+// node's identity when its role changes — the same category error SB-8.109
+// rejected for constellation CIDs.
+fn default_node_id() -> String { crate::integration::heartbeat::short_hostname() }
 fn default_node_type() -> String { "general".to_string() }
 fn default_environment() -> String { "all".to_string() }
 fn default_topology_namespace() -> String { "geodineum".to_string() }

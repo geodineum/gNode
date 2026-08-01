@@ -512,8 +512,9 @@ fi
 
 # Node ID: ensure GNODE_NODE_ID is in daemon.env so the daemon registers a
 # UNIQUE consumer name (the unit's --node-id reads it). The installer passes
-# GNODE_NODE_ID for a constellation join; unset → the unit defaults to "master"
-# (correct for the master/standalone node).
+# the short hostname on every path; unset → the unit falls back to
+# $(hostname -s) itself. Never "master" — that is a role (node_role, dim 0),
+# and the id is also the heartbeat node segment and constellation entity id.
 if [ -n "${GNODE_NODE_ID:-}" ] && [ -f "$DAEMON_ENV_DST" ]; then
     if grep -qE '^GNODE_NODE_ID=' "$DAEMON_ENV_DST"; then
         sed -i "s|^GNODE_NODE_ID=.*|GNODE_NODE_ID=\"${GNODE_NODE_ID}\"|" "$DAEMON_ENV_DST"

@@ -1865,13 +1865,15 @@ impl GNodeDaemon {
         // {env}:{component}). Distinct from the pid key above: a stable
         // component name and a fresh ts, refreshed by the heartbeat loop below.
         if let Ok(mut conn) = crate::integration::connection_manager::get_connection() {
-            let hb_key = format!("{{{}}}:{}:heartbeat:{}:gnode-daemon", self.topology_namespace, self.stream_prefix, self.environment);
+            let hb_key = crate::integration::heartbeat::heartbeat_key(
+                &self.topology_namespace, &self.environment, "gnode-daemon", &self.node_id);
             let hb_ts = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
-            let hb_val = format!("{{\"ts\":{},\"pid\":{},\"comp\":\"gnode-daemon\"}}", hb_ts, pid);
-            let _: redis::RedisResult<()> = redis::cmd("SETEX").arg(&hb_key).arg(120).arg(&hb_val).query(&mut conn);
+            let hb_val = crate::integration::heartbeat::heartbeat_value("gnode-daemon", &self.node_id, hb_ts, pid);
+            let _: redis::RedisResult<()> = redis::cmd("SETEX").arg(&hb_key)
+                .arg(crate::integration::heartbeat::HEARTBEAT_TTL_SECS).arg(&hb_val).query(&mut conn);
         }
 
         // ========================================
@@ -1994,13 +1996,16 @@ impl GNodeDaemon {
                 // Refresh the unified component heartbeat with a fresh ts so the
                 // dashboard's last-seen stays accurate.
                 if let Ok(mut conn) = crate::integration::connection_manager::get_connection() {
-                    let hb_key = format!("{{{}}}:{}:heartbeat:{}:gnode-daemon", self.topology_namespace, self.stream_prefix, self.environment);
+                    let hb_key = crate::integration::heartbeat::heartbeat_key(
+                        &self.topology_namespace, &self.environment, "gnode-daemon", &self.node_id);
                     let hb_ts = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
-                    let hb_val = format!("{{\"ts\":{},\"pid\":{},\"comp\":\"gnode-daemon\"}}", hb_ts, std::process::id());
-                    let _: redis::RedisResult<()> = redis::cmd("SETEX").arg(&hb_key).arg(120).arg(&hb_val).query(&mut conn);
+                    let hb_val = crate::integration::heartbeat::heartbeat_value(
+                        "gnode-daemon", &self.node_id, hb_ts, std::process::id());
+                    let _: redis::RedisResult<()> = redis::cmd("SETEX").arg(&hb_key)
+                        .arg(crate::integration::heartbeat::HEARTBEAT_TTL_SECS).arg(&hb_val).query(&mut conn);
                 }
 
                 // Log current stream discovery status
