@@ -25,8 +25,23 @@
 
 set -euo pipefail
 
-# Source cargo environment (required when run via sudo -u or cron)
-[ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+# Source cargo environment (required when run via sudo -u or cron).
+# Under plain `sudo`, HOME=/root while the toolchain lives in the invoking
+# user's home — $HOME/.cargo/env alone finds nothing and the build dies with
+# "cargo: command not found". Try every plausible home, invoking user first.
+for _cargo_env in \
+    "${SUDO_USER:+/home/${SUDO_USER}/.cargo/env}" \
+    "$HOME/.cargo/env" \
+    /home/*/.cargo/env \
+    /root/.cargo/env \
+    /usr/local/cargo/env; do
+    [ -n "$_cargo_env" ] && [ -f "$_cargo_env" ] && { source "$_cargo_env"; break; }
+done
+command -v cargo >/dev/null 2>&1 || {
+    echo "cargo not found in PATH and no .cargo/env under any home." >&2
+    echo "Install rustup for the deploy user, or export PATH to a toolchain." >&2
+    exit 1
+}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
