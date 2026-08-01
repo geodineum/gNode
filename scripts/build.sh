@@ -25,21 +25,19 @@
 
 set -euo pipefail
 
-# Source cargo environment (required when run via sudo -u or cron).
-# Under plain `sudo`, HOME=/root while the toolchain lives in the invoking
-# user's home — $HOME/.cargo/env alone finds nothing and the build dies with
-# "cargo: command not found". Try every plausible home, invoking user first.
-for _cargo_env in \
-    "${SUDO_USER:+/home/${SUDO_USER}/.cargo/env}" \
-    "$HOME/.cargo/env" \
-    /home/*/.cargo/env \
-    /root/.cargo/env \
-    /usr/local/cargo/env; do
-    [ -n "$_cargo_env" ] && [ -f "$_cargo_env" ] && { source "$_cargo_env"; break; }
-done
+# Cargo builds run as the DEPLOY USER, never root. rustup's env file is
+# $HOME-relative, so sourcing august's env as root prepends /root/.cargo/bin
+# and the shim would then want root's toolchain; and a root-built target/
+# tree breaks every later build by the deploy user. Under sudo, drop back to
+# the invoking user — the same identity the orchestrator builds as (the
+# binary in target/ is deploy-user-owned).
+if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != "root" ]; then
+    exec sudo -H -u "$SUDO_USER" -- bash "$0" "$@"
+fi
+[ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
 command -v cargo >/dev/null 2>&1 || {
-    echo "cargo not found in PATH and no .cargo/env under any home." >&2
-    echo "Install rustup for the deploy user, or export PATH to a toolchain." >&2
+    echo "cargo not found: no $HOME/.cargo/env for user $(id -un) and none in PATH." >&2
+    echo "Install rustup for this user, or run as the deploy user that owns target/." >&2
     exit 1
 }
 
