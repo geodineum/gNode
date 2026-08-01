@@ -1,5 +1,15 @@
 # Third-Party Service Onboarding Guide
 
+> **The canonical onboarding contract is the installer's
+> `CONTRACTS/SERVICE_ONBOARDING.md` — read that first.** This page keeps the
+> narrative walkthrough, but where the two disagree, the contract wins.
+> Two flags it covers that this page's examples predate, and whose omission
+> has silently mis-registered real services: **`--profile`** (the
+> `services[].capabilities` blocks below feed ACL policy, NOT the capability
+> vector — the vector comes from the profile) and **`--environment`**
+> (omit it and a production service registers as `testing`, DTAP-gated out
+> of production discovery). Orientation map: `docs/BUILD_WITH_GNODE.md`.
+
 How to register your service with gNode so it's discoverable in the geometric topology mesh.
 
 ## Quick Start

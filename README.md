@@ -78,7 +78,10 @@ The precise integration surface - wire field aliases, message shapes, stream and
 response-key layout, required ValKey capabilities, and the signed-extension
 expectation - is in **[`CONTRACT.md`](CONTRACT.md)**. Agents should prime from
 **[`CONTRACT.scn.md`](CONTRACT.scn.md)**. The exhaustive command and function
-catalogue is **[`COMMAND_SCHEMA.md`](COMMAND_SCHEMA.md)**.
+catalogue is **[`COMMAND_SCHEMA.md`](COMMAND_SCHEMA.md)**. Building a fully
+integrated service? Start at
+**[`docs/BUILD_WITH_GNODE.md`](docs/BUILD_WITH_GNODE.md)** — the map of every
+subsystem's canonical doc plus the full-integration checklist.
 
 ## Quick start
 
