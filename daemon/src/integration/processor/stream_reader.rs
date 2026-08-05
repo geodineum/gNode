@@ -27,6 +27,24 @@ pub enum StreamReaderError {
 /// Stream reader result type
 pub type StreamReaderResult<T> = Result<T, StreamReaderError>;
 
+/// One multi-stream read, unpacked.
+///
+/// `(commands, health messages, unified IDs to ACK, health IDs to ACK,
+/// relayed service replies)`.
+///
+/// The fifth element is the one that is not a command. A service answering a
+/// relayed command writes `t=r` carrying the `_rr` the daemon gave it
+/// (`relay::reply`), and only the daemon can carry that home to the origin's
+/// keyspace — so those entries have to survive the read instead of being
+/// counted as noise and ACKed away, which is what happened before.
+pub type MultiStreamBatch = (
+    Vec<(String, OptimizedCommand)>,
+    Vec<(String, HashMap<String, String>)>,
+    Vec<String>,
+    Vec<String>,
+    Vec<HashMap<String, String>>,
+);
+
 /// Stream reader for unified streams
 pub struct StreamReader {}
 
@@ -662,9 +680,9 @@ pub fn parse_field_array(field_parts: &[Value]) -> HashMap<String, String> {
 ///
 /// # Returns
 ///
-/// * `IntegrationResult<(Vec<(String, OptimizedCommand)>, Vec<(String, HashMap<String, String>)>, Vec<String>, Vec<String>)>` -
-///   Tuple of (command messages, health messages, unified stream message IDs, health stream message IDs) or error
-#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+/// * `IntegrationResult<MultiStreamBatch>` - see the type alias: commands,
+///   health messages, unified IDs, health IDs, and relayed service replies.
+#[allow(clippy::too_many_arguments)]
 pub fn read_multi_stream(
     conn: &mut Connection,
     unified_stream: &str,
@@ -674,7 +692,7 @@ pub fn read_multi_stream(
     count: usize,
     block_ms: u64,
     debug_mode: bool
-) -> IntegrationResult<(Vec<(String, OptimizedCommand)>, Vec<(String, HashMap<String, String>)>, Vec<String>, Vec<String>)> {
+) -> IntegrationResult<MultiStreamBatch> {
     if debug_mode {
         debug!("Reading from multiple streams: unified={}, health={}", unified_stream, health_stream);
     }
@@ -721,32 +739,31 @@ pub fn read_multi_stream(
 ///
 /// # Returns
 ///
-/// * `IntegrationResult<(Vec<(String, OptimizedCommand)>, Vec<(String, HashMap<String, String>)>, Vec<String>, Vec<String>)>` -
-///   Tuple of (command messages, health messages, unified stream message IDs, health stream message IDs) or error
-#[allow(clippy::type_complexity)]
+/// * `IntegrationResult<MultiStreamBatch>` - see the type alias.
 fn process_multi_stream_response(
     value: Value,
     unified_stream: &str,
     health_stream: &str,
     debug_mode: bool
-) -> IntegrationResult<(Vec<(String, OptimizedCommand)>, Vec<(String, HashMap<String, String>)>, Vec<String>, Vec<String>)> {
+) -> IntegrationResult<MultiStreamBatch> {
     // Handle empty response
     if let Value::Nil = value {
-        return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+        return Ok(MultiStreamBatch::default());
     }
 
     let mut command_messages = Vec::new();
     let mut health_messages = Vec::new();
     let mut unified_message_ids = Vec::new();
     let mut health_message_ids = Vec::new();
+    let mut relay_replies = Vec::new();
 
     match value {
         Value::Nil => {
-            return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+            return Ok(MultiStreamBatch::default());
         },
         Value::Array(stream_entries) => {
             if stream_entries.is_empty() {
-                return Ok((Vec::new(), Vec::new(), Vec::new(), Vec::new()));
+                return Ok(MultiStreamBatch::default());
             }
 
             // Process each stream in the response
@@ -802,6 +819,20 @@ fn process_multi_stream_response(
 
                                 // Route based on source stream
                                 if stream_name == unified_stream {
+                                    // A service's answer to a relayed command,
+                                    // on its way home. Collected before the
+                                    // command branch because it is neither a
+                                    // command nor noise: dropping it here is
+                                    // what left the origin polling until it
+                                    // timed out. See relay::reply.
+                                    if crate::integration::relay::is_relayed_service_reply(&fields) {
+                                        if debug_mode {
+                                            debug!("Collected relayed service reply from {}: {}", stream_name, msg_id);
+                                        }
+                                        relay_replies.push(fields);
+                                        continue;
+                                    }
+
                                     // Process as command message
                                     if let Some(msg_type) = fields.get("t") {
                                         if msg_type == "c" || msg_type == "bc" {
@@ -839,9 +870,9 @@ fn process_multi_stream_response(
     }
 
     if debug_mode {
-        debug!("Multi-stream read complete: {} commands, {} health updates, {} unified IDs, {} health IDs for ACK",
-            command_messages.len(), health_messages.len(), unified_message_ids.len(), health_message_ids.len());
+        debug!("Multi-stream read complete: {} commands, {} health updates, {} unified IDs, {} health IDs for ACK, {} relayed replies",
+            command_messages.len(), health_messages.len(), unified_message_ids.len(), health_message_ids.len(), relay_replies.len());
     }
 
-    Ok((command_messages, health_messages, unified_message_ids, health_message_ids))
+    Ok((command_messages, health_messages, unified_message_ids, health_message_ids, relay_replies))
 }

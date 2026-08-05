@@ -1288,12 +1288,47 @@ pub fn process_command_batch(
         for (_, command_obj) in &regular_commands {
             // Convert to standard command
             let command = Command::from_optimized(command_obj);
-            
+
             // Skip empty commands to avoid logging errors
             if command.command.trim().is_empty() {
                 continue;
             }
-            
+
+            // NOT ADDRESSED TO US, and we have no handler for it: stay silent.
+            //
+            // `_rt` means the command is bound for another service (the
+            // worker-pool loop relays it). `_rr` means it already WAS relayed,
+            // to the service that owns this stream. In both cases the addressee
+            // is a service running its own consumer group beside us — the
+            // Geodine runner shape, which gFlow and gSchedule now copy.
+            //
+            // Answering `unknown_command_error` here is not harmless. The reply
+            // is keyed by the command's OWN site (response_key::resolve), so it
+            // lands on the ORIGIN's `{site}:res:{id}` — precisely the key the
+            // origin polls. Measured live on aesir: the error beat the owning
+            // service's reply by ~500ms, so every relayed service command read
+            // back as `Unknown command: <cmd>` no matter what the service did.
+            // The service physically cannot correct it: writing the origin's
+            // res key is a foreign keyspace its ACL refuses, by design.
+            //
+            // A command we DO have a handler for still runs — a relayed `ping`
+            // is genuinely ours to answer, and that round trip is proven live.
+            // Only the "no handler" case changes, and only when the message
+            // carries relay metadata. An ordinary typo'd command on a stream
+            // with no relay fields still errors exactly as before.
+            if registry.get_handler(&command.command).is_none()
+                && (command_obj.relay_target.is_some() || command_obj.relay_reply_to.is_some())
+            {
+                if debug_level >= LogLevel::Info {
+                    info!(
+                        "Command '{}' has no local handler and carries relay metadata \
+                         (_rt={:?}, _rr={:?}) — leaving it for the owning service",
+                        command.command, command_obj.relay_target, command_obj.relay_reply_to
+                    );
+                }
+                continue;
+            }
+
             if debug_level >= LogLevel::Info {
                 info!("Processing regular command: {} (ID: {})", command.command, command.id);
             }

@@ -9,11 +9,13 @@ pub mod router;
 pub mod translator;
 pub mod policy;
 pub mod telemetry;
+pub mod reply;
 
 pub use router::{RelayDecision, resolve_relay_target};
 pub use translator::{TranslationResult, translate_for_relay, detect_format, convert_format};
 pub use policy::{PolicyDecision, check_relay_policy};
 pub use telemetry::{RelayMetrics, RelayTelemetry, get_relay_stats};
+pub use reply::{deliver_service_reply, is_relayed_service_reply};
 
 use std::collections::HashMap;
 use std::time::Instant;

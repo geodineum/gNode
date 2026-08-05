@@ -960,10 +960,19 @@ pub fn create_unified_stream_worker(
                         1000, // block_ms
                         debug_mode
                     ) {
-                        Ok((commands, health_messages, unified_message_ids, _health_message_ids)) => {
+                        Ok((commands, health_messages, unified_message_ids, _health_message_ids, relay_replies)) => {
                             if debug_mode && (!commands.is_empty() || !health_messages.is_empty()) {
                                 debug!("Multi-stream read: {} commands, {} health updates",
                                     commands.len(), health_messages.len());
+                            }
+
+                            // Carry any service reply home before anything else:
+                            // the origin's poll has a 10s TTL to beat.
+                            // Idempotent (SET), so the other consumer group
+                            // doing the same is a duplicate key write, not a
+                            // duplicate delivery.
+                            for reply in &relay_replies {
+                                crate::integration::relay::deliver_service_reply(&mut conn, reply, debug_mode);
                             }
 
                             let mut total_processed = 0;
@@ -1533,10 +1542,17 @@ pub fn create_environment_stream_worker_dynamic(
                             block_ms_per_stream,
                             debug_mode
                         ) {
-                            Ok((commands, health_messages, unified_message_ids, _health_message_ids)) => {
+                            Ok((commands, health_messages, unified_message_ids, _health_message_ids, relay_replies)) => {
                                 if debug_mode && (!commands.is_empty() || !health_messages.is_empty()) {
                                     debug!("Stream[{}] {}: {} commands, {} health updates",
                                         stream_idx, current_unified_stream, commands.len(), health_messages.len());
+                                }
+
+                                // This is the loop that sees EVERY discovered
+                                // site's stream, so it is where a service's
+                                // reply is most reliably caught on its way home.
+                                for reply in &relay_replies {
+                                    crate::integration::relay::deliver_service_reply(&mut conn, reply, debug_mode);
                                 }
 
                                 let mut stream_processed = 0;
