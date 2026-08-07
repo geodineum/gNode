@@ -49,6 +49,35 @@ use std::collections::HashMap;
 /// picked up by a later request.
 const RELAYED_REPLY_TTL_SECS: usize = 300;
 
+/// Give a forwarded command the ORIGIN's correlation id.
+///
+/// Parsing an inbound command puts the STREAM ENTRY id in `.id` — which is what
+/// XACK and dedupe need — and the caller's own id in `.request_id`. Serializing
+/// writes `.id` back out as the `id` field. That is right for a command the
+/// daemon executes itself and wrong for one it forwards, because the target
+/// echoes whatever `id` it was handed, and that echo is what the reply ends up
+/// keyed on.
+///
+/// Measured on aesir: gFlow dispatched `e2e-1786102712236`, Geodine ran the
+/// inference and answered `1786102712245-0` — gFlow's own stream entry id. The
+/// reply landed on `{gflow}:res:1786102712245-0` while gFlow polled
+/// `{gflow}:res:e2e-1786102712236` until it gave up. The work was done and the
+/// answer was correct; only its name was lost. For a six-hour CPU generation
+/// that is an expensive way to fail.
+///
+/// `_request_id` in the params survives the hop untouched, so a target COULD
+/// dig it out — gFlow's own consumer does exactly that. But requiring every
+/// callee to know that trick is a contract nobody wrote down. The daemon owns
+/// the hop, so the daemon carries the id.
+///
+/// No `request_id` (a fire-and-forget command) leaves `.id` alone: a stream
+/// entry id is a poor correlation key but it is better than an empty one.
+pub fn carry_correlation_id(forwarded: &mut crate::integration::processor::resp3_protocol::OptimizedCommand) {
+    if let Some(rid) = forwarded.request_id.clone().filter(|s| !s.is_empty()) {
+        forwarded.id = rid;
+    }
+}
+
 /// The site a relayed reply belongs to, read off the reply-to stream key.
 ///
 /// `_rr` is a stream key the daemon itself set when forwarding
@@ -293,6 +322,61 @@ mod tests {
 
     fn fields(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    use crate::integration::processor::resp3_protocol::OptimizedCommand;
+
+    /// The real round trip: what a client wrote, what parsing produced, what
+    /// forwarding serializes. This is the regression that cost a live inference
+    /// run — assert the whole chain, not just the helper.
+    #[test]
+    fn forwarded_command_carries_the_callers_id_not_the_stream_entry_id() {
+        let stream_entry_id = "1786102712245-0";
+        let caller_id = "e2e-1786102712236";
+
+        let wire: HashMap<String, String> = fields(&[
+            ("t", "c"),
+            ("id", caller_id),
+            ("c", "infer"),
+            ("p", r#"{"prompt":"hi","_request_id":"e2e-1786102712236"}"#),
+            ("ss", "gflow"),
+            ("_rt", "geodine"),
+        ]);
+
+        let mut cmd = OptimizedCommand::from_resp3_fields(stream_entry_id.to_string(), wire)
+            .expect("parses");
+
+        // Parsing splits the two ids — this is the behaviour the bug hid behind.
+        assert_eq!(cmd.id, stream_entry_id, "struct id is the stream entry id");
+        assert_eq!(cmd.request_id.as_deref(), Some(caller_id), "caller id lands in request_id");
+
+        // Without the carry, serializing hands the target our stream entry id.
+        let before = cmd.to_resp3_fields();
+        assert_eq!(before.get("id").map(String::as_str), Some(stream_entry_id));
+
+        carry_correlation_id(&mut cmd);
+
+        let after = cmd.to_resp3_fields();
+        assert_eq!(
+            after.get("id").map(String::as_str),
+            Some(caller_id),
+            "the target must be handed the ORIGIN's correlation id"
+        );
+    }
+
+    /// A command with no correlation id of its own must not end up with an
+    /// empty one — a stream entry id is a poor key, an empty key is a shared one.
+    #[test]
+    fn carry_is_a_no_op_without_a_request_id() {
+        let mut cmd = OptimizedCommand::from_resp3_fields(
+            "1786102712245-0".to_string(),
+            fields(&[("t", "c"), ("c", "ping"), ("ss", "gflow")]),
+        ).expect("parses");
+
+        let before = cmd.id.clone();
+        carry_correlation_id(&mut cmd);
+        assert_eq!(cmd.id, before);
+        assert!(!cmd.id.is_empty());
     }
 
     #[test]

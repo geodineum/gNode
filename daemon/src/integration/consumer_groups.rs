@@ -1655,6 +1655,11 @@ pub fn create_environment_stream_worker_dynamic(
                                                 forwarded.dest_node = target_entity_id.clone();
                                                 forwarded.relay_target = None; // Clear _rt to prevent re-relay at target
 
+                                                // The target echoes the `id` it is handed, and that echo is
+                                                // what the reply gets keyed on — so it has to be the
+                                                // ORIGIN's correlation id, not our stream entry id.
+                                                crate::integration::relay::carry_correlation_id(&mut forwarded);
+
                                                 // Set reply-to if not already set
                                                 if forwarded.relay_reply_to.is_none() {
                                                     forwarded.relay_reply_to = Some(current_unified_stream.to_string());
