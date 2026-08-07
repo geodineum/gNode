@@ -22,6 +22,12 @@ parser, key-based compute reader) resolves fields through the same
 canonical alias list in `daemon/src/utils.rs::field_names` — one wire
 format, one contract, every path parses identically.
 
+An entry whose type field (`t`/`type`) resolves to nothing is not a
+command and not a response: it is ACKed and dropped, and the daemon
+logs a rate-limited warning (one line per 30s with a suppressed count)
+naming the stream, entry id, and the field keys present. Malformed
+producers are visible in the journal, never silent.
+
 ### Canonical fields
 
 | Field | Used in     | Alias chain (preferred → fallback)    | Meaning |

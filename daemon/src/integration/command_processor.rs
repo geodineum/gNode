@@ -1593,7 +1593,7 @@ pub fn process_command_batch(
             fields.insert("_cr".to_string(), "1".to_string());
             
             // Ensure message type is 'br'
-            if !fields.contains_key("t") || fields.get("t") != Some(&"br".to_string()) {
+            if crate::utils::get_field_opt(&fields, crate::utils::field_names::TYPE).as_deref() != Some("br") {
                 fields.insert("t".to_string(), "br".to_string());
                 if debug_level >= LogLevel::Info {
                     info!("Ensured 'type' field is set to 'br'");

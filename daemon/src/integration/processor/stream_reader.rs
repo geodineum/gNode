@@ -211,7 +211,11 @@ impl StreamReader{
                                             };
                                             
                                             // Check for typed format (t field) or plain JSON format (command field)
-                                            if let Some(msg_type) = fields.get("t") {
+                                            let resolved_type = crate::utils::get_field_opt(&fields, crate::utils::field_names::TYPE);
+                                            if resolved_type.is_none() {
+                                                warn_unclassifiable("unified command reader", &msg_id, &fields);
+                                            }
+                                            if let Some(msg_type) = resolved_type {
                                                 trace!("Processing message with type: {}", msg_type);
                                                 if msg_type == "c" || msg_type == "bc" {
                                                     // For regular commands, validate command field (support multiple field names)
@@ -539,7 +543,11 @@ impl StreamReader{
                                             
                                             // STRICT FILTERING: Only process messages of type 'r' (response) or 'br' (batch response)
                                             // Skip any messages that don't have a type field or aren't responses
-                                            if let Some(msg_type) = fields.get("t") {
+                                            let resolved_type = crate::utils::get_field_opt(&fields, crate::utils::field_names::TYPE);
+                                            if resolved_type.is_none() {
+                                                warn_unclassifiable("response reader", &msg_id, &fields);
+                                            }
+                                            if let Some(msg_type) = resolved_type {
                                                 if msg_type == "r" || msg_type == "br" {
                                                     // For batch responses, validate batch_id
                                                     if msg_type == "br" {
@@ -615,6 +623,37 @@ impl StreamReader{
         }
 
         Ok(responses)
+    }
+}
+
+
+/// Entries the classifier cannot type used to be ACKed and forgotten in
+/// silence — a producer emitting malformed envelopes looked exactly like a
+/// healthy stream (found via a gFlow relay envelope missing `t`). Warn,
+/// rate-limited to one line per 30s with a suppressed-count, so noise cannot
+/// flood the journal and a broken producer cannot hide.
+fn warn_unclassifiable(where_: &str, msg_id: &str, fields: &HashMap<String, String>) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    static SUPPRESSED: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let last = LAST.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= 30
+        && LAST.compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed).is_ok()
+    {
+        let n = SUPPRESSED.swap(0, Ordering::Relaxed);
+        let mut keys: Vec<&str> = fields.keys().map(|s| s.as_str()).collect();
+        keys.sort_unstable();
+        warn!(
+            "Unclassifiable entry in {} ({}): no resolvable type field (t/type); it will be ACKed and dropped. keys=[{}]{}",
+            where_, msg_id, keys.join(","),
+            if n > 0 { format!(" (+{} suppressed in last 30s)", n) } else { String::new() }
+        );
+    } else {
+        SUPPRESSED.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -834,7 +873,11 @@ fn process_multi_stream_response(
                                     }
 
                                     // Process as command message
-                                    if let Some(msg_type) = fields.get("t") {
+                                    let resolved_type = crate::utils::get_field_opt(&fields, crate::utils::field_names::TYPE);
+                                    if resolved_type.is_none() {
+                                        warn_unclassifiable("unified stream (grouped)", &msg_id, &fields);
+                                    }
+                                    if let Some(msg_type) = resolved_type {
                                         if msg_type == "c" || msg_type == "bc" {
                                             match OptimizedCommand::from_resp3_fields(msg_id.clone(), fields) {
                                                 Ok(cmd) => {

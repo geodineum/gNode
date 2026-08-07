@@ -89,7 +89,7 @@ pub fn process_health_updates_with_topology(
 
     for (msg_id, fields) in messages {
         // Check message type
-        let msg_type = match fields.get("t") {
+        let msg_type = match crate::utils::get_field_opt(&fields, crate::utils::field_names::TYPE) {
             Some(t) => t,
             None => {
                 warn!("Health message {} missing type field, skipping", msg_id);

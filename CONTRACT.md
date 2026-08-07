@@ -69,6 +69,12 @@ All field names are **canonical aliases** resolved EXACTLY by `daemon/src/utils.
 
 > **`st` is overloaded.** In a command (`t=c`) `st` = source_site; in a response (`t=r`) `st` = status. The daemon disambiguates by the `t` field. `st`-as-source-site and `n`-as-source-node are **LEGACY** aliases (COMMAND_SCHEMA.md). New writers MUST use `ss`/`sn`.
 
+**Unclassifiable entries.** An entry whose type field (`t`/`type`) resolves to
+nothing is neither command nor response: it is ACKed and dropped, and the
+daemon logs a rate-limited warning (one line per 30 s, with a suppressed
+count) naming the reader, entry id, and field keys present. A malformed
+producer is visible in the journal, never silent.
+
 ### 3.2 Message shapes
 
 **Command (`t=c`):**

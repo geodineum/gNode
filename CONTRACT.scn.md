@@ -37,6 +37,7 @@ CONSUMES ← ValKey 7.2+ (FUNCTION LOAD, RESP3, consumer groups, streams) | Lua 
 - Health: GNODE_NODE_HEARTBEAT → GNODE_NODE_AGGREGATE_METRICS → health/topology_heatmap.
 
 ## ::LIMITATIONS
+- Unclassifiable entries (no resolvable `t`/`type`) are ACKed+dropped with a rate-limited WARN (30s window, suppressed-count) — was fully silent until 2026-08-07.
 - No cross-request ordering on Concurrent lane (only within one synchronous client batch).
 - Response poll TTL fixed 10s (concurrent_lane.rs) → silent expiry on slow poll, no retry.
 - 7 Ordered cmds block whole consumer thread, no per-cmd timeout → 1 slow handler stalls all tenants.
