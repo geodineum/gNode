@@ -398,7 +398,22 @@ if [[ -n "$ENVIRONMENT" ]]; then
     ENVIRONMENTS="[\"$ENVIRONMENT\"]"
 fi
 if [[ -z "$ENVIRONMENTS" ]]; then
-    ENVIRONMENTS='["testing"]'
+    # No silent default (the old '["testing"]' fallback registered production
+    # sites as testing without anyone noticing — audit SB-8.108 finding 3).
+    # Precedence: --environment/--environments > manifest `environment:` > ABORT.
+    _manifest_env=""
+    if [[ -n "${RESOLVED_YAML:-}" && -f "${RESOLVED_YAML:-}" ]] && command -v yq >/dev/null 2>&1; then
+        _manifest_env=$(yq eval '.environment // ""' "$RESOLVED_YAML" 2>/dev/null | tr -d '"')
+        [[ "$_manifest_env" == "null" ]] && _manifest_env=""
+    fi
+    if [[ -n "$_manifest_env" ]]; then
+        ENVIRONMENTS="["$_manifest_env"]"
+        log_info "Environment:  $_manifest_env (from manifest)"
+    else
+        log_error "No environment given. Pass --environment <tier> or declare 'environment:' in the manifest."
+        log_error "(dev|test|testing|staging|acceptance|production — nothing is assumed.)"
+        exit 1
+    fi
 fi
 # Primary DTAP env for dim-20 embedding — the first (and, for sites, only) of
 # ENVIRONMENTS, which now subsumes both --environment and the default.

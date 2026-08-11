@@ -403,8 +403,28 @@ add_peer() {
     local pubkey="$2"
     local endpoint="$3"
 
-    local peer_ip
-    peer_ip=$(next_peer_ip)
+    # Idempotent re-enrollment (SB-8.84): a re-added peer KEEPS its IP, its
+    # old [Peer] block is stripped instead of accumulating, and a rotated key
+    # evicts the stale runtime peer. Without this, every re-run burned a new
+    # VPN IP and left dead blocks with conflicting AllowedIPs in the conf.
+    local peer_ip existing_ip="" old_pubkey=""
+    if [[ -f "${PEERS_DIR}/${name}.conf" ]]; then
+        existing_ip=$(grep '^vpn_ip=' "${PEERS_DIR}/${name}.conf" | cut -d= -f2)
+        old_pubkey=$(grep '^pubkey=' "${PEERS_DIR}/${name}.conf" | cut -d= -f2-)
+    fi
+    [[ -z "$existing_ip" ]] && existing_ip=$(read_state "peer_${name}" 2>/dev/null || true)
+    if [[ -n "$existing_ip" ]]; then
+        peer_ip="$existing_ip"
+        if [[ "$DRY_RUN" != "true" ]]; then
+            sed -i "/^# Peer: ${name} (/,/^PersistentKeepalive/d" "$WG_CONF"
+            if [[ -n "$old_pubkey" && "$old_pubkey" != "$pubkey" ]]; then
+                wg set "$WG_INTERFACE" peer "$old_pubkey" remove 2>/dev/null || true
+            fi
+        fi
+        log_info "Re-enrolling '${name}' — keeping VPN IP ${peer_ip}"
+    else
+        peer_ip=$(next_peer_ip)
+    fi
 
     echo ""
     echo -e "${BOLD}Adding Peer: ${name}${NC}"
