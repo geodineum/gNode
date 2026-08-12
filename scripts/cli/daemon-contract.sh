@@ -11,6 +11,17 @@ set -euo pipefail
 #                are surfaced through the daemon (their host) rather than as
 #                separate `geodineum <component> contract` verbs.
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'HLP'
+Usage: geodineum daemon contract [<extension>]
+
+Without arguments: the daemon command/function reference + canonical wire
+format (COMMAND_SCHEMA.md) + the list of signed-extension contracts.
+With <extension> (cms|broker|observe|topo|signals): that extension's CONTRACT.md.
+HLP
+    exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GNODE_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 

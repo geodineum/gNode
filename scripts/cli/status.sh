@@ -16,6 +16,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VCLI="$(dirname "$SCRIPT_DIR")/valkey-cli-secure.sh"
 NS="${GNODE_TOPOLOGY_NAMESPACE:-geodineum}"
 MODE=table
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'HLP'
+Usage: geodineum status [--json]
+
+The constellation at a glance: nodes (heartbeat age, load, memory, what runs
+where), services (profile, env, entity, heartbeat), tool count, and per-site
+visitor counters. Reads only ValKey. --json emits the same facts for machines.
+HLP
+    exit 0
+fi
 [[ "${1:-}" == "--json" ]] && MODE=json
 
 vk() { VALKEY_USER=gnode_daemon "$VCLI" "$@" 2>/dev/null; }
@@ -159,3 +169,9 @@ for s in out["services"]:
     print(f"{s['service']:<20}{s['profile'] or '—':<10}{s['env'] or '—':<12}"
           f"{'✓' if s['entity'] else '✗':<8}{where}")
 PYEOF
+
+# Visitor counters (beacon-fed aggregates) — the fold lives in the installer
+# CLI (`geodineum visitors`); ride along here best-effort, never fatally.
+if [[ "$MODE" != "json" ]] && command -v geodineum >/dev/null 2>&1; then
+    geodineum visitors --compact 2>/dev/null || true
+fi

@@ -19,6 +19,23 @@
 
 set -euo pipefail
 
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    cat <<'HLP'
+Usage: geodineum grants <subcommand>
+
+  request <service> <pattern...> [--reason "…"] [--ttl-hours N]
+  pending
+  approve <request_id> [--patterns "…"]     (master, admin cred)
+  deny    <request_id> [--reason "…"]       (master, admin cred)
+  show    <service>
+  sweep                                     (timeout auto-deny)
+
+The grant-request approval loop: requests are data, every decision is
+ledgered BEFORE any ACL change, undecided requests auto-deny after the TTL.
+HLP
+    exit 0
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GNODE_SCRIPTS="$(dirname "$SCRIPT_DIR")"
 VCLI="$GNODE_SCRIPTS/valkey-cli-secure.sh"
