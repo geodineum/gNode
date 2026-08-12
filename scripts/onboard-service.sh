@@ -794,6 +794,53 @@ print(",".join(r.get("email","?") for r in d.get("channels",{}).get("email",{}).
 fi
 
 # =============================================================================
+# Step 5.5: Mail dispatch verification
+# =============================================================================
+# A written config is a CLAIM; only a dispatched message is PROOF. Every mail
+# defect so far reported success at write time and failed at dispatch (the
+# smtp_user schema gap; the RFC-5322 from_name parentheses that silently ate
+# weeks of palaciodeobras mail). When an email channel exists, push a real
+# type=test message through the full pipeline and read the journal verdict.
+# Non-production tiers dry-run at the gate, so only production proves the
+# whole chain — the report says exactly which claim was proven.
+verify_mail_dispatch() {
+    local site_id="$1" env="$2"
+    command -v journalctl >/dev/null 2>&1 || { log_info "journalctl unavailable — skipping mail verification"; return 0; }
+    local probe_id ts stream line
+    probe_id="onboard-verify-$(date +%s)-$$"
+    ts=$(date -Iseconds)
+    stream="{${site_id}}:gnode:comms:${env}"
+    if ! valkey_daemon_cli XADD "$stream" '*'         id "$probe_id" type test timestamp "$ts" site_id "$site_id" environment "$env" priority 3         sender '{"name":"onboard-verify","email":"noreply@localhost"}'         content "{\"subject\":\"Mail verification: ${site_id}\",\"body\":\"Onboarding probe ${probe_id}. If you read this, dispatch works end-to-end.\"}"         metadata "{\"form_type\":\"test\",\"environment\":\"${env}\"}"         dispatch '{"channels":["email"],"status":"pending","attempts":0,"last_attempt":null,"next_retry":null}' >/dev/null 2>&1; then
+        log_warning "Mail probe: could not XADD to ${stream}"
+        return 0
+    fi
+    local i
+    for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        sleep 2
+        line=$(journalctl -u geodineum-comms --since "2 min ago" --no-pager 2>/dev/null             | grep -F "$probe_id" | grep -E 'dispatched successfully|Failed to send|dispatch failed|dry' | tail -1)
+        [[ -n "$line" ]] && break
+    done
+    if [[ "$line" == *"dispatched successfully"* ]]; then
+        log_success "MAIL VERIFIED: probe dispatched through the email channel (env=${env})"
+        local relay
+        relay=$(grep -hE 'status=(sent|bounced|deferred)' /var/log/mail.log 2>/dev/null | tail -1)
+        [[ -n "$relay" ]] && log_info "relay: ${relay#*postfix/}"
+    elif [[ "$line" == *"Failed to send"* || "$line" == *"dispatch failed"* ]]; then
+        log_error "MAIL BROKEN — dispatch failed. The journal names the cause:"
+        log_error "  ${line#*geodineum-comms*: }"
+        log_error "Fix the settings ({${site_id}}:comms:config), then re-run or use set-comms-recipients.sh"
+    elif [[ "$line" == *dry* ]]; then
+        log_info "Mail probe dry-ran (env=${env} is non-production) — settings consumed, no real send attempted"
+    else
+        log_warning "Mail probe: no dispatch trace after 24s — is geodineum-comms running? ($(systemctl is-active geodineum-comms 2>/dev/null || echo unknown))"
+    fi
+}
+if [[ "$DRY_RUN" != "true" ]] && valkey_daemon_cli EXISTS "{${SITE_ID}}:comms:config" 2>/dev/null | grep -q '^1$'; then
+    log_step "Step 5.5: Mail Dispatch Verification"
+    verify_mail_dispatch "$SITE_ID" "${PRIMARY_ENV:-production}"
+fi
+
+# =============================================================================
 # Step 6: Schema Discovery + Publication
 # =============================================================================
 
