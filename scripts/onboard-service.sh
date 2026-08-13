@@ -250,20 +250,20 @@ Options:
   --force              Regenerate ACL password even if it exists
   -h, --help           Show this help message
 
-Service YAML format (gnode_services.yaml):
+Manifest format (gnode_services.yaml — ONE schema, all generators emit it):
+  profile: service              # web|headless|service|system|component
+  environment: production       # DTAP tier — REQUIRED (flag|manifest|abort)
   services:
-    - id: "MyService"
+    - id: "myservice"
       metadata:
         description: "What this service does"
         type: "service"
         tier: "SERVICE"
-      capabilities:
-        - name: "protocol"
-          value: "http_rest"
-        - name: "domain_primary"
-          value: "inference"
+  consumes: []                  # REQUIRED section — grants compose from these;
+  produces:                     # an undeclared manifest is REFUSED (no fallback)
+    - "{myservice}:gnode:comms:*"
 
-See: docs/operations/ONBOARDING.md for full documentation.
+Full documentation: Geodineum[-pro]/CONTRACTS/SERVICE_ONBOARDING.md
 EOF
 }
 
