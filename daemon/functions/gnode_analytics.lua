@@ -15,6 +15,7 @@
 --
 -- Usage:
 --   GNODE_ANALYTICS_HIT(site_id, visitor_hash, page, referrer_host, is_bot, ts, ymd)
+--   GNODE_ANALYTICS_CLICK(site_id, visitor_hash, label, page, is_bot, ts, ymd)
 --   GNODE_ANALYTICS_SUMMARY(site_id, ymd1, ymd2, ... ymdN)   -- read-only
 --
 -- Schema (per site):
@@ -25,6 +26,9 @@
 --   {site}:visitor_requests:{Ymd} HASH vhash -> request count  (human only)
 --   {site}:referrers:{Ymd}       HASH  referrer_host -> count  (human only)
 --   {site}:transitions:{Ymd}     HASH  "from > to" -> count    (human paths)
+--   {site}:clicks:{Ymd}          HASH  label -> count          (human only)
+--   {site}:clickers:{Ymd}        ZSET  member=vhash score=ts   (humans who
+--                                      clicked anything; clickers/visits = CTR)
 --   {site}:visitors:{vhash}      HASH  first_seen/last_seen/page_count/
 --                                      first_page/last_page/is_bot
 --
@@ -124,6 +128,49 @@ server.register_function{
     description = 'Records one visitor hit (page, referrer, bot flag) into per-site analytics'
 }
 
+-- ─── WRITE: one tracked click ────────────────────────────────────────────────
+server.register_function{
+    function_name = 'GNODE_ANALYTICS_CLICK',
+    callback = function(keys, args)
+        local site = args[1]
+        if not site or site == '' then
+            return server.error_reply('GNODE_ANALYTICS_CLICK: missing site_id')
+        end
+        local vhash  = args[2] or 'anon'
+        local label  = args[3]
+        local page   = args[4] or '/'
+        local is_bot = (args[5] == '1')
+        local ts     = tonumber(args[6]) or 0
+        local ymd    = args[7]
+        if not label or label == '' then
+            return server.error_reply('GNODE_ANALYTICS_CLICK: missing label')
+        end
+        if not ymd or ymd == '' then
+            return server.error_reply('GNODE_ANALYTICS_CLICK: missing date')
+        end
+
+        -- Bots never reach the human-facing metrics, same rule as HIT.
+        if is_bot then
+            return 'OK'
+        end
+
+        local p = '{' .. site .. '}:'
+
+        server.call('HINCRBY', p .. 'clicks:' .. ymd, label, 1)
+        server.call('EXPIRE', p .. 'clicks:' .. ymd, RETENTION)
+
+        -- Where it was clicked, so the same CTA can be compared across pages.
+        server.call('HINCRBY', p .. 'clicks:' .. ymd, page .. ' > ' .. label, 1)
+
+        -- One member per visitor: clickers/visits is the click-through rate.
+        server.call('ZADD', p .. 'clickers:' .. ymd, ts, vhash)
+        server.call('EXPIRE', p .. 'clickers:' .. ymd, RETENTION)
+
+        return 'OK'
+    end,
+    description = 'Records one tracked CTA click (label, page) into per-site analytics'
+}
+
 -- ─── READ: aggregate summary across a set of days ────────────────────────────
 server.register_function{
     function_name = 'GNODE_ANALYTICS_SUMMARY',
@@ -136,7 +183,8 @@ server.register_function{
 
         local human_hits, bot_hits = 0, 0
         local uv = {}            -- distinct human visitor hashes across the window
-        local pages, refs, trans = {}, {}, {}
+        local pages, refs, trans, clicks = {}, {}, {}, {}
+        local uc = {}            -- distinct humans who clicked anything
         local daily = {}
 
         for i = 2, #args do
@@ -157,12 +205,25 @@ server.register_function{
             fold_hash(server.call('HGETALL', p .. 'pagecounts:' .. d), pages)
             fold_hash(server.call('HGETALL', p .. 'referrers:' .. d), refs)
             fold_hash(server.call('HGETALL', p .. 'transitions:' .. d), trans)
+            fold_hash(server.call('HGETALL', p .. 'clicks:' .. d), clicks)
 
-            daily[#daily + 1] = { date = d, human = dh, bot = db, visitors = #members }
+            local clickers = server.call('ZRANGE', p .. 'clickers:' .. d, 0, -1)
+            for _, m in ipairs(clickers) do uc[m] = true end
+
+            daily[#daily + 1] = {
+                date = d, human = dh, bot = db,
+                visitors = #members, clickers = #clickers
+            }
         end
 
         local unique_visitors = 0
         for _ in pairs(uv) do unique_visitors = unique_visitors + 1 end
+
+        local unique_clickers = 0
+        for _ in pairs(uc) do unique_clickers = unique_clickers + 1 end
+
+        local clicks_total = 0
+        for _, v in pairs(clicks) do clicks_total = clicks_total + v end
 
         local pages_served = 0
         for _, v in pairs(pages) do pages_served = pages_served + v end
@@ -181,6 +242,10 @@ server.register_function{
             top_pages             = top_n(pages, 10),
             top_referrers         = top_n(refs, 8),
             top_paths             = top_n(trans, 6),
+            clicks_total          = clicks_total,
+            unique_clickers       = unique_clickers,
+            -- clickers/visitors is the click-through rate for the window.
+            top_clicks            = top_n(clicks, 12),
             daily                 = daily
         })
     end,
