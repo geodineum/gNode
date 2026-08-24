@@ -800,7 +800,10 @@ fi
 # defect so far reported success at write time and failed at dispatch (the
 # smtp_user schema gap; the RFC-5322 from_name parentheses that silently ate
 # weeks of palaciodeobras mail). When an email channel exists, push a real
-# type=test message through the full pipeline and read the journal verdict.
+# dispatchable message through the full pipeline and read the journal verdict.
+# NOT type=test: the daemon drops those in production, ACKs them and logs
+# nothing, so the probe built to catch silent dispatch failures was itself
+# silently dropped and always timed out blaming the daemon.
 # Non-production tiers dry-run at the gate, so only production proves the
 # whole chain — the report says exactly which claim was proven.
 verify_mail_dispatch() {
@@ -810,7 +813,7 @@ verify_mail_dispatch() {
     probe_id="onboard-verify-$(date +%s)-$$"
     ts=$(date -Iseconds)
     stream="{${site_id}}:gnode:comms:${env}"
-    if ! valkey_daemon_cli XADD "$stream" '*'         id "$probe_id" type test timestamp "$ts" site_id "$site_id" environment "$env" priority 3         sender '{"name":"onboard-verify","email":"noreply@localhost"}'         content "{\"subject\":\"Mail verification: ${site_id}\",\"body\":\"Onboarding probe ${probe_id}. If you read this, dispatch works end-to-end.\"}"         metadata "{\"form_type\":\"test\",\"environment\":\"${env}\"}"         dispatch '{"channels":["email"],"status":"pending","attempts":0,"last_attempt":null,"next_retry":null}' >/dev/null 2>&1; then
+    if ! valkey_daemon_cli XADD "$stream" '*'         id "$probe_id" type alert timestamp "$ts" site_id "$site_id" environment "$env" priority 3         sender '{"name":"onboard-verify","email":"noreply@localhost"}'         content "{\"subject\":\"Mail verification: ${site_id}\",\"body\":\"Onboarding probe ${probe_id}. If you read this, dispatch works end-to-end.\"}"         metadata "{\"form_type\":\"test\",\"environment\":\"${env}\"}"         dispatch '{"channels":["email"],"status":"pending","attempts":0,"last_attempt":null,"next_retry":null}' >/dev/null 2>&1; then
         log_warning "Mail probe: could not XADD to ${stream}"
         return 0
     fi
