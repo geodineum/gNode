@@ -11,7 +11,7 @@
 | Interface | Kind | Signature / Key | Evidence |
 |---|---|---|---|
 | Daemon commands | command | 60 base commands across 10 categories (system, geometric, topology, service, config, stream, relay, diagnostic, direct_channel, custom_topology) + 23 CMS extension commands, delivered via RESP3 `XADD` to the unified stream | COMMAND_SCHEMA.md, daemon/src/integration/handlers/ |
-| ValKey Lua functions | fcall | `FCALL <function_name> <numkeys> [keys...] [args...]` — 23 base libraries (203 functions) + 1 CMS library (10 functions) = **213** total, registered via `FUNCTION LOAD` (ValKey 7.2+) | COMMAND_SCHEMA.md, daemon/functions/*.lua |
+| ValKey Lua functions | fcall | `FCALL <function_name> <numkeys> [keys...] [args...]` — 24 base libraries (207 functions) + 1 CMS library (10 functions) = **217** total, registered via `FUNCTION LOAD` (ValKey 7.2+) | COMMAND_SCHEMA.md, daemon/functions/*.lua |
 | Unified stream | stream | `{site_id}:gnode:unified:{environment}` — RESP3 command stream, field aliases resolved by `utils::field_names` | config.rs, COMMAND_SCHEMA.md |
 | Response polling key | stream (kv) | `SET {ss}:res:{request_id} '<json>' EX 10` — written by daemon after execution | COMMAND_SCHEMA.md, integration/concurrent_lane.rs |
 | Receipt stream | stream | `XADD {site_id}:gnode:receipts:{environment}` — signed durable receipt per keyed response (ed25519 per-node key; verifiers resolve `signer` via `{topology_ns}:gnode:receipt_pubkeys` HASH), MINID age-trim 30 d | integration/receipt.rs, installer CONTRACTS/receipt-stream.md |

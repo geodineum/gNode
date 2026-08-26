@@ -2,8 +2,8 @@
 
 Definitive reference for all daemon commands and ValKey Lua functions.
 
-**Base daemon**: 60 commands, 23 Lua libraries (203 functions)
-**With CMS extension** (default companion; opt out with `GEODINEUM_SKIP_CMS=true`): 83 commands, 24 Lua libraries (213 functions)
+**Base daemon**: 61 commands, 24 Lua libraries (207 functions)
+**With CMS extension** (default companion; opt out with `GEODINEUM_SKIP_CMS=true`): 84 commands, 25 Lua libraries (217 functions)
 
 > Counting basis — *commands* = one canonical command per row in Part 1
 > (the uppercase / camelCase / short forms are aliases, not separate
@@ -236,13 +236,14 @@ Source: `daemon/src/integration/handlers/service.rs`
 
 ---
 
-### Introspection (1 command)
+### Introspection (2 commands)
 
 Source: `daemon/src/integration/handlers/introspection.rs`
 
 | Command | Aliases | Parameters | Returns | Description |
 |---------|---------|------------|---------|-------------|
 | `service_describe` | `SERVICE_DESCRIBE` | `{service_id: string}` | `{service_id, capabilities, metadata, health, tier}` | Detailed service introspection with health/tier info |
+| `constellation_status` | `CONSTELLATION_STATUS` | `{}` | `{constellation, ts, nodes, services, tools, components_live}` | Constellation at a glance: nodes with liveness + resources (from the daemon heartbeat), which components run where, registered service intents, tool count. Agent-facing twin of `geodineum status` (same JSON shape) |
 
 ---
 
@@ -421,7 +422,7 @@ Stateless topology persistence. Daemon computes Q64.64 bucket keys and z_scores;
 
 ---
 
-### gnode_topology — 3 functions
+### gnode_topology — 4 functions
 
 Dimension-schema introspection and batch load updates for the active tier schema (default service tier = 30D). The dimension count is whatever the loaded schema declares. Semantic discovery, replacement finding, and custom-topology queries are **native daemon commands** (see `discover`, `custom_topology_discover` in Part 1), not Lua functions.
 
@@ -430,6 +431,7 @@ Dimension-schema introspection and batch load updates for the active tier schema
 | `GNODE_TOPOLOGY_GET_SCHEMA` | — | — | `{total_dimensions, dimensions, values, query_types}` | Returns semantic dimension schema (active tier; service tier = 30) |
 | `GNODE_TOPOLOGY_BATCH_UPDATE_LOAD` | topology_key | updates_json | `{status, updated, not_found}` | Batch update current_load values for multiple services |
 | `GNODE_TOPOLOGY_GET_FULL_SCHEMA` | — | — | JSON full schema with valid values per dimension | Full dimension schema for developers |
+| `GNODE_SCHEMA_GET` | — | topology_ns, tier? (default `service`) | Schema hash for the tier, including `dimension_index` (name→index map) | Canonical capability-schema lookup: reads back the schema the daemon published at startup, so a caller matches against the same dimension count and indices the daemon uses. Errors (naming the key) when nothing is published yet. `no-writes` |
 
 ---
 
@@ -454,7 +456,7 @@ Node registration, configuration, and metrics.
 
 ---
 
-### gnode_stream — 25 functions
+### gnode_stream — 26 functions
 
 Stream operations, consumer groups, service provisioning/deprovisioning, DTAP environment management.
 
@@ -485,6 +487,7 @@ Stream operations, consumer groups, service provisioning/deprovisioning, DTAP en
 | `GNODE_SERVICE_LIST` | — | options_json | JSON service list | List services with filtering |
 | `GNODE_STREAM_ENSURE_CONSUMER_GROUPS` | stream_key | groups_json, start_id | `{results}` | Idempotently ensure consumer groups |
 | `GNODE_STREAM_GET_SITE_STREAMS` | — | site_id, filter_env, filter_type | `{streams}` | Get stream keys for a site |
+| `GNODE_RESPONSE_GET` | — | site_id, correlation_id [, correlation_id ...] | Flat array `[id, value, id, value, ...]` | Batch-read keyed-rendezvous replies `{site}:res:{id}` for a set of ids. `no-writes`, so callable through `FCALL_RO` by clients holding only `+fcall_ro`. Absent ids are omitted, so "no reply yet" and "no such request" are the same answer |
 
 ---
 
@@ -793,6 +796,17 @@ fallback chain. Mirrors the `gnode_config` precedent. Args are positional (no `K
 
 ---
 
+### gnode_analytics — 2 functions
+
+Server-side visitor analytics that run at the data. A front-end beacon posts to a gCore/gTemplate REST endpoint, which resolves site + visitor hash + bot flag server-side and calls `GNODE_ANALYTICS_HIT`; the operator dashboard reads everything back through `GNODE_ANALYTICS_SUMMARY`. All keys are hash-tagged `{site_id}:` so per-site ACLs (`~{site}:*`) can serve them, and every key carries a 90-day EXPIRE.
+
+| Function | Keys | Args | Returns | Description |
+|----------|------|------|---------|-------------|
+| `GNODE_ANALYTICS_HIT` | — | site_id, visitor_hash, page, referrer_host, is_bot, ts, ymd | `"OK"` | Record one hit atomically across the per-day bot/page/visit/visitor/referrer/transition keys |
+| `GNODE_ANALYTICS_SUMMARY` | — | site_id, ymd1 [, ymd2 ...] | `{pages_served, unique_visitors, avg_pages_per_visitor, human_hits, bot_hits, top_pages, top_referrers, top_paths, daily}` | Aggregate a set of days for the operator dashboard. `no-writes` |
+
+---
+
 ## Extension Libraries
 
 ### gnode_asset — 10 functions (gNode-CMS)
@@ -818,9 +832,9 @@ Asset storage and bundle manifest management.
 
 | Tier | Libraries | Functions | Commands |
 |------|-----------|-----------|----------|
-| Base | 23 | 203 | 60 |
+| Base | 24 | 207 | 61 |
 | CMS (default companion) | 1 | 10 | 23 |
-| **Total (core + CMS)** | **24** | **213** | **83** |
+| **Total (core + CMS)** | **25** | **217** | **84** |
 
 Additional signed extensions are commercial and load from `$GNODE_EXT_DIR`;
 they contribute their own libraries, functions, and commands and are

@@ -20,7 +20,7 @@ default = []
 
 [dependencies]
 # Q64.64 fixed-point arithmetic (replaces hand-rolled Q32.32 in geometric_precision.rs)
-g_math = "0.4.0"
+g_math = "0.5.0"
 
 # Schema discovery: publishes config/schemas/*.yaml contracts to ValKey on startup
 geodineum-schema = { path = "../../Geodineum/lib/geodineum-schema" }
