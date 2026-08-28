@@ -1,0 +1,36 @@
+# Resident consumer for the Telegram grant-approval buttons.
+#
+# A button press only ever lands on the COMMS inbound stream; nothing applies
+# it until `grants.sh watch` reads the stream, checks the presser against the
+# admin allowlist, ledgers the decision, and runs ACL SETUSER. Without this
+# unit that consumer only exists while an operator runs `sudo geodineum
+# grants watch` by hand — a press "does nothing" (buttons stay, no ledger, no
+# ACL) until someone remembers, and after ttl_hours the sweep auto-denies a
+# request a human already approved.
+#
+# Master-only by condition, not by convention: applying a decision needs the
+# ACL admin credential, and clearing the pressed message's buttons needs the
+# bot token out of the COMMS env. Both paths below exist only on the
+# constellation master, so on every other node this unit skips cleanly
+# instead of crash-looping against a credential it can never read.
+[Unit]
+Description=Geodineum grant-approval button consumer (Telegram callbacks -> ledger -> ACL)
+Documentation=file:/opt/geodineum/Geodineum-pro/CONTRACTS/access-grants.scn.md
+After=network-online.target valkey-gnode.service
+StartLimitIntervalSec=600
+StartLimitBurst=5
+ConditionPathExists=/etc/geodineum/credentials/valkey.password
+ConditionPathExists=/etc/geodineum/components/geodineum-comms/geodineum-comms.env
+
+[Service]
+Type=simple
+ExecStart=/opt/geodineum/gNode/scripts/cli/grants.sh watch
+# on-failure, not always: a clean die (e.g. the admin allowlist emptied out)
+# repeats identically on every start, and Restart=always would turn one loud
+# refusal into a quiet crash-loop — the failure mode CONTINUATION already
+# catalogues. Five tries, then stay down and visible.
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

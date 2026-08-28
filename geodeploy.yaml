@@ -11,6 +11,11 @@ triggers:
     actions: [build, restart]
   - match: "daemon/config/*.service"
     actions: [service-install]
+  # Root-level config/ holds the operational units (grants sweep + watch,
+  # keyspace sample). service-install copies + daemon-reloads only; first
+  # enable of a NEW unit is still an operator's `systemctl enable --now`.
+  - match: "config/*.service"
+    actions: [service-install]
   - match: "scripts/*.sh"
     actions: [chmod-scripts]
 
