@@ -571,7 +571,7 @@ Configuration with site-scoped and global defaults.
 | `GNODE_CONFIG_EXPORT` | — | site_id | JSON all categories | Export all config |
 | `GNODE_CONFIG_LIST_CATEGORIES` | — | site_id | array of names | List config categories |
 | `GNODE_CONFIG_GET_DEFAULTS` | — | category | array [k, v, ...] | Get built-in defaults |
-| `GNODE_CONSTELLATION_GENERATION_INCR` | — | site_id, version_hash? | new generation (int) | Bump the constellation config generation (called on config compile/change) |
+| `GNODE_CONSTELLATION_GENERATION_INCR` | — | site_id, reason? | new generation (int) | Bump the constellation config generation and broadcast `config_updated`; every config reader compares its APCu entry against it. Callers: `geodineum env set`, `geodineum config set`, geodeploy `opcache-clear` (all registered sites), gCore `compile-config.php` |
 | `GNODE_CONSTELLATION_GENERATION_GET` | — | site_id | current generation (int, 0 if unset) | Read the current constellation config generation |
 
 ---
