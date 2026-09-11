@@ -117,14 +117,22 @@ Register a service into the service-tier topology (30D = 25 discovery + 5 storag
   _cr "1"
 ```
 
-**Direct FCALL** (advanced — requires pre-computed bucket_key and z_score):
+**Direct FCALL** (advanced — the daemon normally computes these; shown so
+the argument contract is visible). `pr` is the full 30-axis point as Q64.64
+raw integers (strings), `pd` the display floats, `bucket_key` the 25 hashed
+axes at grid 10, `z_score` = axis 16 × 1e6. args[5] is the (B) snapshot key
+(empty = skip), args[6] the schema index of `registration_order` (29 on the
+service tier, 15 on the tool tier, -1 = none), args[7] the point's fractional
+bits (64):
 ```bash
 ./scripts/valkey-cli-secure.sh FCALL GNODE_REGISTER_CAPABILITY_VECTOR 1 \
   "{staging_my_app}:gnode:services" \
   "MyService" \
-  '{"pr":[2147483648,0,0,0,0,0,0,0,3006477107,0,0,0,0,0,0,0,0,1288490189,0,0,0,0,0],"pd":[0.5,0,0,0,0,0,0,0,0.7,0,0,0,0,0,0,0,0,0.3,0,0,0,0,0],"c":{"domain_primary":0.7,"service_tier":0.30,"protocol":0.5},"m":{"type":"worker"}}' \
-  "0005000000000000000700000000000000000000000000000000000000000000000000000003" \
-  1288490189
+  '{"pr":["9223372036854775808","0","0","0","0","0","0","0","12912720851596685312","0","0","0","0","0","0","0","0","0","0","5534023222112865280","0","0","0","0","0","0","0","0","0","0"],"pd":[0.5,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.7,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.3,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],"c":{"domain_primary":0.7,"service_tier":0.3,"protocol":0.5},"m":{"type":"worker"}}' \
+  "0005000000000000000000000000000000070000000000000000000000000000000000000000000300000000000000000000" \
+  0 \
+  "{geodineum}:gnode:topology:services" \
+  29 64
 ```
 
 **Python**:

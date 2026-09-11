@@ -389,13 +389,17 @@ server.register_function{
         -- keys[1] = topology_key
         -- args[1] = entity_id
         -- args[2] = entity_json (position, metadata - from daemon)
-        -- args[3] = bucket_key (pre-computed by daemon using Q32.32)
+        -- args[3] = bucket_key (pre-computed by daemon from the hashed axes)
         -- args[4] = z_score (pre-computed by daemon as integer)
         -- args[5] = snapshot_key (OPTIONAL) — global derived-snapshot hash
         --           ({ns}:gnode:topology:services). When present, this primitive
         --           also maintains a {point, metadata} projection there, so EVERY
         --           registration transport (handler, tool/manifest, provision)
         --           keeps the PHP-facing snapshot current.
+        -- args[6] = ro_index (OPTIONAL) — 0-based schema index of the tier's
+        --           registration_order axis; absent or < 0 = tier has none.
+        -- args[7] = frac_bits (OPTIONAL, default 64) — fractional bits of the
+        --           Q-format the daemon encoded pr with (g_math default Q64.64).
 
         if #keys < 1 then
             return server.error_reply("Missing topology_key")
@@ -447,31 +451,46 @@ server.register_function{
             return server.error_reply("Invalid entity_json: " .. (decode_err or "unknown"))
         end
 
-        -- Auto-inject registration_order for NEW entities (dim 22)
-        -- Uses monotonic counter (ro) on topology metadata - NOT entity_count
-        -- On updates, preserve the original registration_order
+        -- registration_order: a monotonic counter (meta.ro) allocated HERE so it
+        -- is atomic with the write. The daemon tells this primitive WHERE the
+        -- axis lives (args[6], 0-based schema index; absent or < 0 = the tier has
+        -- no such axis) and HOW WIDE the point is (args[7], fractional bits of the
+        -- Q-format the daemon built pr with; default 64). The exact integer is
+        -- kept in m.ro — that is what tie-breaks read. pd/pr at the axis are the
+        -- display projection of a storage-only dimension.
+        local ro_index = tonumber(args[6])
+        local frac_bits = tonumber(args[7]) or 64
+        entity.m = entity.m or {}
         if not is_update then
             local ro = server.call('HINCRBY', topology_key .. ':meta', 'ro', 1)
-            local ro_normalized = math.min(ro / 10000.0, 1.0)
-            local ro_raw = math.floor(ro_normalized * 4294967296)  -- Q32.32: 2^32
-            -- Inject into pr (point_raw: Q32.32 i64) and pd (point_display: float) at index 23 (1-based)
-            if entity.pr then
-                entity.pr[23] = ro_raw
-            end
-            if entity.pd then
-                entity.pd[23] = ro_normalized
+            entity.m.ro = ro
+            if ro_index and ro_index >= 0 then
+                local slot = ro_index + 1
+                local ro_normalized = math.min(ro / 10000.0, 1.0)
+                if entity.pd and #entity.pd >= slot then
+                    entity.pd[slot] = ro_normalized
+                end
+                if entity.pr and #entity.pr >= slot then
+                    entity.pr[slot] = string.format('%.0f', ro_normalized * (2 ^ frac_bits))
+                end
             end
         else
-            -- Preserve existing registration_order from old entity
+            -- Preserve the original registration_order from the stored entity
             local old_json = server.call('HGET', topology_key .. ':entities', entity_id)
             if old_json then
                 local old_entity, _ = safe_json_decode(old_json)
                 if old_entity then
-                    if old_entity.pd and entity.pd then
-                        entity.pd[23] = old_entity.pd[23]
+                    if old_entity.m and old_entity.m.ro then
+                        entity.m.ro = old_entity.m.ro
                     end
-                    if old_entity.pr and entity.pr then
-                        entity.pr[23] = old_entity.pr[23]
+                    if ro_index and ro_index >= 0 then
+                        local slot = ro_index + 1
+                        if old_entity.pd and entity.pd and #entity.pd >= slot and old_entity.pd[slot] ~= nil then
+                            entity.pd[slot] = old_entity.pd[slot]
+                        end
+                        if old_entity.pr and entity.pr and #entity.pr >= slot and old_entity.pr[slot] ~= nil then
+                            entity.pr[slot] = old_entity.pr[slot]
+                        end
                     end
                 end
             end

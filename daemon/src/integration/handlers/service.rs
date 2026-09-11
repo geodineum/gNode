@@ -304,6 +304,7 @@ pub fn handle_register_service(
 
     // STATELESS: register entity into the canonical (C) representation (sync FCALL).
     // args[5] = snapshot_key → the Lua primitive maintains the (B) snapshot.
+    // args[6..7] = where and how wide the registration_order axis is.
     let register_result = redis::cmd("FCALL")
         .arg("GNODE_REGISTER_CAPABILITY_VECTOR").arg(1)
         .arg(&plan.topology_key)
@@ -312,6 +313,8 @@ pub fn handle_register_service(
         .arg(&plan.bucket_key)
         .arg(plan.z_score)
         .arg(topology_snapshot_key())
+        .arg(super::types::registration_order_index(super::types::get_service_dimensions()))
+        .arg(super::types::POINT_FRAC_BITS)
         .query::<String>(conn);
 
     match register_result {
@@ -549,6 +552,8 @@ pub fn handle_register_service_async<'a>(
             .arg(&plan.bucket_key)
             .arg(plan.z_score)
             .arg(topology_snapshot_key())  // args[5]: Lua maintains (B) snapshot
+            .arg(super::types::registration_order_index(super::types::get_service_dimensions()))  // args[6]
+            .arg(super::types::POINT_FRAC_BITS)  // args[7]
             .query_async(conn)
             .await;
 

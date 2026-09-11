@@ -265,6 +265,8 @@ pub fn register_node_geometrically(
         .arg(&bucket_key)
         .arg(z_score.to_string())
         .arg(crate::daemon::GNodeDaemon::topology_snapshot_key())
+        .arg(-1i64)  // args[6]: the constellation tier has no registration_order axis
+        .arg(crate::integration::handlers::types::POINT_FRAC_BITS)  // args[7]
         .query(conn);
 
     match result {
@@ -374,6 +376,27 @@ mod tests {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let schema = load_schema(&root.join("config/constellation_schema.yaml")).unwrap();
         assert_eq!(schema.dimensions.get("aggregate_load").unwrap().index, 16);
+    }
+
+    #[test]
+    fn registration_order_index_follows_each_tier_schema() {
+        // The registration primitive used to write registration_order at a
+        // fixed slot (index 22, the 23-D layout). It now receives the index
+        // from the caller; these pins make a schema move loud instead of a
+        // silent clobber of whatever axis sits at the old slot.
+        use crate::integration::handlers::types::{get_service_dimensions, registration_order_index};
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let service = load_schema(&root.join("config/service_schema.yaml")).unwrap();
+        let tool = load_schema(&root.join("config/tool_schema.yaml")).unwrap();
+        let constellation = load_schema(&root.join("config/constellation_schema.yaml")).unwrap();
+        assert_eq!(service.dimensions.get("registration_order").unwrap().index, 29);
+        assert_eq!(registration_order_index(get_service_dimensions()), 29,
+            "static service map must agree with service_schema.yaml");
+        assert_eq!(tool.dimensions.get("registration_order").unwrap().index, 15);
+        assert!(constellation.dimensions.get("registration_order").is_none(),
+            "constellation tier has no registration_order axis; callers pass -1");
+        assert_eq!(service.dimensions.get("network_zone").unwrap().index, 22,
+            "index 22 is a hashed discovery axis — the slot the old code clobbered");
     }
 
     #[test]

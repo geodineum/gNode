@@ -618,6 +618,8 @@ pub fn handle_topo_register_async<'a>(
             .arg(&bucket_key)
             .arg(z_score)
             .arg(crate::daemon::GNodeDaemon::topology_snapshot_key())  // args[5]: (B) snapshot
+            .arg(-1i64)  // args[6]: custom 3-D topology has no registration_order axis
+            .arg(crate::integration::handlers::types::POINT_FRAC_BITS)  // args[7]
             .query_async(conn)
             .await;
 
@@ -1331,6 +1333,8 @@ pub fn handle_topo_register(
         .arg("GNODE_REGISTER_CAPABILITY_VECTOR").arg(1).arg(&topology_key)
         .arg(&entity_id).arg(&entity_json).arg(&bucket_key).arg(z_score)
         .arg(crate::daemon::GNodeDaemon::topology_snapshot_key())  // args[5]: (B) snapshot
+        .arg(-1i64)  // args[6]: no registration_order axis on this path
+        .arg(crate::integration::handlers::types::POINT_FRAC_BITS)  // args[7]
         .query(conn);
     match result {
         Ok(json_str) => CommandResult::success_json(json_str),

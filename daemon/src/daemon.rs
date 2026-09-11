@@ -667,6 +667,9 @@ fn register_gnode_as_service(
         .arg(&bucket_key)
         .arg(z_score)
         .arg(GNodeDaemon::topology_snapshot_key())  // args[5]: maintain (B) snapshot
+        .arg(crate::integration::handlers::types::registration_order_index(
+            crate::integration::handlers::types::get_service_dimensions()))  // args[6]
+        .arg(crate::integration::handlers::types::POINT_FRAC_BITS)  // args[7]
         .query(&mut conn);
 
     match register_result {

@@ -400,7 +400,7 @@ Stateless topology persistence. Daemon computes Q64.64 bucket keys and z_scores;
 |----------|------|------|---------|-------------|
 | `GNODE_TOPO_CREATE` | site_id | topology_key, definition_json | JSON topology metadata | Create a named topology |
 | `GNODE_ENSURE_TOPOLOGY` | site_id | — | JSON topology info | Ensure default service topology exists |
-| `GNODE_REGISTER_CAPABILITY_VECTOR` | topology_key | entity_id, entity_json, bucket_key, z_score | `{ok, eid, upd}` | Register/update entity (idempotent) |
+| `GNODE_REGISTER_CAPABILITY_VECTOR` | topology_key | entity_id, entity_json, bucket_key, z_score, snapshot_key?, ro_index?, frac_bits? | `{ok, eid, upd}` | Register/update entity (idempotent). Maintains the (B) snapshot when `snapshot_key` is given. Allocates `registration_order` atomically into `m.ro` and, when `ro_index` ≥ 0, mirrors it into `pd`/`pr` at that schema index in the point's Q-format (`frac_bits`, default 64); updates preserve it |
 | `GNODE_DEREGISTER_CAPABILITY_VECTOR` | topology_key | entity_id | `{ok, eid}` | Remove entity and its edges |
 | `GNODE_TOPO_ADD_EDGE` | topology_key | from_id, to_id, edge_json | `{ok, f, t}` | Add directed edge |
 | `GNODE_TOPO_REMOVE_EDGE` | topology_key | from_id, to_id | `{ok}` | Remove directed edge |

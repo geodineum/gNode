@@ -45,6 +45,21 @@ pub const DISCOVERY_DIMENSIONS: usize = 25;
 /// Service tier: total dimensions (discovery + storage-only)
 pub const TOTAL_DIMENSIONS: usize = 30;
 
+/// Fractional bits of the Q-format `pr` is encoded with. g_math's default
+/// table format is Q64.64; the registration primitive needs this to place a
+/// storage-only axis value in the same scale as the rest of the point.
+pub const POINT_FRAC_BITS: u32 = 64;
+
+/// 0-based index of a tier's `registration_order` axis, or -1 when the tier
+/// has none. Passed to GNODE_REGISTER_CAPABILITY_VECTOR so the Lua allocator
+/// writes the counter where the schema says, never at a fixed slot.
+pub fn registration_order_index(dim_map: &HashMap<String, usize>) -> i64 {
+    dim_map
+        .get("registration_order")
+        .map(|&i| i as i64)
+        .unwrap_or(-1)
+}
+
 /// Static 30D capability dimension mapping for service topology (schema v3.0).
 /// Maps capability names to their dimension indices (0-29).
 ///

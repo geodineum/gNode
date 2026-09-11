@@ -146,6 +146,9 @@ pub struct TranslatedService {
     pub entity_json: String,
     pub bucket_key: String,
     pub z_score: i64,
+    /// 0-based index of the tier's `registration_order` axis, -1 if none.
+    /// Carried per service because the registration loop holds no schema.
+    pub ro_index: i64,
 }
 
 // ============================================================================
@@ -367,6 +370,7 @@ pub fn translate_all_services(
             entity_json,
             bucket_key,
             z_score,
+            ro_index: crate::integration::handlers::types::registration_order_index(&dim_map),
         });
     }
 
@@ -418,6 +422,8 @@ pub fn register_services_for_site(
             .arg(&svc.bucket_key)
             .arg(svc.z_score.to_string())
             .arg(crate::daemon::GNodeDaemon::topology_snapshot_key())  // args[5]: (B) snapshot
+            .arg(svc.ro_index)  // args[6]: resolved from this tier's schema at translation time
+            .arg(crate::integration::handlers::types::POINT_FRAC_BITS)  // args[7]
             .query(conn);
 
         match result {
