@@ -146,14 +146,20 @@ apply_service_grants() {
     fi
 
     if [[ "$_use_manifest" == "true" ]]; then
-        # Safe base: own namespace (tagged + legacy alias) + the shared gnode
-        # bus — the floor every service needs to register and be discovered.
-        valkey_admin_cli ACL SETUSER "$ACL_USER" resetkeys \
+        # Safe base: own namespace (tagged + legacy alias), the service's OWN
+        # heartbeat key, and READ on the shared gnode bus. The shared topology is
+        # written by the daemon tier only; a client that could HDEL another
+        # entity or DEL the whole hash was the TOPOLOGY-ACL-SCOPE finding. Reads
+        # of no-writes functions go through FCALL_RO (the rw form is refused on
+        # a read-only pattern by design). clearselectors keeps regrants
+        # idempotent.
+        valkey_admin_cli ACL SETUSER "$ACL_USER" clearselectors resetkeys \
             "~${SITE_ID}:*" \
             "~{${SITE_ID}}:*" \
-            "~{${TOPOLOGY_NS}}:gnode:*" \
+            "~{${TOPOLOGY_NS}}:gnode:heartbeat:*:${SITE_ID}:*" \
+            "%R~{${TOPOLOGY_NS}}:gnode:*" \
             "${_key_grants[@]}" >/dev/null
-        log_success "Keyspace grants set (manifest-driven: ${#_key_grants[@]} declared + safe base)"
+        log_success "Keyspace grants set (manifest-driven: ${#_key_grants[@]} declared + safe base; shared bus read-only)"
     else
         log_error "No manifest declarations — refusing to grant."
         log_error "  This service's manifest declares no consumes:/produces:, and the old"

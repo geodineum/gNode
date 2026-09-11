@@ -408,14 +408,19 @@ EOF
 
         # Set keyspace patterns
         if [[ "$_use_manifest" == "true" ]]; then
-            valkey_admin_cli ACL SETUSER "$ACL_USER" resetkeys "${_key_grants[@]}" >/dev/null
-            log_success "Keyspace patterns set (manifest-driven, ${#_key_grants[@]} grants)"
+            # Own heartbeat key writable, shared gnode bus read-only (daemon tier
+            # writes the topology); clearselectors keeps regrants idempotent.
+            valkey_admin_cli ACL SETUSER "$ACL_USER" clearselectors resetkeys \
+                "~{geodineum}:gnode:heartbeat:*:${SITE_ID}:*" \
+                "%R~{geodineum}:gnode:*" \
+                "${_key_grants[@]}" >/dev/null
+            log_success "Keyspace patterns set (manifest-driven, ${#_key_grants[@]} grants; shared bus read-only)"
         else
             # Legacy hardcoded pattern set. Used when no manifest is registered
             # (existing WordPress sites + first-time registrations during early
             # migration). Covers per-site isolation, global defaults, ecosystem
             # shared, and DTAP environments.
-            valkey_admin_cli ACL SETUSER "$ACL_USER" resetkeys \
+            valkey_admin_cli ACL SETUSER "$ACL_USER" clearselectors resetkeys \
                 "~error:${SITE_ID}:*" \
                 "~cache:${SITE_ID}:*" \
                 "~session:${SITE_ID}:*" \
@@ -435,7 +440,8 @@ EOF
                 "~{production}:gnode:*" \
                 "~{default}:gnode:*" \
                 "~{default}:gcore:*" \
-                "~{geodineum}:gnode:*" \
+                "~{geodineum}:gnode:heartbeat:*:${SITE_ID}:*" \
+                "%R~{geodineum}:gnode:*" \
                 "~gnode:*" \
                 "~gnode:routing:*" \
                 "~topology:*" \
