@@ -550,8 +550,11 @@ fn translate_capabilities(
                     n.as_f64().unwrap_or(0.0)
                 }
                 serde_yaml::Value::String(s) => {
-                    // Look up the human-readable name in the dimension's value map
-                    if let Some(&coord) = dim_def.values.get(s.as_str()) {
+                    // Value names match without regard to case: "SERVICE" is the tier "service"
+                    let coord = dim_def.values.get(s.as_str()).copied().or_else(|| {
+                        dim_def.values.iter().find(|(k, _)| k.eq_ignore_ascii_case(s)).map(|(_, v)| *v)
+                    });
+                    if let Some(coord) = coord {
                         coord
                     } else {
                         warn!(
@@ -582,19 +585,19 @@ fn inject_classification_dims(
     metadata: &Option<ServiceMetadata>,
     schema: &CapabilitySchema,
 ) {
-    // Inject tier coordinate (dimension 17) — default TOOL=0.10
+    // Tier coordinate from metadata.tier, matched without regard to case; undeclared → tool (0.10)
     if !capabilities.contains_key("service_tier") {
-        let tier_value = metadata
-            .as_ref()
-            .and_then(|m| m.tier.as_ref())
-            .and_then(|tier| {
-                schema
-                    .dimensions
-                    .get("service_tier")
-                    .and_then(|d| d.values.get(tier.as_str()).copied())
+        let declared = metadata.as_ref().and_then(|m| m.tier.as_deref());
+        let dim = schema.dimensions.get("service_tier");
+        let resolved = declared.zip(dim).and_then(|(tier, d)| {
+            d.values.get(tier).copied().or_else(|| {
+                d.values.iter().find(|(k, _)| k.eq_ignore_ascii_case(tier)).map(|(_, v)| *v)
             })
-            .unwrap_or(0.10); // Default: TOOL
-        capabilities.insert("service_tier".to_string(), tier_value);
+        });
+        if let (Some(tier), Some(_), None) = (declared, dim, resolved) {
+            warn!("Unknown tier '{}' for dimension 'service_tier'; placing as tool", tier);
+        }
+        capabilities.insert("service_tier".to_string(), resolved.unwrap_or(0.10));
     }
 
     // Inject environment (dimension 18) — default production=1.0
@@ -1485,6 +1488,38 @@ mod affordance_tests {
         }));
         assert_eq!(m["schema_keys"].as_array().unwrap().len(), 1);
         assert_eq!(m["affordances"].as_array().unwrap().len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+
+    fn service_schema() -> CapabilitySchema {
+        load_schema(Path::new("config/service_schema.yaml")).expect("service schema")
+    }
+
+    fn service_tier_of(t: &TranslatedService) -> f64 {
+        let entity: serde_json::Value = serde_json::from_str(&t.entity_json).unwrap();
+        entity["pd"][19].as_f64().expect("pd[19]")
+    }
+
+    /// Profile placement stamps tier "SERVICE"; the schema names it "service". A
+    /// case-sensitive lookup missed and silently placed every site as a tool (0.10).
+    #[test]
+    fn a_profile_entity_is_placed_at_its_declared_tier() {
+        let schema = service_schema();
+        assert_eq!(schema.dimensions["service_tier"].index, 19);
+        let t = derive_profile_entity("site_a", "service", Some("production"), &schema).unwrap();
+        assert!((service_tier_of(&t) - 0.30).abs() < 1e-9, "service_tier = {}", service_tier_of(&t));
+    }
+
+    #[test]
+    fn capability_value_names_match_without_regard_to_case() {
+        let schema = service_schema();
+        let entries = vec![CapabilityEntry { name: "service_tier".into(), value: serde_yaml::Value::String("SERVICE".into()) }];
+        let caps = translate_capabilities(&entries, &schema);
+        assert_eq!(caps.get("service_tier").copied(), Some(0.30));
     }
 }
 
