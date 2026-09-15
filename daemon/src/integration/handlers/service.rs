@@ -56,10 +56,10 @@ pub fn register(
         params_schema: json!({
             "type": "object",
             "properties": {
-                "service_id": {"type": "string", "description": "Unique service identifier"},
+                "id": {"type": "string", "description": "Unique service identifier"},
                 "capabilities": {
                     "type": "object",
-                    "description": "Capability dimension names mapped to values (0.0-1.0)",
+                    "description": "Service-tier axis name → value in [0, 1] (names and codes: GNODE_SCHEMA_GET); axes left out are stored as 0",
                     "additionalProperties": {"type": "number", "minimum": 0.0, "maximum": 1.0}
                 },
                 "metadata": {
@@ -68,7 +68,7 @@ pub fn register(
                     "additionalProperties": {"type": "string"}
                 }
             },
-            "required": ["service_id", "capabilities"]
+            "required": ["id", "capabilities"]
         }),
         returns_schema: json!({
             "type": "object",
@@ -76,10 +76,12 @@ pub fn register(
                 "status": {"type": "string"},
                 "service_id": {"type": "string"},
                 "registered": {"type": "boolean"},
-                "bucket_key": {"type": "string"}
+                "topology_key": {"type": "string"},
+                "bucket_key": {"type": "string"},
+                "z_score": {"type": "integer"}
             }
         }),
-        example: r#"{"cmd":"registerService","params":{"service_id":"my-svc","capabilities":{"compute":0.8,"memory":0.5},"metadata":{"type":"worker"}}}"#,
+        example: r#"{"cmd":"registerService","params":{"id":"my-svc","capabilities":{"protocol":0.5,"service_scope":0.3},"metadata":{"type":"worker"}}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
@@ -115,14 +117,13 @@ pub fn register(
             "type": "object",
             "properties": {
                 "capabilities": {
-                    "type": "object",
-                    "description": "Capability requirements for discovery",
-                    "additionalProperties": {"type": "number"}
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Capability names every match must hold with a value > 0; empty matches all"
                 },
-                "limit": {"type": "integer", "description": "Maximum number of results"},
-                "include_endpoints": {"type": "boolean", "description": "Include endpoint mappings in response"}
-            },
-            "required": ["capabilities"]
+                "endpoint_registry": {"type": "string", "description": "Endpoint registry key; default {site_id}:gnode:endpoints"},
+                "limit": {"type": "integer", "default": 10, "description": "Maximum services, taken after sorting by id; 0 is unlimited"}
+            }
         }),
         returns_schema: json!({
             "type": "object",
@@ -134,13 +135,14 @@ pub fn register(
                         "type": "object",
                         "properties": {
                             "service_id": {"type": "string"},
-                            "endpoints": {"type": "array"}
+                            "endpoints": {"type": "array", "description": "From GNODE_ENDPOINT_LIST (gNode-BROKER); null when unavailable"}
                         }
                     }
-                }
+                },
+                "endpoints_error": {"type": "string", "description": "Present when endpoints could not be listed, with the reason"}
             }
         }),
-        example: r#"{"cmd":"discover_with_endpoints","params":{"capabilities":{"compute":0.7},"limit":5,"include_endpoints":true}}"#,
+        example: r#"{"cmd":"discover_with_endpoints","params":{"capabilities":["protocol","domain_primary"],"limit":5}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
@@ -152,6 +154,7 @@ pub fn register(
 
 /// Parameters for the registerService command
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize, Default))]
 struct RegisterServiceParams {
     id: String,
     capabilities: HashMap<String, f64>,
@@ -161,6 +164,7 @@ struct RegisterServiceParams {
 
 /// Parameters for the deregisterService command
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize, Default))]
 struct DeregisterServiceParams {
     /// The service ID to deregister (can be passed as 'id' or 'service_id')
     #[serde(alias = "id")]
@@ -169,14 +173,15 @@ struct DeregisterServiceParams {
 
 /// Parameters for the discover_with_endpoints command
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize, Default))]
 struct DiscoverWithEndpointsParams {
-    /// Capability names to match (e.g., ["compute", "cache"])
+    /// Capability names every match must hold with a value > 0
     #[serde(default)]
     capabilities: Vec<String>,
     /// Endpoint registry key (default: {site_id}:gnode:endpoints)
     #[serde(default)]
     endpoint_registry: Option<String>,
-    /// Maximum services to return
+    /// Maximum services to return (0 = unlimited)
     #[serde(default = "default_limit")]
     limit: usize,
 }
@@ -253,6 +258,53 @@ fn plan_registration(params: &RegisterServiceParams, site_id: &str) -> Result<Re
         bucket_key,
         z_score,
     })
+}
+
+/// Ids of entities in a GNODE_TOPO_GET_ENTITIES reply (`{ents:{id:{c,...}}}`) that hold
+/// every requested capability name with a value > 0, sorted, then cut to `limit`
+/// (0 = unlimited). Empty `caps` → all entities.
+fn filter_entities_by_capabilities(entities_json: &str, caps: &[String], limit: usize) -> Result<Vec<String>, String> {
+    let v: Value = serde_json::from_str(entities_json).map_err(|e| format!("unreadable topology reply: {}", e))?;
+    let mut out = Vec::new();
+    if let Some(ents) = v.get("ents").and_then(|e| e.as_object()) {
+        for (id, data) in ents {
+            let c = data.get("c").and_then(|x| x.as_object());
+            let has_all = caps.iter().all(|cap|
+                c.and_then(|m| m.get(cap)).and_then(|x| x.as_f64()).map(|val| val > 0.0).unwrap_or(false));
+            if has_all {
+                out.push(id.clone());
+            }
+        }
+    }
+    out.sort();
+    if limit > 0 {
+        out.truncate(limit);
+    }
+    Ok(out)
+}
+
+/// Endpoints from a GNODE_ENDPOINT_LIST reply (gNode-BROKER: `{status, result: {count, endpoints}}`),
+/// or why there are none.
+fn endpoints_from_reply(reply: redis::RedisResult<String>) -> Result<Value, String> {
+    let json_str = reply.map_err(|e| format!("GNODE_ENDPOINT_LIST failed: {}", e))?;
+    let v: Value = serde_json::from_str(&json_str).map_err(|e| format!("unreadable GNODE_ENDPOINT_LIST reply: {}", e))?;
+    if v.get("status").and_then(|s| s.as_str()) != Some("ok") {
+        return Err(v.get("error").and_then(|e| e.as_str()).unwrap_or("GNODE_ENDPOINT_LIST refused").to_string());
+    }
+    Ok(v.get("result").and_then(|r| r.get("endpoints")).cloned().unwrap_or_else(|| json!([])))
+}
+
+fn endpoints_reply(services: Vec<(String, Result<Value, String>)>) -> CommandResult {
+    let endpoints_error = services.iter().find_map(|(_, r)| r.as_ref().err().cloned());
+    let services: Vec<Value> = services
+        .into_iter()
+        .map(|(service_id, r)| json!({ "service_id": service_id, "endpoints": r.unwrap_or(Value::Null) }))
+        .collect();
+    let mut reply = json!({ "count": services.len(), "services": services });
+    if let Some(e) = endpoints_error {
+        reply["endpoints_error"] = json!(e);
+    }
+    CommandResult::success(reply)
 }
 
 // =========================================================================
@@ -418,27 +470,6 @@ pub fn handle_deregister_service(
     }
 }
 
-/// Sync version of handle_discover_with_endpoints
-///
-/// From a GNODE_TOPO_GET_ENTITIES response (`{ents:{id:{c,...}}}`), return ids of
-/// entities that HAVE all requested capability names (present in `c` with value > 0).
-/// Empty `caps` → all entities. `limit` 0 = unlimited.
-fn filter_entities_by_capabilities(entities_json: &str, caps: &[String], limit: usize) -> Vec<String> {
-    let mut out = Vec::new();
-    let v: Value = match serde_json::from_str(entities_json) { Ok(v) => v, Err(_) => return out };
-    let ents = match v.get("ents").and_then(|e| e.as_object()) { Some(e) => e, None => return out };
-    for (id, data) in ents {
-        let c = data.get("c").and_then(|x| x.as_object());
-        let has_all = caps.iter().all(|cap|
-            c.and_then(|m| m.get(cap)).and_then(|x| x.as_f64()).map(|val| val > 0.0).unwrap_or(false));
-        if caps.is_empty() || has_all {
-            out.push(id.clone());
-            if limit > 0 && out.len() >= limit { break; }
-        }
-    }
-    out
-}
-
 /// STATELESS: discover services by capability presence over the (C) entities
 /// (via FCALL GNODE_TOPO_GET_ENTITIES), then enrich each with its endpoints.
 pub fn handle_discover_with_endpoints(
@@ -454,35 +485,27 @@ pub fn handle_discover_with_endpoints(
         Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
     };
 
-    // STATELESS: fetch (C) entities + filter by capability presence (was in-memory)
     let topology_key = GeometricTopology::get_services_topology_key(site_id);
-    let entities_json = match redis::cmd("FCALL")
+    let service_ids = match redis::cmd("FCALL")
         .arg("GNODE_TOPO_GET_ENTITIES").arg(1).arg(&topology_key).arg("*")
         .query::<String>(conn)
+        .map_err(|e| format!("Discovery FCALL failed: {:?}", e))
+        .and_then(|j| filter_entities_by_capabilities(&j, &params.capabilities, params.limit))
     {
-        Ok(j) => j,
-        Err(e) => return CommandResult::error(format!("Discovery FCALL failed: {:?}", e)),
+        Ok(ids) => ids,
+        Err(e) => return CommandResult::error(e),
     };
-    let service_ids = filter_entities_by_capabilities(&entities_json, &params.capabilities, params.limit);
 
-    // Enrich each service with its endpoints via FCALL GNODE_ENDPOINT_LIST
     let endpoint_registry = params.endpoint_registry
         .unwrap_or_else(|| format!("{{{}}}:gnode:endpoints", site_id));
-    let mut results = Vec::new();
-    for service_id in &service_ids {
-        let endpoints_result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_ENDPOINT_LIST").arg(1).arg(&endpoint_registry).arg(service_id)
-            .query(conn);
-        let endpoints = match endpoints_result {
-            Ok(json_str) => serde_json::from_str::<serde_json::Value>(&json_str).ok(),
-            Err(_) => None,
-        };
-        results.push(json!({
-            "service_id": service_id,
-            "endpoints": endpoints.unwrap_or(serde_json::Value::Null)
-        }));
+    let mut services = Vec::with_capacity(service_ids.len());
+    for service_id in service_ids {
+        let reply = redis::cmd("FCALL")
+            .arg("GNODE_ENDPOINT_LIST").arg(1).arg(&endpoint_registry).arg(&service_id)
+            .query::<String>(conn);
+        services.push((service_id, endpoints_from_reply(reply)));
     }
-    CommandResult::success(json!({ "services": results, "count": results.len() }))
+    endpoints_reply(services)
 }
 
 // =========================================================================
@@ -683,7 +706,7 @@ pub fn handle_deregister_service_async<'a>(
 }
 
 /// Async handler for discover_with_endpoints command
-/// Combines geometric service discovery with endpoint listing in a single call
+/// Combines capability-presence discovery with endpoint listing in a single call
 pub fn handle_discover_with_endpoints_async<'a>(
     command: &'a Command,
     conn: &'a mut AsyncConnection,
@@ -696,64 +719,73 @@ pub fn handle_discover_with_endpoints_async<'a>(
             debug!("Handling discover_with_endpoints command: {}", command.id);
         }
 
-        // Parse parameters
         let params: DiscoverWithEndpointsParams = match serde_json::from_value(command.parameters.clone()) {
             Ok(p) => p,
             Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
         };
 
-        // STATELESS: fetch (C) entities + filter by capability presence (was in-memory)
         let topology_key = GeometricTopology::get_services_topology_key(site_id);
-        let entities_json: redis::RedisResult<String> = redis::cmd("FCALL")
+        let entities: redis::RedisResult<String> = redis::cmd("FCALL")
             .arg("GNODE_TOPO_GET_ENTITIES").arg(1).arg(&topology_key).arg("*")
             .query_async(conn)
             .await;
-        let service_ids = match entities_json {
-            Ok(j) => filter_entities_by_capabilities(&j, &params.capabilities, params.limit),
-            Err(e) => return CommandResult::error(format!("Discovery FCALL failed: {:?}", e)),
+        let service_ids = match entities
+            .map_err(|e| format!("Discovery FCALL failed: {:?}", e))
+            .and_then(|j| filter_entities_by_capabilities(&j, &params.capabilities, params.limit))
+        {
+            Ok(ids) => ids,
+            Err(e) => return CommandResult::error(e),
         };
 
-        // Step 2: For each service, get its endpoints
         let endpoint_registry = params.endpoint_registry
             .unwrap_or_else(|| format!("{{{}}}:gnode:endpoints", site_id));
-
-        let mut results = Vec::new();
-
-        for service_id in &service_ids {
-            // Call GNODE_ENDPOINT_LIST for this service
-            let endpoint_result: redis::RedisResult<String> = redis::cmd("FCALL")
-                .arg("GNODE_ENDPOINT_LIST")
-                .arg(1)
-                .arg(&endpoint_registry)
-                .arg(service_id)
+        let mut services = Vec::with_capacity(service_ids.len());
+        for service_id in service_ids {
+            let reply: redis::RedisResult<String> = redis::cmd("FCALL")
+                .arg("GNODE_ENDPOINT_LIST").arg(1).arg(&endpoint_registry).arg(&service_id)
                 .query_async(conn)
                 .await;
-
-            let endpoints = match endpoint_result {
-                Ok(json_str) => {
-                    match serde_json::from_str::<Value>(&json_str) {
-                        Ok(val) => {
-                            // Extract endpoints from response
-                            val.get("result")
-                                .and_then(|r| r.get("endpoints"))
-                                .cloned()
-                                .unwrap_or(json!([]))
-                        }
-                        Err(_) => json!([]),
-                    }
-                }
-                Err(_) => json!([]),
-            };
-
-            results.push(json!({
-                "service_id": service_id,
-                "endpoints": endpoints
-            }));
+            services.push((service_id, endpoints_from_reply(reply)));
         }
-
-        CommandResult::success(json!({
-            "count": results.len(),
-            "services": results
-        }))
+        endpoints_reply(services)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::types::assert_descriptor_fields;
+
+    #[test]
+    fn descriptors_name_exactly_the_fields_the_parsers_read() {
+        let (mut handlers, mut async_handlers, mut descriptors) = (HashMap::new(), HashMap::new(), Vec::new());
+        register(&mut handlers, &mut async_handlers, &mut descriptors);
+        assert_descriptor_fields::<RegisterServiceParams>(&descriptors, "registerService", true);
+        assert_descriptor_fields::<DeregisterServiceParams>(&descriptors, "deregisterService", true);
+        assert_descriptor_fields::<DiscoverWithEndpointsParams>(&descriptors, "discover_with_endpoints", true);
+    }
+
+    #[test]
+    fn capability_matches_are_sorted_before_the_limit() {
+        let reply = json!({"ents": {
+            "c": {"c": {"protocol": 0.1}},
+            "a": {"c": {"protocol": 0.1}},
+            "b": {"c": {"protocol": 0.0}}
+        }}).to_string();
+        let caps = vec!["protocol".to_string()];
+        assert_eq!(filter_entities_by_capabilities(&reply, &caps, 1).unwrap(), vec!["a"]);
+        assert_eq!(filter_entities_by_capabilities(&reply, &caps, 0).unwrap(), vec!["a", "c"]);
+    }
+
+    #[test]
+    fn endpoint_replies_unwrap_the_broker_envelope_and_name_failures() {
+        let listed = Ok(json!({"status": "ok", "result": {"count": 1, "endpoints": [{"path": "/x"}]}}).to_string());
+        assert_eq!(endpoints_from_reply(listed).unwrap()[0]["path"], "/x");
+        let refused = Ok(json!({"status": "error", "error": "no registry"}).to_string());
+        assert_eq!(endpoints_from_reply(refused).unwrap_err(), "no registry");
+
+        let reply = endpoints_reply(vec![("a".into(), Err("no BROKER".into()))]).result.unwrap();
+        assert_eq!(reply["endpoints_error"], "no BROKER");
+        assert!(reply["services"][0]["endpoints"].is_null());
+    }
 }

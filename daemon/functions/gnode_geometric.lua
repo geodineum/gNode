@@ -9,56 +9,52 @@
 -- cross-node results.
 --
 -- Geometric operations are handled via unified stream commands:
---   - geometric_discover: GNODE_TOPO_QUERY_VOXEL + Rust distance ranking
+--   - geometric_discover: GNODE_TOPO_GET_ENTITIES / GNODE_TOPO_QUERY_VOXEL + Rust ranking
 --   - geometric_distance: Rust Q64.64 euclidean distance
---   - registerService: GNODE_REGISTER_CAPABILITY_VECTOR with pre-computed bucket keys
+--   - register_service: GNODE_REGISTER_CAPABILITY_VECTOR with pre-computed bucket keys
 --
--- This library provides dimension metadata only. The dim count returned by
--- GNODE_GEOMETRIC_GET_DIMENSIONS comes from the active service-tier schema
--- (default 30D = 25 discovery + 5 storage; see daemon/config/service_schema.yaml).
--- Other tiers (tool/constellation/galaxy) and custom topologies (created via
--- topo_create / gNode-TOPO) load their dim metadata from their own schemas;
--- this library does not speak for them.
+-- This library only names the dimensions, and reads them from the schema the
+-- daemon published at startup ({ns}:gnode:schema:<tier>) instead of carrying
+-- a copy of its own.
 --
-
--- Helper: safe JSON encode
-local function safe_json_encode(v)
-    local ok, result = pcall(cjson.encode, v)
-    if ok then return result end
-    return nil
-end
 
 --
 -- GNODE_GEOMETRIC_GET_DIMENSIONS
--- Get capability dimensions from topology metadata
--- NOTE: Returns configured dimensions from the stateless topology system
+-- Dimension names of a published tier schema, in index order.
+-- Usage: FCALL_RO GNODE_GEOMETRIC_GET_DIMENSIONS 0 [topology_ns] [tier]
 --
 server.register_function{
     function_name = 'GNODE_GEOMETRIC_GET_DIMENSIONS',
     callback = function(keys, args)
-        -- Return the standard service-tier capability space (see gnode_topology.lua DIMENSIONS)
-        -- This is now statically configured, not read from blob
-        -- Dims 0-18: discovery (used for bucket key hashing)
-        -- Dims 19-22: storage-only (visual topology + temporal)
-        local dimensions = {
-            "protocol", "native_format", "api_version", "contract_stability",
-            "clearance_required", "auth_method", "data_sensitivity",
-            "service_scope",
-            "domain_primary", "domain_secondary", "specialization",
-            "throughput_tier", "latency_class", "reliability_tier",
-            "pipeline_stage", "execution_priority",
-            "current_load",
-            "service_tier", "environment",
-            "user_x", "user_y", "user_z",
-            "registration_order"
-        }
+        local ns = args[1]
+        if not ns or ns == '' then ns = 'geodineum' end
+        local tier = args[2]
+        if not tier or tier == '' then tier = 'service' end
 
-        local result = safe_json_encode(dimensions)
-        if not result then
-            return server.error_reply("Failed to encode dimensions")
+        local key = '{' .. ns .. '}:gnode:schema:' .. tier
+        local index_json = server.call('HGET', key, 'dimension_index')
+        if not index_json then
+            return server.error_reply("No schema published at " .. key)
         end
-        return result
+
+        local ok, index = pcall(cjson.decode, index_json)
+        if not ok or type(index) ~= 'table' then
+            return server.error_reply("Unreadable dimension_index at " .. key)
+        end
+
+        local names, count = {}, 0
+        for name, position in pairs(index) do
+            names[position + 1] = name
+            count = count + 1
+        end
+        for position = 1, count do
+            if not names[position] then
+                return server.error_reply("dimension_index at " .. key .. " has no dimension at index " .. (position - 1))
+            end
+        end
+
+        return cjson.encode(names)
     end,
     flags = {'no-writes'},
-    description = 'Gets capability dimensions (23D stateless topology)'
+    description = 'Dimension names of the published tier schema, in index order'
 }

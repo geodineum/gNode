@@ -75,6 +75,16 @@ pub fn registration_order_index(dim_map: &HashMap<String, usize>) -> i64 {
 ///   Layer 9 (22-24): Network Context - network_zone, data_persistence, update_channel
 ///   Layer 10 (25-27): Visual Topology - user_x, user_y, user_z (storage-only)
 ///   Layer 11 (28-29): Metadata - deployment_model, registration_order (storage-only)
+/// Accepted alternative names for service-tier axes: (alias, canonical axis).
+pub const SERVICE_DIMENSION_ALIASES: [(&str, &str); 6] = [
+    ("load", "current_load"),
+    ("health", "health_status"),
+    ("lifecycle", "lifecycle_state"),
+    ("tier", "service_tier"),
+    ("env", "environment"),
+    ("language", "implementation_language"),
+];
+
 pub static SERVICE_DIMENSIONS: Lazy<HashMap<String, usize>> = Lazy::new(|| {
     let mut dims = HashMap::new();
 
@@ -131,12 +141,10 @@ pub static SERVICE_DIMENSIONS: Lazy<HashMap<String, usize>> = Lazy::new(|| {
     dims.insert("registration_order".to_string(), 29);
 
     // Common aliases
-    dims.insert("load".to_string(), 16);
-    dims.insert("health".to_string(), 17);
-    dims.insert("lifecycle".to_string(), 18);
-    dims.insert("tier".to_string(), 19);
-    dims.insert("env".to_string(), 20);
-    dims.insert("language".to_string(), 21);
+    for (alias, canonical) in SERVICE_DIMENSION_ALIASES {
+        let index = dims[canonical];
+        dims.insert(alias.to_string(), index);
+    }
 
     dims
 });
@@ -327,6 +335,43 @@ pub fn parse_parameters<T: for<'de> Deserialize<'de>>(command: &Command) -> Resu
 /// Default group name for serde defaults
 pub fn default_group() -> String {
     "default".to_string()
+}
+
+/// Asserts a descriptor's params name only fields its parser reads (all of them when
+/// `exact`), its `required` list is among them, and its example parses. `P` derives
+/// `Serialize + Default` under `cfg(test)` so its field names can be read.
+#[cfg(test)]
+pub fn assert_descriptor_fields<P>(descriptors: &[CommandDescriptor], command: &str, exact: bool)
+where
+    P: Serialize + Default + for<'de> Deserialize<'de>,
+{
+    let d = descriptors.iter().find(|d| d.name == command)
+        .unwrap_or_else(|| panic!("no descriptor for {command}"));
+    let keys = |v: &Value| -> Vec<String> {
+        let mut k: Vec<String> = v.as_object().map(|o| o.keys().cloned().collect()).unwrap_or_default();
+        k.sort();
+        k
+    };
+    let declared = keys(&d.params_schema["properties"]);
+    let parsed = keys(&serde_json::to_value(P::default()).unwrap());
+    if exact {
+        assert_eq!(declared, parsed, "{command}: descriptor properties vs parser fields");
+    } else {
+        let unknown: Vec<&String> = declared.iter().filter(|f| !parsed.contains(f)).collect();
+        assert!(unknown.is_empty(), "{command}: descriptor names fields the parser never reads: {unknown:?}");
+    }
+    for required in d.params_schema["required"].as_array().into_iter().flatten() {
+        let name = required.as_str().unwrap_or_default();
+        assert!(declared.iter().any(|f| f == name), "{command}: required '{name}' is not a declared property");
+    }
+    let example: Value = serde_json::from_str(d.example)
+        .unwrap_or_else(|e| panic!("{command}: example is not JSON: {e}"));
+    assert_eq!(example["cmd"], command, "{command}: example names another command");
+    for field in keys(&example["params"]) {
+        assert!(declared.contains(&field), "{command}: example uses undeclared '{field}'");
+    }
+    serde_json::from_value::<P>(example["params"].clone())
+        .unwrap_or_else(|e| panic!("{command}: example params do not parse: {e}"));
 }
 
 /// Get current memory usage in KB (rough estimate)

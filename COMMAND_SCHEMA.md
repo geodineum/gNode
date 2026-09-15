@@ -193,12 +193,12 @@ Source: `daemon/src/integration/handlers/geometric.rs`
 
 | Command | Aliases | Parameters | Returns | Description |
 |---------|---------|------------|---------|-------------|
-| `geometric_discover` | `discover`, `DISCOVER`, `geo_disc` | `{capabilities: {dim: value}, limit?: int, threshold?: float}` | Array of `{service_id, distance, capabilities, metadata}` | O(1) spatial-hash service discovery |
-| `geometric_discover_range` | `GEOMETRIC_DISCOVER_RANGE` | `{capabilities: {dim: {min, max}}, limit?: int}` | Array of matching services | Range-based capability discovery |
-| `geometric_store_topology` | `GEOMETRIC_STORE_TOPOLOGY` | `{topology: object}` | `{ok: true}` | Store/update topology data |
-| `geometric_load_sequence` | `GEOMETRIC_LOAD_SEQUENCE` | `{points: array}` | `{loaded: int}` | Load a sequence of capability points |
-| `geometric_distance` | `GEOMETRIC_DISTANCE` | `{point_a: {dim: value}, point_b: {dim: value}}` | `{distance: float}` | Q64.64 Euclidean distance between two points |
-| `geometric_dimensions` | `GEOMETRIC_DIMENSIONS` | `{}` | Array of dimension names for the active service-tier schema (default 30D) | Get configured capability dimensions |
+| `geometric_discover` | `discover`, `DISCOVER`, `geo_disc` | `{capabilities: {axis: value}, limit?: int = 10, threshold?: float = 0}` — discovery axes only, values in [0, 1] | `{total_matches, results: [{service_id, distance}], topology_key, lookup}` | Ranks the site's services by Q64.64 distance over the named axes only; unnamed axes do not count. Nearest first, equal distances by `service_id`; `threshold` > 0 drops farther services. `lookup` is `voxel` only when every discovery axis is named and the query's own cell is occupied — the cell's members, not a global nearest set — otherwise `scan`. Unknown, storage-only or out-of-range axes are errors |
+| `geometric_discover_range` | `GEOMETRIC_DISCOVER_RANGE` | `{requirements: {"<axis index>": {eq\|neq\|gt\|gte\|lt\|lte: float}}}` | `{services: [service_id], count}` | Services whose stored point satisfies every operator on every named axis; ids sorted. Non-index keys and unknown operators are errors |
+| `geometric_store_topology` | `GEOMETRIC_STORE_TOPOLOGY` | `{data?: any}` | `{stored: false, deprecated: true, note}` | Retired no-op; register services individually |
+| `geometric_load_sequence` | `GEOMETRIC_LOAD_SEQUENCE` | `{group?: string}` (accepted, not used) | `[service_id]` in Z order | The site topology's load sequence |
+| `geometric_distance` | `GEOMETRIC_DISTANCE` | `{point1: [float], point2: [float]}` | `{distance, dimensions}` | Q64.64 Euclidean distance between two points of equal width |
+| `geometric_dimensions` | `GEOMETRIC_DIMENSIONS` | `{}` | `{tier, total_dimensions, discovery_dimensions, dimension_index: {axis: index}, aliases: {alias: axis}}` | The service-tier axes discovery matches against, and the alternative names it accepts for them; naming an axis twice in one query is an error |
 
 ---
 
@@ -206,21 +206,24 @@ Source: `daemon/src/integration/handlers/geometric.rs`
 
 Source: `daemon/src/integration/handlers/topology_unified.rs`
 
+3-D (x, y, z) topologies. Both lanes build the same Lua call; replies are that
+function's JSON. A 3-D topology never writes the shared service snapshot.
+
 | Command | Aliases | Parameters | Returns | Description |
 |---------|---------|------------|---------|-------------|
-| `topo_create` | `TOPO_CREATE` | `{name: string, constraint_type?: "none"\|"z_monotonic"\|"bidirectional", dimensions?: int, axis_semantics?: object}` | Topology metadata | Create a named topology |
-| `topo_register` | `TOPO_REGISTER` | `{topology: string, entity_id: string, x: float, y: float, z: float, metadata?: object}` | `{ok, eid, upd}` | Register/update an entity with coordinates |
-| `topo_deregister` | `TOPO_DEREGISTER` | `{topology: string, entity_id: string}` | `{ok, eid}` | Remove an entity and its edges |
-| `topo_add_edge` | `TOPO_ADD_EDGE` | `{topology: string, from: string, to: string, metadata?: object}` | `{ok, f, t}` | Add a directed edge (Z-monotonic validated) |
-| `topo_discover` | `TOPO_DISCOVER` | `{topology: string, requirements: object, limit?: int}` | Array of matching entities | Discover entities by requirements |
-| `topo_z_order` | `TOPO_Z_ORDER` | `{topology: string, limit?: int, offset?: int, descending?: bool}` | `{eids, cnt}` | Get entities sorted by Z (topological order) |
-| `topo_z_range` | `TOPO_Z_RANGE` | `{topology: string, min_z?: float, max_z?: float, limit?: int}` | Array of entities in Z range | Query entities within a Z-score range |
-| `topo_chain` | `TOPO_CHAIN` | `{topology: string, start: string, direction: "outgoing"\|"incoming", max_depth?: int}` | `{ch, bd, md}` | Traverse topology from a starting entity |
-| `topo_stats` | `TOPO_STATS` | `{topology: string}` | `{entity_count, edge_count, ...}` | Topology statistics |
-| `topo_list` | `TOPO_LIST` | `{filter_type?: string}` | Array of topology metadata | List all topologies for current site |
-| `topo_delete` | `TOPO_DELETE` | `{topology: string, confirm: true}` | `{ok, deleted_keys}` | Delete a topology (requires confirm flag) |
-| `topo_get_entity` | `TOPO_GET_ENTITY` | `{topology: string, entity_id: string}` | `{id, x, y, z, bk, zs, ra, m}` | Get a single entity |
-| `topo_validate_edge` | `TOPO_VALIDATE_EDGE` | `{topology: string, from: string, to: string}` | `{valid: bool, reason}` | Check if an edge would satisfy constraints |
+| `topo_create` | `TOPO_CREATE` | `{name: string, topology_key?: string, constraint_type?: "none"\|"z_monotonic"\|"bidirectional"\|"custom", topology_type?: string, description?: string, axis_semantics?: object}` | `GNODE_TOPO_CREATE` reply | Create a named topology; key defaults to `{site_id}:<name>` |
+| `topo_register` | `TOPO_REGISTER` | `{topology_key: string, entity_id: string, x?: float = 0.5, y?: float = 0.5, z?: float = 0.5, metadata?: object, edges_to?: [string], edge_metadata?: object}` | `{ok, eid, bk, zs, upd}`, plus `edges: {added, skipped: [{to, reason}]}` when `edges_to` is given | Register or move an entity; links to `edges_to` targets that satisfy Z-monotonicity |
+| `topo_deregister` | `TOPO_DEREGISTER` | `{topology_key: string, entity_id: string}` | `{ok, eid}` | Remove an entity and its edges |
+| `topo_add_edge` | `TOPO_ADD_EDGE` | `{topology_key: string, from_id: string, to_id: string, edge_metadata?: object}` | `{ok, f, t}` | Add a directed edge between two existing entities, stamped with their Z delta |
+| `topo_discover` | `TOPO_DISCOVER` | `{topology_key: string, x?: float, y?: float, z?: float, bucket_key?: string, include_data?: bool}` | `{bk, cnt, eids[, ents]}` | Entities in the voxel cell at (x, y, z) or at `bucket_key` |
+| `topo_z_order` | `TOPO_Z_ORDER` | `{topology_key: string, limit?: int, offset?: int, descending?: bool}` | `{ord, off, cnt, eids}` | Entity ids sorted by Z (topological order) |
+| `topo_z_range` | `TOPO_Z_RANGE` | `{topology_key: string, z_min?: float, z_max?: float, include_data?: bool, limit?: int}` | `{zr, cnt, eids[, ents]}` | Entities whose Z lies in the range; an omitted bound is open |
+| `topo_chain` | `TOPO_CHAIN` | `{topology_key: string, entity_id: string, direction?: "outgoing"\|"incoming", max_depth?: int = 100}` | `{ch, bd, md}` | Traverse the edge graph from a starting entity |
+| `topo_stats` | `TOPO_STATS` | `{topology_key: string}` | `GNODE_TOPO_STATS` reply | Topology statistics |
+| `topo_list` | `TOPO_LIST` | `{topology_type?: string}` | `GNODE_TOPO_LIST` reply | List the site's topologies |
+| `topo_delete` | `TOPO_DELETE` | `{topology_key: string, confirm: "CONFIRM"}` | `{ok, deleted_keys}` | Delete a topology; refused without `confirm: "CONFIRM"` on either lane |
+| `topo_get_entity` | `TOPO_GET_ENTITY` | `{topology_key: string, entity_id: string}` | `GNODE_TOPO_GET_ENTITY` reply | A single entity with its stored data and edges |
+| `topo_validate_edge` | `TOPO_VALIDATE_EDGE` | `{topology_key: string, from_id: string, to_id: string}` | `{valid, reason, from_z, to_z, z_delta}` | Check an edge against Z-monotonicity without creating it |
 
 ---
 
@@ -230,9 +233,9 @@ Source: `daemon/src/integration/handlers/service.rs`
 
 | Command | Aliases | Parameters | Returns | Description |
 |---------|---------|------------|---------|-------------|
-| `register_service` | `registerService`, `REGISTER_SERVICE` | `{id: string, capabilities: {dim: value}, metadata?: {host, port, ...}}` | `{service_id, registered: true}` | Register a service with capability vector |
-| `deregister_service` | `deregisterService`, `DEREGISTER_SERVICE` | `{id: string}` | `{service_id, deregistered: true}` | Remove a service registration |
-| `discover_with_endpoints` | `DISCOVER_WITH_ENDPOINTS`, `service_endpoints` | `{capabilities: [string], endpoint_registry?: string, limit?: int}` | Array of services with endpoint metadata | Discover services enriched with endpoint info |
+| `register_service` | `registerService`, `REGISTER_SERVICE` | `{id: string, capabilities: {axis: value}, metadata?: {host, port, ...}}` | `{status, service_id, registered: true, topology_key, bucket_key, z_score}` | Register a service with capability vector; axes left out are stored as 0 |
+| `deregister_service` | `deregisterService`, `DEREGISTER_SERVICE` | `{service_id: string}` (alias `id`) | `{status: "deregistered"\|"not_found", service_id}` | Remove a service registration |
+| `discover_with_endpoints` | `DISCOVER_WITH_ENDPOINTS`, `service_endpoints` | `{capabilities?: [string], endpoint_registry?: string, limit?: int = 10}` | `{count, services: [{service_id, endpoints}], endpoints_error?}` | Services holding every named capability with a value > 0, ids sorted before `limit` (0 = unlimited), each with its endpoints from `GNODE_ENDPOINT_LIST` (gNode-BROKER); `endpoints_error` gives the reason when endpoints could not be listed |
 
 ---
 
@@ -253,10 +256,18 @@ Source: `daemon/src/integration/handlers/topology_custom.rs`
 
 | Command | Aliases | Parameters | Returns | Description |
 |---------|---------|------------|---------|-------------|
-| `custom_topology_discover` | `CUSTOM_TOPOLOGY_DISCOVER` | `{topology: string, requirements: object, limit?: int}` | Array of matching entities | Discover in a custom topology |
-| `custom_topology_distance` | `CUSTOM_TOPOLOGY_DISTANCE` | `{topology: string, entity_a: string, entity_b: string}` | `{distance: float}` | Distance between entities in custom space |
-| `custom_topology_knn` | `CUSTOM_TOPOLOGY_KNN` | `{topology: string, entity_id: string, k: int}` | Array of k nearest neighbors | K-nearest-neighbors search |
-| `custom_topology_similarity` | `CUSTOM_TOPOLOGY_SIMILARITY` | `{topology: string, entity_id: string, threshold?: float}` | Array of similar entities | Similarity search above threshold |
+A custom topology is one JSON document its owner writes with `SET <topology_key>`
+(typically in its own namespace); these commands read it with `GET` and no daemon
+command writes it. Format:
+`{dimensions: int, capability_dimensions: {name: index}, query_types?: {name: "equality"|"minimum"|"maximum"|"range"|"informational"}, values?: {name: {value_name: float}}, services: {id: {id, point: [float], metadata?}}, metadata?, schema_version?}`.
+It is unrelated to the 3-D `topo_*` model.
+
+| Command | Aliases | Parameters | Returns | Description |
+|---------|---------|------------|---------|-------------|
+| `custom_topology_discover` | `CUSTOM_TOPOLOGY_DISCOVER` | `{topology_key: string, requirements: {name: value \| {min} \| {max} \| {min, max}}, max_results?: int = 10, include_metadata?: bool = true}` | `{total_matches, results: [{id, score, distance, point, metadata?}], precision, cluster_safe}` | Filters, then ranks. A bare value is exact within 0.001 (also on a range axis), `{min, max}` is closed, one bound is one-sided; values may be names from `values`. Score adds the value on minimum axes and 1 − value on maximum axes; order is score, then distance from the origin, then id. Unknown dimensions or values are errors |
+| `custom_topology_distance` | `CUSTOM_TOPOLOGY_DISTANCE` | `{topology_key?: string, point1: [float], point2: [float]}` | `{distance, dimensions, precision, cluster_safe}` | Q64.64 distance between two points; reads no stored data |
+| `custom_topology_knn` | `CUSTOM_TOPOLOGY_KNN` | `{topology_key: string, query_point: [float], k?: int = 5}` | `{k, results: [{id, score, distance, point, metadata}], precision, cluster_safe}` | Nearest first, equal distances by id; the query must have the document's dimension count |
+| `custom_topology_similarity` | `CUSTOM_TOPOLOGY_SIMILARITY` | `{topology_key: string, entity_id_1: string, entity_id_2: string}` | `{entity_id_1, entity_id_2, distance, similarity, precision, cluster_safe}` | similarity = 1 / (1 + distance) |
 
 ---
 
@@ -388,7 +399,7 @@ All functions use `FCALL <function_name> <numkeys> [keys...] [args...]`. The `se
 
 | Function | Keys | Args | Returns | Description |
 |----------|------|------|---------|-------------|
-| `GNODE_GEOMETRIC_GET_DIMENSIONS` | — | — | JSON array of dimension names (active service-tier schema, default 30) | Returns the configured capability dimension names. The count is whatever the loaded tier schema declares; service tier is 30, tool is 16, constellation/galaxy is 20. Custom topologies have their own dim metadata. |
+| `GNODE_GEOMETRIC_GET_DIMENSIONS` | — | topology_ns? (default `geodineum`), tier? (default `service`) | JSON array of dimension names in index order | Reads `dimension_index` from the schema the daemon published at `{ns}:gnode:schema:<tier>`; errors when none is published. Custom topologies carry their own dimension map |
 
 ---
 
@@ -405,9 +416,9 @@ Stateless topology persistence. Daemon computes Q64.64 bucket keys and z_scores;
 | `GNODE_TOPO_ADD_EDGE` | topology_key | from_id, to_id, edge_json | `{ok, f, t}` | Add directed edge |
 | `GNODE_TOPO_REMOVE_EDGE` | topology_key | from_id, to_id | `{ok}` | Remove directed edge |
 | `GNODE_TOPO_QUERY_VOXEL` | topology_key | bucket_key, include_data | `{eids}` or `{ents}` | O(1) voxel bucket lookup |
-| `GNODE_TOPO_QUERY_Z_RANGE` | topology_key | min_z, max_z, include_data, limit | `{eids}` or `{ents}` | Entities within Z-score range |
+| `GNODE_TOPO_QUERY_Z_RANGE` | topology_key | min_score, max_score (Z scores or `-inf`/`+inf`), include_data, limit | `{zr, cnt, eids}`, plus `ents` with include_data | Entities within Z-score range |
 | `GNODE_TOPO_Z_ORDER` | topology_key | limit, offset, descending | `{eids, cnt}` | Entities sorted by Z (topological order) |
-| `GNODE_TOPO_GET_ENTITIES` | topology_key | entity_ids_json, include_edges | `{ents}` | Get multiple entities by ID array |
+| `GNODE_TOPO_GET_ENTITIES` | topology_key | entity_ids_json or `"*"`, include_edges? | `{req, fnd, mis?, ents}` | Entities by ID array, or every entity of the topology with `"*"` |
 | `GNODE_TOPO_GET_ENTITY` | topology_key | entity_id | `{id, x, y, z, bk, zs, ra, m}` | Get single entity |
 | `GNODE_TOPO_GET_EDGE` | topology_key | from_id, to_id | `{f, t, zd, m}` | Get specific edge |
 | `GNODE_TOPO_GET_EDGES` | topology_key | entity_id, direction | `{out, in}` | Get all edges for entity |

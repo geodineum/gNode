@@ -3,7 +3,9 @@
 // Handles: topo_create, topo_register, topo_deregister, topo_add_edge,
 //          topo_discover, topo_z_order, topo_z_range, topo_chain,
 //          topo_stats, topo_list, topo_delete, topo_get_entity, topo_validate_edge
-// These provide unified topology CRUD and query operations via ValKey functions.
+// Each command builds its Lua calls once (`plan_*`); the sync lane (Ordered commands,
+// batches, pending) and the async lane run the same calls. A 3-D topology never
+// writes the shared service snapshot.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,11 +16,11 @@ use redis::Connection;
 use redis::aio::MultiplexedConnection as AsyncConnection;
 use serde::Deserialize;
 use log::debug;
-use serde_json::json;
+use serde_json::{json, Value};
 use crate::daemon::Command;
 use crate::GeometricTopology;
 
-use super::types::{CommandResult, CommandDescriptor, CommandHandlerFn, AsyncCommandHandlerFn, Lane};
+use super::types::{CommandResult, CommandDescriptor, CommandHandlerFn, AsyncCommandHandlerFn, Lane, POINT_FRAC_BITS};
 
 /// Register all unified topology command handlers
 pub fn register(
@@ -82,29 +84,26 @@ pub fn register(
     async_handlers.insert("topo_validate_edge".to_string(), handle_topo_validate_edge_async as AsyncCommandHandlerFn);
     async_handlers.insert("TOPO_VALIDATE_EDGE".to_string(), handle_topo_validate_edge_async as AsyncCommandHandlerFn);
 
-    // Command descriptors (canonical lowercase only)
+    // Command descriptors (canonical lowercase only). Replies are the named Lua
+    // function's JSON, passed through; its fields are listed in COMMAND_SCHEMA.md.
     descriptors.push(CommandDescriptor {
         name: "topo_create",
         category: "topology",
-        description: "Create a new topology with specified constraint type",
+        description: "Create a named 3-D (x, y, z) topology with an edge constraint",
         params_schema: json!({
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "Topology name"},
-                "constraint_type": {"type": "string", "enum": ["none", "z_monotonic", "bidirectional"], "default": "none", "description": "Edge constraint type"},
-                "dimensions": {"type": "integer", "minimum": 1, "description": "Number of dimensions in this custom topology. No default — declare your topology's dim count explicitly. For the built-in tiers read the published schema (FCALL_RO GNODE_SCHEMA_GET <tier>) rather than a number quoted here. Custom topologies can use any count >= 1."},
-                "axis_semantics": {"type": "object", "description": "Optional axis labels for x, y, z"}
+                "topology_key": {"type": "string", "description": "Explicit key; default {site_id}:<name>"},
+                "constraint_type": {"type": "string", "enum": ["none", "z_monotonic", "bidirectional", "custom"], "default": "none", "description": "Edge constraint type"},
+                "topology_type": {"type": "string", "default": "custom", "description": "Type label topo_list can filter on"},
+                "description": {"type": "string", "description": "Optional description"},
+                "axis_semantics": {"type": "object", "description": "Optional labels for x, y, z"}
             },
             "required": ["name"]
         }),
-        returns_schema: json!({
-            "type": "object",
-            "properties": {
-                "ok": {"type": "boolean"},
-                "topology_key": {"type": "string", "description": "Created topology key"}
-            }
-        }),
-        example: r#"{"cmd":"topo_create","params":{"name":"services","constraint_type":"z_monotonic","dimensions":30}}"#,
+        returns_schema: lua_reply("GNODE_TOPO_CREATE"),
+        example: r#"{"cmd":"topo_create","params":{"name":"pipeline","constraint_type":"z_monotonic"}}"#,
         async_capable: true,
         // Ordered: subsequent topo_register and topo_add_edge calls reference
         // this topology by name. If the create hasn't finished, those fail
@@ -115,28 +114,23 @@ pub fn register(
     descriptors.push(CommandDescriptor {
         name: "topo_register",
         category: "topology",
-        description: "Register an entity in a topology with Q64.64 bucket key computation",
+        description: "Register or move an entity at (x, y, z); optionally link it to existing entities that satisfy Z-monotonicity",
         params_schema: json!({
             "type": "object",
             "properties": {
-                "topology": {"type": "string", "description": "Topology key or name"},
+                "topology_key": {"type": "string", "description": "Topology key"},
                 "entity_id": {"type": "string", "description": "Unique entity identifier"},
-                "x": {"type": "number", "description": "X coordinate (0.0-1.0)"},
-                "y": {"type": "number", "description": "Y coordinate (0.0-1.0)"},
-                "z": {"type": "number", "description": "Z coordinate (0.0-1.0, hierarchy/depth)"},
-                "metadata": {"type": "object", "description": "Arbitrary entity metadata"}
+                "x": {"type": "number", "default": 0.5, "description": "X coordinate (0.0-1.0)"},
+                "y": {"type": "number", "default": 0.5, "description": "Y coordinate (0.0-1.0)"},
+                "z": {"type": "number", "default": 0.5, "description": "Z coordinate (0.0-1.0, hierarchy/depth)"},
+                "metadata": {"type": "object", "description": "Arbitrary entity metadata"},
+                "edges_to": {"type": "array", "items": {"type": "string"}, "description": "Entities to link to; the reply's `edges` lists which were added and why others were skipped"},
+                "edge_metadata": {"type": "object", "description": "Metadata for the edges_to edges"}
             },
-            "required": ["topology", "entity_id"]
+            "required": ["topology_key", "entity_id"]
         }),
-        returns_schema: json!({
-            "type": "object",
-            "properties": {
-                "ok": {"type": "boolean"},
-                "entity_id": {"type": "string"},
-                "bucket_key": {"type": "string", "description": "Computed Q64.64 voxel bucket key"}
-            }
-        }),
-        example: r#"{"cmd":"topo_register","params":{"topology":"services","entity_id":"auth-svc","x":0.2,"y":0.5,"z":0.1,"metadata":{"version":"2.0"}}}"#,
+        returns_schema: lua_reply("GNODE_REGISTER_CAPABILITY_VECTOR"),
+        example: r#"{"cmd":"topo_register","params":{"topology_key":"{mysite}:pipeline","entity_id":"auth-svc","x":0.2,"y":0.5,"z":0.1,"metadata":{"version":"2.0"}}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
@@ -144,23 +138,17 @@ pub fn register(
     descriptors.push(CommandDescriptor {
         name: "topo_deregister",
         category: "topology",
-        description: "Remove an entity from a topology",
+        description: "Remove an entity and its edges from a topology",
         params_schema: json!({
             "type": "object",
             "properties": {
-                "topology": {"type": "string", "description": "Topology key or name"},
+                "topology_key": {"type": "string", "description": "Topology key"},
                 "entity_id": {"type": "string", "description": "Entity identifier to remove"}
             },
-            "required": ["topology", "entity_id"]
+            "required": ["topology_key", "entity_id"]
         }),
-        returns_schema: json!({
-            "type": "object",
-            "properties": {
-                "ok": {"type": "boolean"},
-                "entity_id": {"type": "string", "description": "Deregistered entity ID"}
-            }
-        }),
-        example: r#"{"cmd":"topo_deregister","params":{"topology":"services","entity_id":"auth-svc"}}"#,
+        returns_schema: lua_reply("GNODE_DEREGISTER_CAPABILITY_VECTOR"),
+        example: r#"{"cmd":"topo_deregister","params":{"topology_key":"{mysite}:pipeline","entity_id":"auth-svc"}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
@@ -168,27 +156,19 @@ pub fn register(
     descriptors.push(CommandDescriptor {
         name: "topo_add_edge",
         category: "topology",
-        description: "Add a directed edge between two entities in a topology",
+        description: "Add a directed edge between two existing entities, stamped with their Z delta",
         params_schema: json!({
             "type": "object",
             "properties": {
-                "topology": {"type": "string", "description": "Topology key or name"},
-                "from": {"type": "string", "description": "Source entity ID"},
-                "to": {"type": "string", "description": "Target entity ID"},
-                "metadata": {"type": "object", "description": "Edge metadata"}
+                "topology_key": {"type": "string", "description": "Topology key"},
+                "from_id": {"type": "string", "description": "Source entity ID"},
+                "to_id": {"type": "string", "description": "Target entity ID"},
+                "edge_metadata": {"type": "object", "description": "Edge metadata"}
             },
-            "required": ["topology", "from", "to"]
+            "required": ["topology_key", "from_id", "to_id"]
         }),
-        returns_schema: json!({
-            "type": "object",
-            "properties": {
-                "ok": {"type": "boolean"},
-                "from": {"type": "string"},
-                "to": {"type": "string"},
-                "z_delta": {"type": "number", "description": "Z coordinate difference between entities"}
-            }
-        }),
-        example: r#"{"cmd":"topo_add_edge","params":{"topology":"services","from":"api-gw","to":"auth-svc","metadata":{"weight":1.0}}}"#,
+        returns_schema: lua_reply("GNODE_TOPO_ADD_EDGE"),
+        example: r#"{"cmd":"topo_add_edge","params":{"topology_key":"{mysite}:pipeline","from_id":"api-gw","to_id":"auth-svc","edge_metadata":{"weight":1.0}}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
@@ -196,26 +176,21 @@ pub fn register(
     descriptors.push(CommandDescriptor {
         name: "topo_discover",
         category: "topology",
-        description: "Discover entities near a point in a topology via spatial hash",
+        description: "Entities in the voxel cell at (x, y, z), or at an explicit bucket_key",
         params_schema: json!({
             "type": "object",
             "properties": {
-                "topology": {"type": "string", "description": "Topology key or name"},
-                "x": {"type": "number", "description": "X coordinate to search near"},
-                "y": {"type": "number", "description": "Y coordinate to search near"},
-                "z": {"type": "number", "description": "Z coordinate to search near"},
-                "limit": {"type": "integer", "default": 10, "description": "Maximum number of results"}
+                "topology_key": {"type": "string", "description": "Topology key"},
+                "x": {"type": "number", "default": 0.5, "description": "X coordinate of the cell"},
+                "y": {"type": "number", "default": 0.5, "description": "Y coordinate of the cell"},
+                "z": {"type": "number", "default": 0.5, "description": "Z coordinate of the cell"},
+                "bucket_key": {"type": "string", "description": "Cell key; overrides x, y, z"},
+                "include_data": {"type": "boolean", "default": false, "description": "Return entity data, not only ids"}
             },
-            "required": ["topology"]
+            "required": ["topology_key"]
         }),
-        returns_schema: json!({
-            "type": "object",
-            "properties": {
-                "ok": {"type": "boolean"},
-                "entities": {"type": "array", "items": {"type": "object"}, "description": "Nearby entities with distances"}
-            }
-        }),
-        example: r#"{"cmd":"topo_discover","params":{"topology":"services","x":0.2,"y":0.5,"z":0.1,"limit":5}}"#,
+        returns_schema: lua_reply("GNODE_TOPO_QUERY_VOXEL"),
+        example: r#"{"cmd":"topo_discover","params":{"topology_key":"{mysite}:pipeline","x":0.2,"y":0.5,"z":0.1,"include_data":true}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
@@ -223,23 +198,19 @@ pub fn register(
     descriptors.push(CommandDescriptor {
         name: "topo_z_order",
         category: "topology",
-        description: "Get entities ordered by Z coordinate (DAG load order)",
+        description: "Entity ids ordered by Z (DAG load order)",
         params_schema: json!({
             "type": "object",
             "properties": {
-                "topology": {"type": "string", "description": "Topology key or name"},
-                "direction": {"type": "string", "enum": ["asc", "desc"], "default": "asc", "description": "Sort direction"}
+                "topology_key": {"type": "string", "description": "Topology key"},
+                "limit": {"type": "integer", "description": "Maximum ids; all when omitted"},
+                "offset": {"type": "integer", "default": 0, "description": "Ids to skip"},
+                "descending": {"type": "boolean", "default": false, "description": "High Z first"}
             },
-            "required": ["topology"]
+            "required": ["topology_key"]
         }),
-        returns_schema: json!({
-            "type": "object",
-            "properties": {
-                "ok": {"type": "boolean"},
-                "entities": {"type": "array", "items": {"type": "object"}, "description": "Entities sorted by Z coordinate"}
-            }
-        }),
-        example: r#"{"cmd":"topo_z_order","params":{"topology":"services","direction":"asc"}}"#,
+        returns_schema: lua_reply("GNODE_TOPO_Z_ORDER"),
+        example: r#"{"cmd":"topo_z_order","params":{"topology_key":"{mysite}:pipeline","limit":20}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
@@ -247,24 +218,20 @@ pub fn register(
     descriptors.push(CommandDescriptor {
         name: "topo_z_range",
         category: "topology",
-        description: "Get entities within a Z coordinate range",
+        description: "Entities whose Z lies within a range",
         params_schema: json!({
             "type": "object",
             "properties": {
-                "topology": {"type": "string", "description": "Topology key or name"},
-                "min_z": {"type": "number", "description": "Minimum Z coordinate"},
-                "max_z": {"type": "number", "description": "Maximum Z coordinate"}
+                "topology_key": {"type": "string", "description": "Topology key"},
+                "z_min": {"type": "number", "description": "Lower Z bound; unbounded when omitted"},
+                "z_max": {"type": "number", "description": "Upper Z bound; unbounded when omitted"},
+                "include_data": {"type": "boolean", "default": false, "description": "Return entity data, not only ids"},
+                "limit": {"type": "integer", "description": "Maximum entities"}
             },
-            "required": ["topology", "min_z", "max_z"]
+            "required": ["topology_key"]
         }),
-        returns_schema: json!({
-            "type": "object",
-            "properties": {
-                "ok": {"type": "boolean"},
-                "entities": {"type": "array", "items": {"type": "object"}, "description": "Entities within the Z range"}
-            }
-        }),
-        example: r#"{"cmd":"topo_z_range","params":{"topology":"services","min_z":0.0,"max_z":0.5}}"#,
+        returns_schema: lua_reply("GNODE_TOPO_QUERY_Z_RANGE"),
+        example: r#"{"cmd":"topo_z_range","params":{"topology_key":"{mysite}:pipeline","z_min":0.0,"z_max":0.5}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
@@ -276,23 +243,15 @@ pub fn register(
         params_schema: json!({
             "type": "object",
             "properties": {
-                "topology": {"type": "string", "description": "Topology key or name"},
+                "topology_key": {"type": "string", "description": "Topology key"},
                 "entity_id": {"type": "string", "description": "Starting entity ID"},
                 "direction": {"type": "string", "enum": ["outgoing", "incoming"], "default": "outgoing", "description": "Traversal direction"},
-                "max_depth": {"type": "integer", "default": 10, "description": "Maximum traversal depth"}
+                "max_depth": {"type": "integer", "default": 100, "description": "Maximum traversal depth"}
             },
-            "required": ["topology", "entity_id"]
+            "required": ["topology_key", "entity_id"]
         }),
-        returns_schema: json!({
-            "type": "object",
-            "properties": {
-                "ok": {"type": "boolean"},
-                "chain": {"type": "array", "description": "Traversal chain of entity IDs"},
-                "by_depth": {"type": "object", "description": "Entities grouped by depth level"},
-                "max_depth": {"type": "integer", "description": "Maximum depth reached"}
-            }
-        }),
-        example: r#"{"cmd":"topo_chain","params":{"topology":"services","entity_id":"api-gw","direction":"outgoing","max_depth":5}}"#,
+        returns_schema: lua_reply("GNODE_TOPO_CHAIN"),
+        example: r#"{"cmd":"topo_chain","params":{"topology_key":"{mysite}:pipeline","entity_id":"api-gw","direction":"outgoing","max_depth":5}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
@@ -300,24 +259,16 @@ pub fn register(
     descriptors.push(CommandDescriptor {
         name: "topo_stats",
         category: "topology",
-        description: "Get statistics for a topology",
+        description: "Statistics for a topology",
         params_schema: json!({
             "type": "object",
             "properties": {
-                "topology": {"type": "string", "description": "Topology key or name"}
+                "topology_key": {"type": "string", "description": "Topology key"}
             },
-            "required": ["topology"]
+            "required": ["topology_key"]
         }),
-        returns_schema: json!({
-            "type": "object",
-            "properties": {
-                "ok": {"type": "boolean"},
-                "entity_count": {"type": "integer", "description": "Number of entities"},
-                "edge_count": {"type": "integer", "description": "Number of edges"},
-                "dimensions": {"type": "integer", "description": "Number of dimensions"}
-            }
-        }),
-        example: r#"{"cmd":"topo_stats","params":{"topology":"services"}}"#,
+        returns_schema: lua_reply("GNODE_TOPO_STATS"),
+        example: r#"{"cmd":"topo_stats","params":{"topology_key":"{mysite}:pipeline"}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
@@ -325,18 +276,14 @@ pub fn register(
     descriptors.push(CommandDescriptor {
         name: "topo_list",
         category: "topology",
-        description: "List all topologies for the current site",
+        description: "List the site's topologies",
         params_schema: json!({
             "type": "object",
-            "properties": {}
-        }),
-        returns_schema: json!({
-            "type": "object",
             "properties": {
-                "ok": {"type": "boolean"},
-                "topologies": {"type": "array", "items": {"type": "object"}, "description": "Array of topology names with metadata"}
+                "topology_type": {"type": "string", "description": "Only topologies with this type label"}
             }
         }),
+        returns_schema: lua_reply("GNODE_TOPO_LIST"),
         example: r#"{"cmd":"topo_list","params":{}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
@@ -349,18 +296,13 @@ pub fn register(
         params_schema: json!({
             "type": "object",
             "properties": {
-                "topology": {"type": "string", "description": "Topology key or name"}
+                "topology_key": {"type": "string", "description": "Topology key"},
+                "confirm": {"type": "string", "enum": ["CONFIRM"], "description": "Must be the literal string CONFIRM"}
             },
-            "required": ["topology"]
+            "required": ["topology_key", "confirm"]
         }),
-        returns_schema: json!({
-            "type": "object",
-            "properties": {
-                "ok": {"type": "boolean"},
-                "deleted": {"type": "boolean", "description": "Whether the topology was deleted"}
-            }
-        }),
-        example: r#"{"cmd":"topo_delete","params":{"topology":"services"}}"#,
+        returns_schema: lua_reply("GNODE_TOPO_DELETE"),
+        example: r#"{"cmd":"topo_delete","params":{"topology_key":"{mysite}:pipeline","confirm":"CONFIRM"}}"#,
         async_capable: true,
         // Ordered: destructive. Pending reads must observe post-delete state
         // (entities, edges, voxel buckets, z_order all gone) — a Concurrent-lane
@@ -372,27 +314,17 @@ pub fn register(
     descriptors.push(CommandDescriptor {
         name: "topo_get_entity",
         category: "topology",
-        description: "Get a single entity's data including coordinates, metadata, and connections",
+        description: "A single entity with its stored data and edges",
         params_schema: json!({
             "type": "object",
             "properties": {
-                "topology": {"type": "string", "description": "Topology key or name"},
+                "topology_key": {"type": "string", "description": "Topology key"},
                 "entity_id": {"type": "string", "description": "Entity identifier to retrieve"}
             },
-            "required": ["topology", "entity_id"]
+            "required": ["topology_key", "entity_id"]
         }),
-        returns_schema: json!({
-            "type": "object",
-            "properties": {
-                "ok": {"type": "boolean"},
-                "entity_id": {"type": "string"},
-                "position": {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "z": {"type": "number"}}},
-                "metadata": {"type": "object"},
-                "outgoing": {"type": "array", "description": "Outgoing edge targets"},
-                "incoming": {"type": "array", "description": "Incoming edge sources"}
-            }
-        }),
-        example: r#"{"cmd":"topo_get_entity","params":{"topology":"services","entity_id":"auth-svc"}}"#,
+        returns_schema: lua_reply("GNODE_TOPO_GET_ENTITY"),
+        example: r#"{"cmd":"topo_get_entity","params":{"topology_key":"{mysite}:pipeline","entity_id":"auth-svc"}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
@@ -400,15 +332,15 @@ pub fn register(
     descriptors.push(CommandDescriptor {
         name: "topo_validate_edge",
         category: "topology",
-        description: "Check if an edge would be valid without creating it (Q64.64 constraint validation)",
+        description: "Check if an edge would satisfy Z-monotonicity without creating it (Q64.64)",
         params_schema: json!({
             "type": "object",
             "properties": {
-                "topology": {"type": "string", "description": "Topology key or name"},
-                "from": {"type": "string", "description": "Source entity ID"},
-                "to": {"type": "string", "description": "Target entity ID"}
+                "topology_key": {"type": "string", "description": "Topology key"},
+                "from_id": {"type": "string", "description": "Source entity ID"},
+                "to_id": {"type": "string", "description": "Target entity ID"}
             },
-            "required": ["topology", "from", "to"]
+            "required": ["topology_key", "from_id", "to_id"]
         }),
         returns_schema: json!({
             "type": "object",
@@ -420,95 +352,407 @@ pub fn register(
                 "z_delta": {"type": "number", "description": "Z coordinate difference"}
             }
         }),
-        example: r#"{"cmd":"topo_validate_edge","params":{"topology":"services","from":"api-gw","to":"auth-svc"}}"#,
+        example: r#"{"cmd":"topo_validate_edge","params":{"topology_key":"{mysite}:pipeline","from_id":"api-gw","to_id":"auth-svc"}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
 }
 
-#[derive(Debug, Deserialize)]
+fn lua_reply(function: &str) -> Value {
+    json!({
+        "type": "object",
+        "description": format!("{} reply, passed through; fields in COMMAND_SCHEMA.md", function)
+    })
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[cfg_attr(test, derive(serde::Serialize))]
 pub struct TopoParams {
-    /// Topology key (e.g., "{site_id}:my_topology")
     #[serde(default)]
     pub topology_key: Option<String>,
-    /// Topology name (for creation)
     #[serde(default)]
     pub name: Option<String>,
-    /// Constraint type: none, z_monotonic, bidirectional, custom
     #[serde(default)]
     pub constraint_type: Option<String>,
-    /// Topology type for categorization
     #[serde(default)]
     pub topology_type: Option<String>,
-    /// Entity ID
     #[serde(default)]
     pub entity_id: Option<String>,
-    /// Source entity ID (for edges)
     #[serde(default)]
     pub from_id: Option<String>,
-    /// Target entity ID (for edges)
     #[serde(default)]
     pub to_id: Option<String>,
-    /// X coordinate (0.0 to 1.0)
     #[serde(default)]
     pub x: Option<f64>,
-    /// Y coordinate (0.0 to 1.0)
     #[serde(default)]
     pub y: Option<f64>,
-    /// Z coordinate (0.0 to 1.0, hierarchy/depth)
     #[serde(default)]
     pub z: Option<f64>,
-    /// Pre-computed bucket key (optional, for direct voxel query)
     #[serde(default)]
     pub bucket_key: Option<String>,
-    /// Entity metadata
     #[serde(default)]
-    pub metadata: Option<serde_json::Value>,
-    /// Edge metadata
+    pub metadata: Option<Value>,
     #[serde(default)]
-    pub edge_metadata: Option<serde_json::Value>,
-    /// Traversal direction: outgoing, incoming
+    pub edge_metadata: Option<Value>,
     #[serde(default)]
     pub direction: Option<String>,
-    /// Maximum traversal depth
     #[serde(default)]
     pub max_depth: Option<i32>,
-    /// Result limit
     #[serde(default)]
     pub limit: Option<i32>,
-    /// Result offset
     #[serde(default)]
     pub offset: Option<i32>,
-    /// Include full entity data in results
     #[serde(default)]
     pub include_data: Option<bool>,
-    /// Z-range minimum score
     #[serde(default)]
     pub z_min: Option<f64>,
-    /// Z-range maximum score
     #[serde(default)]
     pub z_max: Option<f64>,
-    /// Descending order
     #[serde(default)]
     pub descending: Option<bool>,
-    /// Confirmation flag for destructive operations
     #[serde(default)]
     pub confirm: Option<String>,
-    /// Entity IDs for batch operations
     #[serde(default)]
     pub entity_ids: Option<Vec<String>>,
-    /// Edges to create with entity
     #[serde(default)]
     pub edges_to: Option<Vec<String>>,
-    /// Axis semantics definition
     #[serde(default)]
-    pub axis_semantics: Option<serde_json::Value>,
-    /// Description
+    pub axis_semantics: Option<Value>,
     #[serde(default)]
     pub description: Option<String>,
 }
 
-pub fn handle_topo_create_async<'a>(
+// =========================================================================
+// Plans: the Lua calls each command makes, shared by both lanes
+// =========================================================================
+
+/// One Lua function call.
+struct Fcall {
+    function: &'static str,
+    keys: Vec<String>,
+    args: Vec<String>,
+}
+
+impl Fcall {
+    fn new(function: &'static str, key: &str) -> Self {
+        Self { function, keys: vec![key.to_string()], args: Vec::new() }
+    }
+
+    fn arg(mut self, value: impl ToString) -> Self {
+        self.args.push(value.to_string());
+        self
+    }
+
+    fn cmd(&self) -> redis::Cmd {
+        let mut cmd = redis::cmd("FCALL");
+        cmd.arg(self.function).arg(self.keys.len());
+        for key in &self.keys {
+            cmd.arg(key);
+        }
+        for arg in &self.args {
+            cmd.arg(arg);
+        }
+        cmd
+    }
+}
+
+fn parse_params(command: &Command) -> Result<TopoParams, CommandResult> {
+    let raw = if command.parameters.is_null() { json!({}) } else { command.parameters.clone() };
+    serde_json::from_value(raw).map_err(|e| CommandResult::error(format!("Invalid parameters: {}", e)))
+}
+
+fn required<'p>(value: &'p Option<String>, name: &str) -> Result<&'p str, CommandResult> {
+    match value.as_deref() {
+        Some(v) if !v.is_empty() => Ok(v),
+        _ => Err(CommandResult::error(format!("Missing '{}' parameter", name))),
+    }
+}
+
+fn flag(value: Option<bool>) -> &'static str {
+    if value.unwrap_or(false) { "true" } else { "false" }
+}
+
+fn optional_count(value: Option<i32>) -> String {
+    value.map(|v| v.to_string()).unwrap_or_default()
+}
+
+fn passthrough(command: &str, reply: redis::RedisResult<String>) -> CommandResult {
+    match reply {
+        Ok(json_str) => CommandResult::success_json(json_str),
+        Err(e) => CommandResult::error(format!("{} failed: {}", command, e)),
+    }
+}
+
+fn plan_create(p: &TopoParams, site_id: &str) -> Result<Fcall, CommandResult> {
+    let name = required(&p.name, "name")?;
+    let topology_key = p.topology_key.clone().unwrap_or_else(|| format!("{{{}}}:{}", site_id, name));
+    let definition = json!({
+        "name": name,
+        "constraint_type": p.constraint_type.as_deref().unwrap_or("none"),
+        "topology_type": p.topology_type.as_deref().unwrap_or("custom"),
+        "description": p.description.as_deref().unwrap_or(""),
+        "axis_semantics": p.axis_semantics
+    });
+    Ok(Fcall::new("GNODE_TOPO_CREATE", site_id).arg(topology_key).arg(definition))
+}
+
+/// The registration call and the entity's Z, which its edges are validated against.
+fn plan_register(p: &TopoParams, _site_id: &str) -> Result<(Fcall, f64), CommandResult> {
+    let topology_key = required(&p.topology_key, "topology_key")?;
+    let entity_id = required(&p.entity_id, "entity_id")?;
+    let (x, y, z) = (p.x.unwrap_or(0.5), p.y.unwrap_or(0.5), p.z.unwrap_or(0.5));
+    let entity = json!({
+        "position": { "x": x, "y": y, "z": z },
+        "metadata": p.metadata.clone().unwrap_or(json!({}))
+    });
+    let call = Fcall::new("GNODE_REGISTER_CAPABILITY_VECTOR", topology_key)
+        .arg(entity_id)
+        .arg(entity)
+        .arg(GeometricTopology::compute_3d_bucket_key(x, y, z, 10))
+        .arg(GeometricTopology::compute_z_score(z))
+        .arg("")  // args[5]: no snapshot — a 3-D topology is not the shared service topology
+        .arg(-1)  // args[6]: no registration_order axis
+        .arg(POINT_FRAC_BITS);  // args[7]
+    Ok((call, z))
+}
+
+fn plan_deregister(p: &TopoParams, _site_id: &str) -> Result<Fcall, CommandResult> {
+    let topology_key = required(&p.topology_key, "topology_key")?;
+    let entity_id = required(&p.entity_id, "entity_id")?;
+    // args[2] empty: removing a 3-D entity must not touch a same-named service in the shared snapshot
+    Ok(Fcall::new("GNODE_DEREGISTER_CAPABILITY_VECTOR", topology_key).arg(entity_id).arg(""))
+}
+
+fn plan_discover(p: &TopoParams, _site_id: &str) -> Result<Fcall, CommandResult> {
+    let topology_key = required(&p.topology_key, "topology_key")?;
+    let bucket_key = match &p.bucket_key {
+        Some(bk) => bk.clone(),
+        None => GeometricTopology::compute_3d_bucket_key(p.x.unwrap_or(0.5), p.y.unwrap_or(0.5), p.z.unwrap_or(0.5), 10),
+    };
+    Ok(Fcall::new("GNODE_TOPO_QUERY_VOXEL", topology_key).arg(bucket_key).arg(flag(p.include_data)))
+}
+
+fn plan_z_order(p: &TopoParams, _site_id: &str) -> Result<Fcall, CommandResult> {
+    let topology_key = required(&p.topology_key, "topology_key")?;
+    Ok(Fcall::new("GNODE_TOPO_Z_ORDER", topology_key)
+        .arg(optional_count(p.limit))
+        .arg(p.offset.unwrap_or(0))
+        .arg(flag(p.descending)))
+}
+
+fn plan_z_range(p: &TopoParams, _site_id: &str) -> Result<Fcall, CommandResult> {
+    let topology_key = required(&p.topology_key, "topology_key")?;
+    let bound = |z: Option<f64>, open: &str| {
+        z.map(|z| GeometricTopology::compute_z_score(z).to_string()).unwrap_or_else(|| open.to_string())
+    };
+    Ok(Fcall::new("GNODE_TOPO_QUERY_Z_RANGE", topology_key)
+        .arg(bound(p.z_min, "-inf"))
+        .arg(bound(p.z_max, "+inf"))
+        .arg(flag(p.include_data))
+        .arg(optional_count(p.limit)))
+}
+
+fn plan_chain(p: &TopoParams, _site_id: &str) -> Result<Fcall, CommandResult> {
+    let topology_key = required(&p.topology_key, "topology_key")?;
+    let entity_id = required(&p.entity_id, "entity_id")?;
+    let direction = p.direction.as_deref().unwrap_or("outgoing");
+    if direction != "outgoing" && direction != "incoming" {
+        return Err(CommandResult::error(format!("direction must be 'outgoing' or 'incoming', got '{}'", direction)));
+    }
+    Ok(Fcall::new("GNODE_TOPO_CHAIN", topology_key)
+        .arg(entity_id)
+        .arg(direction)
+        .arg(p.max_depth.unwrap_or(100)))
+}
+
+fn plan_stats(p: &TopoParams, _site_id: &str) -> Result<Fcall, CommandResult> {
+    Ok(Fcall::new("GNODE_TOPO_STATS", required(&p.topology_key, "topology_key")?))
+}
+
+fn plan_list(p: &TopoParams, site_id: &str) -> Result<Fcall, CommandResult> {
+    Ok(Fcall::new("GNODE_TOPO_LIST", site_id).arg(p.topology_type.as_deref().unwrap_or("")))
+}
+
+fn plan_delete(p: &TopoParams, site_id: &str) -> Result<Fcall, CommandResult> {
+    let topology_key = required(&p.topology_key, "topology_key")?;
+    if p.confirm.as_deref() != Some("CONFIRM") {
+        return Err(CommandResult::error("Must provide confirm: 'CONFIRM' to delete topology"));
+    }
+    Ok(Fcall::new("GNODE_TOPO_DELETE", site_id).arg(topology_key).arg("CONFIRM"))
+}
+
+fn plan_get_entity(p: &TopoParams, _site_id: &str) -> Result<Fcall, CommandResult> {
+    let topology_key = required(&p.topology_key, "topology_key")?;
+    let entity_id = required(&p.entity_id, "entity_id")?;
+    Ok(Fcall::new("GNODE_TOPO_GET_ENTITY", topology_key).arg(entity_id))
+}
+
+/// Endpoints of an edge command: (topology_key, from_id, to_id).
+fn edge_endpoints(p: &TopoParams) -> Result<(&str, &str, &str), CommandResult> {
+    Ok((
+        required(&p.topology_key, "topology_key")?,
+        required(&p.from_id, "from_id")?,
+        required(&p.to_id, "to_id")?,
+    ))
+}
+
+fn plan_entity_lookup(topology_key: &str, ids: &[&str]) -> Fcall {
+    Fcall::new("GNODE_TOPO_GET_ENTITIES", topology_key)
+        .arg(serde_json::to_string(ids).unwrap_or_default())
+        .arg("false")
+}
+
+/// Z of an entity in a GNODE_TOPO_GET_ENTITIES reply (`{ents: {id: {position: {z}}}}`).
+fn entity_z(reply: &str, id: &str) -> Option<f64> {
+    serde_json::from_str::<Value>(reply).ok()?
+        .get("ents")?.get(id)?.get("position")?.get("z")?.as_f64()
+}
+
+fn plan_edge(topology_key: &str, from_id: &str, to_id: &str, from_z: f64, to_z: f64, metadata: &Option<Value>) -> Fcall {
+    let edge = json!({
+        "z_delta": GeometricTopology::compute_z_delta(from_z, to_z),
+        "from_z": from_z,
+        "to_z": to_z,
+        "metadata": metadata
+    });
+    Fcall::new("GNODE_TOPO_ADD_EDGE", topology_key).arg(from_id).arg(to_id).arg(edge)
+}
+
+fn both_z(reply: &str, from_id: &str, to_id: &str) -> Result<(f64, f64), CommandResult> {
+    match (entity_z(reply, from_id), entity_z(reply, to_id)) {
+        (Some(from_z), Some(to_z)) => Ok((from_z, to_z)),
+        (None, _) => Err(CommandResult::error(format!("Entity not found: {}", from_id))),
+        (_, None) => Err(CommandResult::error(format!("Entity not found: {}", to_id))),
+    }
+}
+
+fn validate_edge_reply(reply: &str, from_id: &str, to_id: &str) -> CommandResult {
+    match both_z(reply, from_id, to_id) {
+        Ok((from_z, to_z)) => {
+            let (valid, reason) = GeometricTopology::validate_z_monotonic(from_z, to_z);
+            CommandResult::success(json!({
+                "valid": valid,
+                "reason": reason,
+                "from_z": from_z,
+                "to_z": to_z,
+                "z_delta": GeometricTopology::compute_z_delta(from_z, to_z)
+            }))
+        }
+        Err(e) => e,
+    }
+}
+
+/// The edge to `target` from an entity at `z`, or why there is none.
+fn plan_edge_to(topology_key: &str, entity_id: &str, z: f64, target: &str, lookup: &str, metadata: &Option<Value>) -> Result<Fcall, String> {
+    let target_z = entity_z(lookup, target).ok_or_else(|| "target not found".to_string())?;
+    let (valid, reason) = GeometricTopology::validate_z_monotonic(z, target_z);
+    if !valid {
+        return Err(reason.unwrap_or_else(|| "violates Z-monotonicity".to_string()));
+    }
+    Ok(plan_edge(topology_key, entity_id, target, z, target_z, metadata))
+}
+
+/// The registration reply, with `edges` added when the caller asked for links.
+fn register_reply(reply: String, added: Vec<String>, skipped: Vec<Value>) -> CommandResult {
+    let mut v: Value = serde_json::from_str(&reply).unwrap_or_else(|_| json!({ "reply": reply }));
+    v["edges"] = json!({ "added": added, "skipped": skipped });
+    CommandResult::success(v)
+}
+
+// =========================================================================
+// Handlers
+// =========================================================================
+
+macro_rules! single_call_handlers {
+    ($sync_fn:ident, $async_fn:ident, $name:literal, $plan:ident) => {
+        pub fn $sync_fn(
+            command: &Command,
+            conn: &mut Connection,
+            _topology: &Arc<RwLock<GeometricTopology>>,
+            site_id: &str,
+            debug_mode: bool,
+        ) -> CommandResult {
+            if debug_mode { debug!("Handling {} command: {}", $name, command.id); }
+            match parse_params(command).and_then(|p| $plan(&p, site_id)) {
+                Ok(call) => passthrough($name, call.cmd().query(conn)),
+                Err(e) => e,
+            }
+        }
+
+        pub fn $async_fn<'a>(
+            command: &'a Command,
+            conn: &'a mut AsyncConnection,
+            _topology: &'a Arc<RwLock<GeometricTopology>>,
+            site_id: &'a str,
+            debug_mode: bool,
+        ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
+            Box::pin(async move {
+                if debug_mode { debug!("Handling {} command: {}", $name, command.id); }
+                let call = match parse_params(command).and_then(|p| $plan(&p, site_id)) {
+                    Ok(call) => call,
+                    Err(e) => return e,
+                };
+                passthrough($name, call.cmd().query_async(conn).await)
+            })
+        }
+    };
+}
+
+single_call_handlers!(handle_topo_create, handle_topo_create_async, "topo_create", plan_create);
+single_call_handlers!(handle_topo_deregister, handle_topo_deregister_async, "topo_deregister", plan_deregister);
+single_call_handlers!(handle_topo_discover, handle_topo_discover_async, "topo_discover", plan_discover);
+single_call_handlers!(handle_topo_z_order, handle_topo_z_order_async, "topo_z_order", plan_z_order);
+single_call_handlers!(handle_topo_z_range, handle_topo_z_range_async, "topo_z_range", plan_z_range);
+single_call_handlers!(handle_topo_chain, handle_topo_chain_async, "topo_chain", plan_chain);
+single_call_handlers!(handle_topo_stats, handle_topo_stats_async, "topo_stats", plan_stats);
+single_call_handlers!(handle_topo_list, handle_topo_list_async, "topo_list", plan_list);
+single_call_handlers!(handle_topo_delete, handle_topo_delete_async, "topo_delete", plan_delete);
+single_call_handlers!(handle_topo_get_entity, handle_topo_get_entity_async, "topo_get_entity", plan_get_entity);
+
+/// Sync topo_register: register, then link `edges_to` targets that satisfy Z-monotonicity.
+pub fn handle_topo_register(
+    command: &Command,
+    conn: &mut Connection,
+    _topology: &Arc<RwLock<GeometricTopology>>,
+    site_id: &str,
+    debug_mode: bool,
+) -> CommandResult {
+    if debug_mode { debug!("Handling topo_register command: {}", command.id); }
+    let p = match parse_params(command) { Ok(p) => p, Err(e) => return e };
+    let (call, z) = match plan_register(&p, site_id) { Ok(plan) => plan, Err(e) => return e };
+    let reply: String = match call.cmd().query(conn) {
+        Ok(reply) => reply,
+        Err(e) => return CommandResult::error(format!("topo_register failed: {}", e)),
+    };
+    let targets = p.edges_to.clone().unwrap_or_default();
+    if targets.is_empty() {
+        return CommandResult::success_json(reply);
+    }
+
+    let (topology_key, entity_id) = (p.topology_key.as_deref().unwrap_or_default(), p.entity_id.as_deref().unwrap_or_default());
+    let ids: Vec<&str> = targets.iter().map(String::as_str).collect();
+    let lookup: String = match plan_entity_lookup(topology_key, &ids).cmd().query(conn) {
+        Ok(lookup) => lookup,
+        Err(e) => {
+            let skipped = targets.iter().map(|t| json!({ "to": t, "reason": e.to_string() })).collect();
+            return register_reply(reply, Vec::new(), skipped);
+        }
+    };
+    let (mut added, mut skipped) = (Vec::new(), Vec::new());
+    for target in &targets {
+        match plan_edge_to(topology_key, entity_id, z, target, &lookup, &p.edge_metadata) {
+            Ok(edge) => match edge.cmd().query::<String>(conn) {
+                Ok(_) => added.push(target.clone()),
+                Err(e) => skipped.push(json!({ "to": target, "reason": e.to_string() })),
+            },
+            Err(reason) => skipped.push(json!({ "to": target, "reason": reason })),
+        }
+    }
+    register_reply(reply, added, skipped)
+}
+
+/// Async topo_register: register, then link `edges_to` targets that satisfy Z-monotonicity.
+pub fn handle_topo_register_async<'a>(
     command: &'a Command,
     conn: &'a mut AsyncConnection,
     _topology: &'a Arc<RwLock<GeometricTopology>>,
@@ -516,212 +760,61 @@ pub fn handle_topo_create_async<'a>(
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
-        if debug_mode {
-            debug!("Handling topo_create command: {}", command.id);
+        if debug_mode { debug!("Handling topo_register command: {}", command.id); }
+        let p = match parse_params(command) { Ok(p) => p, Err(e) => return e };
+        let (call, z) = match plan_register(&p, site_id) { Ok(plan) => plan, Err(e) => return e };
+        let reply: String = match call.cmd().query_async(conn).await {
+            Ok(reply) => reply,
+            Err(e) => return CommandResult::error(format!("topo_register failed: {}", e)),
+        };
+        let targets = p.edges_to.clone().unwrap_or_default();
+        if targets.is_empty() {
+            return CommandResult::success_json(reply);
         }
 
-        let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
+        let (topology_key, entity_id) = (p.topology_key.as_deref().unwrap_or_default(), p.entity_id.as_deref().unwrap_or_default());
+        let ids: Vec<&str> = targets.iter().map(String::as_str).collect();
+        let lookup: String = match plan_entity_lookup(topology_key, &ids).cmd().query_async(conn).await {
+            Ok(lookup) => lookup,
+            Err(e) => {
+                let skipped = targets.iter().map(|t| json!({ "to": t, "reason": e.to_string() })).collect();
+                return register_reply(reply, Vec::new(), skipped);
+            }
         };
-
-        // Validate required fields
-        let name = match &params.name {
-            Some(n) if !n.is_empty() => n.clone(),
-            _ => return CommandResult::error("Missing 'name' parameter"),
-        };
-
-        // Build topology key
-        let topology_key = params.topology_key
-            .unwrap_or_else(|| format!("{{{}}}:{}", site_id, name));
-
-        // Build definition JSON
-        let definition = json!({
-            "name": name,
-            "constraint_type": params.constraint_type.as_deref().unwrap_or("none"),
-            "topology_type": params.topology_type.as_deref().unwrap_or("custom"),
-            "description": params.description.as_deref().unwrap_or(""),
-            "axis_semantics": params.axis_semantics.clone()
-        });
-        let def_json = serde_json::to_string(&definition).unwrap_or_default();
-
-        // Call Lua function
-        let result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_CREATE")
-            .arg(1)  // numkeys
-            .arg(site_id)
-            .arg(&topology_key)
-            .arg(&def_json)
-            .query_async(conn)
-            .await;
-
-        match result {
-            Ok(json_str) => CommandResult::success_json(json_str),
-            Err(e) => CommandResult::error(format!("topo_create failed: {}", e)),
-        }
-    })
-}
-
-/// Handle topo_register command - Register entity with Q64.64 bucket key computation
-pub fn handle_topo_register_async<'a>(
-    command: &'a Command,
-    conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    _site_id: &'a str,
-    debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
-        if debug_mode {
-            debug!("Handling topo_register command: {}", command.id);
-        }
-
-        let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-
-        // Validate required fields
-        let topology_key = match &params.topology_key {
-            Some(k) if !k.is_empty() => k.clone(),
-            _ => return CommandResult::error("Missing 'topology_key' parameter"),
-        };
-
-        let entity_id = match &params.entity_id {
-            Some(id) if !id.is_empty() => id.clone(),
-            _ => return CommandResult::error("Missing 'entity_id' parameter"),
-        };
-
-        let x = params.x.unwrap_or(0.5);
-        let y = params.y.unwrap_or(0.5);
-        let z = params.z.unwrap_or(0.5);
-
-        // COMPUTE: Q64.64 bucket key (deterministic across all nodes)
-        let bucket_key = GeometricTopology::compute_3d_bucket_key(x, y, z, 10);
-
-        // COMPUTE: Z-score for sorted set ordering
-        let z_score = GeometricTopology::compute_z_score(z);
-
-        // Build entity JSON
-        let entity_data = json!({
-            "position": { "x": x, "y": y, "z": z },
-            "metadata": params.metadata.clone().unwrap_or(json!({}))
-        });
-        let entity_json = serde_json::to_string(&entity_data).unwrap_or_default();
-
-        // Call Lua function with pre-computed values
-        let result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_REGISTER_CAPABILITY_VECTOR")
-            .arg(1)  // numkeys
-            .arg(&topology_key)
-            .arg(&entity_id)
-            .arg(&entity_json)
-            .arg(&bucket_key)
-            .arg(z_score)
-            .arg(crate::daemon::GNodeDaemon::topology_snapshot_key())  // args[5]: (B) snapshot
-            .arg(-1i64)  // args[6]: custom 3-D topology has no registration_order axis
-            .arg(crate::integration::handlers::types::POINT_FRAC_BITS)  // args[7]
-            .query_async(conn)
-            .await;
-
-        // Handle edges_to if provided
-        if let Ok(ref _register_result) = result {
-            if let Some(edges_to) = &params.edges_to {
-                for target_id in edges_to {
-                    // Get target entity to validate constraint
-                    let target_result: redis::RedisResult<String> = redis::cmd("FCALL")
-                        .arg("GNODE_TOPO_GET_ENTITY")
-                        .arg(1)
-                        .arg(&topology_key)
-                        .arg(target_id)
-                        .query_async(conn)
-                        .await;
-
-                    if let Ok(target_json) = target_result {
-                        if let Ok(target) = serde_json::from_str::<serde_json::Value>(&target_json) {
-                            if let Some(target_z) = target.get("position").and_then(|p| p.get("z")).and_then(|z| z.as_f64()) {
-                                // COMPUTE: Validate Z-monotonicity using Q64.64
-                                let (valid, err_msg) = GeometricTopology::validate_z_monotonic(z, target_z);
-
-                                if valid {
-                                    let z_delta = GeometricTopology::compute_z_delta(z, target_z);
-                                    let edge_data = json!({
-                                        "z_delta": z_delta,
-                                        "constraint_valid": true,
-                                        "metadata": params.edge_metadata.clone()
-                                    });
-                                    let edge_json = serde_json::to_string(&edge_data).unwrap_or_default();
-
-                                    let _: redis::RedisResult<String> = redis::cmd("FCALL")
-                                        .arg("GNODE_TOPO_ADD_EDGE")
-                                        .arg(1)
-                                        .arg(&topology_key)
-                                        .arg(&entity_id)
-                                        .arg(target_id)
-                                        .arg(&edge_json)
-                                        .query_async(conn)
-                                        .await;
-                                } else if debug_mode {
-                                    debug!("Skipping edge to {}: {}", target_id, err_msg.unwrap_or_default());
-                                }
-                            }
-                        }
-                    }
-                }
+        let (mut added, mut skipped) = (Vec::new(), Vec::new());
+        for target in &targets {
+            match plan_edge_to(topology_key, entity_id, z, target, &lookup, &p.edge_metadata) {
+                Ok(edge) => match edge.cmd().query_async::<String>(conn).await {
+                    Ok(_) => added.push(target.clone()),
+                    Err(e) => skipped.push(json!({ "to": target, "reason": e.to_string() })),
+                },
+                Err(reason) => skipped.push(json!({ "to": target, "reason": reason })),
             }
         }
-
-        match result {
-            Ok(json_str) => CommandResult::success_json(json_str),
-            Err(e) => CommandResult::error(format!("topo_register failed: {}", e)),
-        }
+        register_reply(reply, added, skipped)
     })
 }
 
-/// Handle topo_deregister command - Remove entity from topology
-pub fn handle_topo_deregister_async<'a>(
-    command: &'a Command,
-    conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    _site_id: &'a str,
+/// Sync topo_add_edge: both entities must exist; the edge carries their Z delta.
+pub fn handle_topo_add_edge(
+    command: &Command,
+    conn: &mut Connection,
+    _topology: &Arc<RwLock<GeometricTopology>>,
+    _site_id: &str,
     debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
-        if debug_mode {
-            debug!("Handling topo_deregister command: {}", command.id);
-        }
-
-        let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-
-        let topology_key = match &params.topology_key {
-            Some(k) if !k.is_empty() => k.clone(),
-            _ => return CommandResult::error("Missing 'topology_key' parameter"),
-        };
-
-        let entity_id = match &params.entity_id {
-            Some(id) if !id.is_empty() => id.clone(),
-            _ => return CommandResult::error("Missing 'entity_id' parameter"),
-        };
-
-        let result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_DEREGISTER_CAPABILITY_VECTOR")
-            .arg(1)
-            .arg(&topology_key)
-            .arg(&entity_id)
-            .arg(crate::daemon::GNodeDaemon::topology_snapshot_key())  // args[2]: (B) snapshot
-            .query_async(conn)
-            .await;
-
-        match result {
-            Ok(json_str) => CommandResult::success_json(json_str),
-            Err(e) => CommandResult::error(format!("topo_deregister failed: {}", e)),
-        }
-    })
+) -> CommandResult {
+    if debug_mode { debug!("Handling topo_add_edge command: {}", command.id); }
+    let p = match parse_params(command) { Ok(p) => p, Err(e) => return e };
+    let (topology_key, from_id, to_id) = match edge_endpoints(&p) { Ok(e) => e, Err(e) => return e };
+    let lookup: String = match plan_entity_lookup(topology_key, &[from_id, to_id]).cmd().query(conn) {
+        Ok(lookup) => lookup,
+        Err(e) => return CommandResult::error(format!("Failed to get entities: {}", e)),
+    };
+    let (from_z, to_z) = match both_z(&lookup, from_id, to_id) { Ok(z) => z, Err(e) => return e };
+    passthrough("topo_add_edge", plan_edge(topology_key, from_id, to_id, from_z, to_z, &p.edge_metadata).cmd().query(conn))
 }
 
-/// Handle topo_add_edge command - Add edge with Q64.64 constraint validation
+/// Async topo_add_edge: both entities must exist; the edge carries their Z delta.
 pub fn handle_topo_add_edge_async<'a>(
     command: &'a Command,
     conn: &'a mut AsyncConnection,
@@ -730,456 +823,37 @@ pub fn handle_topo_add_edge_async<'a>(
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
-        if debug_mode {
-            debug!("Handling topo_add_edge command: {}", command.id);
-        }
-
-        let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-
-        let topology_key = match &params.topology_key {
-            Some(k) if !k.is_empty() => k.clone(),
-            _ => return CommandResult::error("Missing 'topology_key' parameter"),
-        };
-
-        let from_id = match &params.from_id {
-            Some(id) if !id.is_empty() => id.clone(),
-            _ => return CommandResult::error("Missing 'from_id' parameter"),
-        };
-
-        let to_id = match &params.to_id {
-            Some(id) if !id.is_empty() => id.clone(),
-            _ => return CommandResult::error("Missing 'to_id' parameter"),
-        };
-
-        // Get both entities to compute z_delta and validate constraint
-        let entities_json = serde_json::to_string(&vec![&from_id, &to_id]).unwrap_or_default();
-        let entities_result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_GET_ENTITIES")
-            .arg(1)
-            .arg(&topology_key)
-            .arg(&entities_json)
-            .arg("false")
-            .query_async(conn)
-            .await;
-
-        let (from_z, to_z) = match entities_result {
-            Ok(json_str) => {
-                match serde_json::from_str::<serde_json::Value>(&json_str) {
-                    Ok(data) => {
-                        let from_z = data.get("entities")
-                            .and_then(|e| e.get(&from_id))
-                            .and_then(|e| e.get("position"))
-                            .and_then(|p| p.get("z"))
-                            .and_then(|z| z.as_f64())
-                            .unwrap_or(0.5);
-                        let to_z = data.get("entities")
-                            .and_then(|e| e.get(&to_id))
-                            .and_then(|e| e.get("position"))
-                            .and_then(|p| p.get("z"))
-                            .and_then(|z| z.as_f64())
-                            .unwrap_or(0.5);
-                        (from_z, to_z)
-                    }
-                    Err(_) => (0.5, 0.5),
-                }
-            }
+        if debug_mode { debug!("Handling topo_add_edge command: {}", command.id); }
+        let p = match parse_params(command) { Ok(p) => p, Err(e) => return e };
+        let (topology_key, from_id, to_id) = match edge_endpoints(&p) { Ok(e) => e, Err(e) => return e };
+        let lookup: String = match plan_entity_lookup(topology_key, &[from_id, to_id]).cmd().query_async(conn).await {
+            Ok(lookup) => lookup,
             Err(e) => return CommandResult::error(format!("Failed to get entities: {}", e)),
         };
-
-        // COMPUTE: Z-delta using Q64.64
-        let z_delta = GeometricTopology::compute_z_delta(from_z, to_z);
-
-        // Build edge data
-        let edge_data = json!({
-            "z_delta": z_delta,
-            "from_z": from_z,
-            "to_z": to_z,
-            "metadata": params.edge_metadata.clone()
-        });
-        let edge_json = serde_json::to_string(&edge_data).unwrap_or_default();
-
-        let result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_ADD_EDGE")
-            .arg(1)
-            .arg(&topology_key)
-            .arg(&from_id)
-            .arg(&to_id)
-            .arg(&edge_json)
-            .query_async(conn)
-            .await;
-
-        match result {
-            Ok(json_str) => CommandResult::success_json(json_str),
-            Err(e) => CommandResult::error(format!("topo_add_edge failed: {}", e)),
-        }
+        let (from_z, to_z) = match both_z(&lookup, from_id, to_id) { Ok(z) => z, Err(e) => return e };
+        let edge = plan_edge(topology_key, from_id, to_id, from_z, to_z, &p.edge_metadata);
+        passthrough("topo_add_edge", edge.cmd().query_async(conn).await)
     })
 }
 
-/// Handle topo_discover command - Query entities in voxel by position or bucket_key
-pub fn handle_topo_discover_async<'a>(
-    command: &'a Command,
-    conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    _site_id: &'a str,
+/// Sync topo_validate_edge
+pub fn handle_topo_validate_edge(
+    command: &Command,
+    conn: &mut Connection,
+    _topology: &Arc<RwLock<GeometricTopology>>,
+    _site_id: &str,
     debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
-        if debug_mode {
-            debug!("Handling topo_discover command: {}", command.id);
-        }
-
-        let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-
-        let topology_key = match &params.topology_key {
-            Some(k) if !k.is_empty() => k.clone(),
-            _ => return CommandResult::error("Missing 'topology_key' parameter"),
-        };
-
-        // COMPUTE: bucket_key from position OR use provided bucket_key
-        let bucket_key = if let Some(bk) = &params.bucket_key {
-            bk.clone()
-        } else {
-            let x = params.x.unwrap_or(0.5);
-            let y = params.y.unwrap_or(0.5);
-            let z = params.z.unwrap_or(0.5);
-            GeometricTopology::compute_3d_bucket_key(x, y, z, 10)
-        };
-
-        let include_data = if params.include_data.unwrap_or(false) { "true" } else { "false" };
-
-        let result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_QUERY_VOXEL")
-            .arg(1)
-            .arg(&topology_key)
-            .arg(&bucket_key)
-            .arg(include_data)
-            .query_async(conn)
-            .await;
-
-        match result {
-            Ok(json_str) => CommandResult::success_json(json_str),
-            Err(e) => CommandResult::error(format!("topo_discover failed: {}", e)),
-        }
-    })
+) -> CommandResult {
+    if debug_mode { debug!("Handling topo_validate_edge command: {}", command.id); }
+    let p = match parse_params(command) { Ok(p) => p, Err(e) => return e };
+    let (topology_key, from_id, to_id) = match edge_endpoints(&p) { Ok(e) => e, Err(e) => return e };
+    match plan_entity_lookup(topology_key, &[from_id, to_id]).cmd().query::<String>(conn) {
+        Ok(lookup) => validate_edge_reply(&lookup, from_id, to_id),
+        Err(e) => CommandResult::error(format!("Failed to get entities: {}", e)),
+    }
 }
 
-/// Handle topo_z_order command - Get entities in Z-ascending order (DAG load order)
-pub fn handle_topo_z_order_async<'a>(
-    command: &'a Command,
-    conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    _site_id: &'a str,
-    debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
-        if debug_mode {
-            debug!("Handling topo_z_order command: {}", command.id);
-        }
-
-        let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-
-        let topology_key = match &params.topology_key {
-            Some(k) if !k.is_empty() => k.clone(),
-            _ => return CommandResult::error("Missing 'topology_key' parameter"),
-        };
-
-        let limit = params.limit.map(|l| l.to_string()).unwrap_or_default();
-        let offset = params.offset.map(|o| o.to_string()).unwrap_or_else(|| "0".to_string());
-        let descending = if params.descending.unwrap_or(false) { "true" } else { "false" };
-
-        let result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_Z_ORDER")
-            .arg(1)
-            .arg(&topology_key)
-            .arg(&limit)
-            .arg(&offset)
-            .arg(descending)
-            .query_async(conn)
-            .await;
-
-        match result {
-            Ok(json_str) => CommandResult::success_json(json_str),
-            Err(e) => CommandResult::error(format!("topo_z_order failed: {}", e)),
-        }
-    })
-}
-
-/// Handle topo_z_range command - Query entities within Z range
-pub fn handle_topo_z_range_async<'a>(
-    command: &'a Command,
-    conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    _site_id: &'a str,
-    debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
-        if debug_mode {
-            debug!("Handling topo_z_range command: {}", command.id);
-        }
-
-        let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-
-        let topology_key = match &params.topology_key {
-            Some(k) if !k.is_empty() => k.clone(),
-            _ => return CommandResult::error("Missing 'topology_key' parameter"),
-        };
-
-        // COMPUTE: Z-scores for range boundaries
-        let min_score = params.z_min
-            .map(|z| GeometricTopology::compute_z_score(z).to_string())
-            .unwrap_or_else(|| "-inf".to_string());
-        let max_score = params.z_max
-            .map(|z| GeometricTopology::compute_z_score(z).to_string())
-            .unwrap_or_else(|| "+inf".to_string());
-
-        let include_data = if params.include_data.unwrap_or(false) { "true" } else { "false" };
-        let limit = params.limit.map(|l| l.to_string()).unwrap_or_default();
-
-        let result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_QUERY_Z_RANGE")
-            .arg(1)
-            .arg(&topology_key)
-            .arg(&min_score)
-            .arg(&max_score)
-            .arg(include_data)
-            .arg(&limit)
-            .query_async(conn)
-            .await;
-
-        match result {
-            Ok(json_str) => CommandResult::success_json(json_str),
-            Err(e) => CommandResult::error(format!("topo_z_range failed: {}", e)),
-        }
-    })
-}
-
-/// Handle topo_chain command - BFS traversal for dependency chains
-pub fn handle_topo_chain_async<'a>(
-    command: &'a Command,
-    conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    _site_id: &'a str,
-    debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
-        if debug_mode {
-            debug!("Handling topo_chain command: {}", command.id);
-        }
-
-        let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-
-        let topology_key = match &params.topology_key {
-            Some(k) if !k.is_empty() => k.clone(),
-            _ => return CommandResult::error("Missing 'topology_key' parameter"),
-        };
-
-        let entity_id = match &params.entity_id {
-            Some(id) if !id.is_empty() => id.clone(),
-            _ => return CommandResult::error("Missing 'entity_id' parameter"),
-        };
-
-        let direction = params.direction.as_deref().unwrap_or("outgoing");
-        let max_depth = params.max_depth.map(|d| d.to_string()).unwrap_or_else(|| "100".to_string());
-
-        let result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_CHAIN")
-            .arg(1)
-            .arg(&topology_key)
-            .arg(&entity_id)
-            .arg(direction)
-            .arg(&max_depth)
-            .query_async(conn)
-            .await;
-
-        match result {
-            Ok(json_str) => CommandResult::success_json(json_str),
-            Err(e) => CommandResult::error(format!("topo_chain failed: {}", e)),
-        }
-    })
-}
-
-/// Handle topo_stats command - Get topology statistics
-pub fn handle_topo_stats_async<'a>(
-    command: &'a Command,
-    conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    _site_id: &'a str,
-    debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
-        if debug_mode {
-            debug!("Handling topo_stats command: {}", command.id);
-        }
-
-        let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-
-        let topology_key = match &params.topology_key {
-            Some(k) if !k.is_empty() => k.clone(),
-            _ => return CommandResult::error("Missing 'topology_key' parameter"),
-        };
-
-        let result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_STATS")
-            .arg(1)
-            .arg(&topology_key)
-            .query_async(conn)
-            .await;
-
-        match result {
-            Ok(json_str) => CommandResult::success_json(json_str),
-            Err(e) => CommandResult::error(format!("topo_stats failed: {}", e)),
-        }
-    })
-}
-
-/// Handle topo_list command - List all topologies for site
-pub fn handle_topo_list_async<'a>(
-    command: &'a Command,
-    conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    site_id: &'a str,
-    debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
-        if debug_mode {
-            debug!("Handling topo_list command: {}", command.id);
-        }
-
-        let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(_) => TopoParams {
-                topology_key: None, name: None, constraint_type: None, topology_type: None,
-                entity_id: None, from_id: None, to_id: None, x: None, y: None, z: None,
-                bucket_key: None, metadata: None, edge_metadata: None, direction: None,
-                max_depth: None, limit: None, offset: None, include_data: None,
-                z_min: None, z_max: None, descending: None, confirm: None,
-                entity_ids: None, edges_to: None, axis_semantics: None, description: None,
-            },
-        };
-
-        let filter_type = params.topology_type.as_deref().unwrap_or("");
-
-        let result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_LIST")
-            .arg(1)
-            .arg(site_id)
-            .arg(filter_type)
-            .query_async(conn)
-            .await;
-
-        match result {
-            Ok(json_str) => CommandResult::success_json(json_str),
-            Err(e) => CommandResult::error(format!("topo_list failed: {}", e)),
-        }
-    })
-}
-
-/// Handle topo_delete command - Delete topology (requires CONFIRM)
-pub fn handle_topo_delete_async<'a>(
-    command: &'a Command,
-    conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    site_id: &'a str,
-    debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
-        if debug_mode {
-            debug!("Handling topo_delete command: {}", command.id);
-        }
-
-        let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-
-        let topology_key = match &params.topology_key {
-            Some(k) if !k.is_empty() => k.clone(),
-            _ => return CommandResult::error("Missing 'topology_key' parameter"),
-        };
-
-        let confirm = params.confirm.as_deref().unwrap_or("");
-        if confirm != "CONFIRM" {
-            return CommandResult::error("Must provide confirm: 'CONFIRM' to delete topology");
-        }
-
-        let result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_DELETE")
-            .arg(1)
-            .arg(site_id)
-            .arg(&topology_key)
-            .arg("CONFIRM")
-            .query_async(conn)
-            .await;
-
-        match result {
-            Ok(json_str) => CommandResult::success_json(json_str),
-            Err(e) => CommandResult::error(format!("topo_delete failed: {}", e)),
-        }
-    })
-}
-
-/// Handle topo_get_entity command - Get single entity with edges
-pub fn handle_topo_get_entity_async<'a>(
-    command: &'a Command,
-    conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    _site_id: &'a str,
-    debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
-        if debug_mode {
-            debug!("Handling topo_get_entity command: {}", command.id);
-        }
-
-        let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-
-        let topology_key = match &params.topology_key {
-            Some(k) if !k.is_empty() => k.clone(),
-            _ => return CommandResult::error("Missing 'topology_key' parameter"),
-        };
-
-        let entity_id = match &params.entity_id {
-            Some(id) if !id.is_empty() => id.clone(),
-            _ => return CommandResult::error("Missing 'entity_id' parameter"),
-        };
-
-        let result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_GET_ENTITY")
-            .arg(1)
-            .arg(&topology_key)
-            .arg(&entity_id)
-            .query_async(conn)
-            .await;
-
-        match result {
-            Ok(json_str) => CommandResult::success_json(json_str),
-            Err(e) => CommandResult::error(format!("topo_get_entity failed: {}", e)),
-        }
-    })
-}
-
-/// Handle topo_validate_edge command - Validate edge constraint without creating
+/// Async topo_validate_edge
 pub fn handle_topo_validate_edge_async<'a>(
     command: &'a Command,
     conn: &'a mut AsyncConnection,
@@ -1188,508 +862,64 @@ pub fn handle_topo_validate_edge_async<'a>(
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
-        if debug_mode {
-            debug!("Handling topo_validate_edge command: {}", command.id);
-        }
-
-        let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-
-        let topology_key = match &params.topology_key {
-            Some(k) if !k.is_empty() => k.clone(),
-            _ => return CommandResult::error("Missing 'topology_key' parameter"),
-        };
-
-        let from_id = match &params.from_id {
-            Some(id) if !id.is_empty() => id.clone(),
-            _ => return CommandResult::error("Missing 'from_id' parameter"),
-        };
-
-        let to_id = match &params.to_id {
-            Some(id) if !id.is_empty() => id.clone(),
-            _ => return CommandResult::error("Missing 'to_id' parameter"),
-        };
-
-        // Get both entities
-        let entities_json = serde_json::to_string(&vec![&from_id, &to_id]).unwrap_or_default();
-        let entities_result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_GET_ENTITIES")
-            .arg(1)
-            .arg(&topology_key)
-            .arg(&entities_json)
-            .arg("false")
-            .query_async(conn)
-            .await;
-
-        match entities_result {
-            Ok(json_str) => {
-                match serde_json::from_str::<serde_json::Value>(&json_str) {
-                    Ok(data) => {
-                        let from_z = data.get("entities")
-                            .and_then(|e| e.get(&from_id))
-                            .and_then(|e| e.get("position"))
-                            .and_then(|p| p.get("z"))
-                            .and_then(|z| z.as_f64());
-
-                        let to_z = data.get("entities")
-                            .and_then(|e| e.get(&to_id))
-                            .and_then(|e| e.get("position"))
-                            .and_then(|p| p.get("z"))
-                            .and_then(|z| z.as_f64());
-
-                        match (from_z, to_z) {
-                            (Some(fz), Some(tz)) => {
-                                // COMPUTE: Validate using Q64.64
-                                let (valid, reason) = GeometricTopology::validate_z_monotonic(fz, tz);
-                                let z_delta = GeometricTopology::compute_z_delta(fz, tz);
-
-                                CommandResult::success(json!({
-                                    "valid": valid,
-                                    "reason": reason,
-                                    "from_z": fz,
-                                    "to_z": tz,
-                                    "z_delta": z_delta
-                                }))
-                            }
-                            _ => CommandResult::error("Could not get Z coordinates for both entities"),
-                        }
-                    }
-                    Err(e) => CommandResult::error(format!("Failed to parse entities: {}", e)),
-                }
-            }
+        if debug_mode { debug!("Handling topo_validate_edge command: {}", command.id); }
+        let p = match parse_params(command) { Ok(p) => p, Err(e) => return e };
+        let (topology_key, from_id, to_id) = match edge_endpoints(&p) { Ok(e) => e, Err(e) => return e };
+        match plan_entity_lookup(topology_key, &[from_id, to_id]).cmd().query_async::<String>(conn).await {
+            Ok(lookup) => validate_edge_reply(&lookup, from_id, to_id),
             Err(e) => CommandResult::error(format!("Failed to get entities: {}", e)),
         }
     })
 }
 
-pub fn handle_topo_create(
-    command: &Command,
-    conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    site_id: &str,
-    debug_mode: bool,
-) -> CommandResult {
-    if debug_mode { debug!("Handling topo_create command"); }
-    let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-    };
-    let name = match &params.name {
-        Some(n) if !n.is_empty() => n.clone(),
-        _ => return CommandResult::error("Missing 'name' parameter"),
-    };
-    let topology_key = params.topology_key.unwrap_or_else(|| format!("{{{}}}:{}", site_id, name));
-    let definition = json!({
-        "name": name,
-        "constraint_type": params.constraint_type.as_deref().unwrap_or("none"),
-        "topology_type": params.topology_type.as_deref().unwrap_or("custom"),
-        "description": params.description.as_deref().unwrap_or(""),
-        "axis_semantics": params.axis_semantics.clone()
-    });
-    let def_json = serde_json::to_string(&definition).unwrap_or_default();
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_TOPO_CREATE").arg(1).arg(site_id).arg(&topology_key).arg(&def_json)
-        .query(conn);
-    match result {
-        Ok(json_str) => CommandResult::success_json(json_str),
-        Err(e) => CommandResult::error(format!("topo_create failed: {}", e)),
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::types::assert_descriptor_fields;
 
-/// Sync version of handle_topo_register
-pub fn handle_topo_register(
-    command: &Command,
-    conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    _site_id: &str,
-    debug_mode: bool,
-) -> CommandResult {
-    if debug_mode { debug!("Handling topo_register command"); }
-    let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-    };
-    let topology_key = match &params.topology_key {
-        Some(k) if !k.is_empty() => k.clone(),
-        _ => return CommandResult::error("Missing 'topology_key' parameter"),
-    };
-    let entity_id = match &params.entity_id {
-        Some(id) if !id.is_empty() => id.clone(),
-        _ => return CommandResult::error("Missing 'entity_id' parameter"),
-    };
-    let x = params.x.unwrap_or(0.5);
-    let y = params.y.unwrap_or(0.5);
-    let z = params.z.unwrap_or(0.5);
-    let bucket_key = GeometricTopology::compute_3d_bucket_key(x, y, z, 10);
-    let z_score = GeometricTopology::compute_z_score(z);
-    let entity_data = json!({
-        "position": { "x": x, "y": y, "z": z },
-        "metadata": params.metadata.clone().unwrap_or(json!({}))
-    });
-    let entity_json = serde_json::to_string(&entity_data).unwrap_or_default();
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_REGISTER_CAPABILITY_VECTOR").arg(1).arg(&topology_key)
-        .arg(&entity_id).arg(&entity_json).arg(&bucket_key).arg(z_score)
-        .arg(crate::daemon::GNodeDaemon::topology_snapshot_key())  // args[5]: (B) snapshot
-        .arg(-1i64)  // args[6]: no registration_order axis on this path
-        .arg(crate::integration::handlers::types::POINT_FRAC_BITS)  // args[7]
-        .query(conn);
-    match result {
-        Ok(json_str) => CommandResult::success_json(json_str),
-        Err(e) => CommandResult::error(format!("topo_register failed: {}", e)),
+    fn params(v: Value) -> TopoParams {
+        serde_json::from_value(v).unwrap()
     }
-}
 
-/// Sync version of handle_topo_deregister
-pub fn handle_topo_deregister(
-    command: &Command,
-    conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    _site_id: &str,
-    debug_mode: bool,
-) -> CommandResult {
-    if debug_mode { debug!("Handling topo_deregister command"); }
-    let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-    };
-    let topology_key = match &params.topology_key {
-        Some(k) if !k.is_empty() => k.clone(),
-        _ => return CommandResult::error("Missing 'topology_key' parameter"),
-    };
-    let entity_id = match &params.entity_id {
-        Some(id) if !id.is_empty() => id.clone(),
-        _ => return CommandResult::error("Missing 'entity_id' parameter"),
-    };
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_DEREGISTER_CAPABILITY_VECTOR").arg(1).arg(&topology_key).arg(&entity_id)
-        .arg(crate::daemon::GNodeDaemon::topology_snapshot_key())  // args[2]: (B) snapshot
-        .query(conn);
-    match result {
-        Ok(json_str) => CommandResult::success_json(json_str),
-        Err(e) => CommandResult::error(format!("topo_deregister failed: {}", e)),
-    }
-}
-
-/// Sync version of handle_topo_add_edge
-pub fn handle_topo_add_edge(
-    command: &Command,
-    conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    _site_id: &str,
-    debug_mode: bool,
-) -> CommandResult {
-    if debug_mode { debug!("Handling topo_add_edge command"); }
-    let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-    };
-    let topology_key = match &params.topology_key {
-        Some(k) if !k.is_empty() => k.clone(),
-        _ => return CommandResult::error("Missing 'topology_key' parameter"),
-    };
-    let from_id = match &params.from_id {
-        Some(id) if !id.is_empty() => id.clone(),
-        _ => return CommandResult::error("Missing 'from_id' parameter"),
-    };
-    let to_id = match &params.to_id {
-        Some(id) if !id.is_empty() => id.clone(),
-        _ => return CommandResult::error("Missing 'to_id' parameter"),
-    };
-    let edge_data = json!({ "metadata": params.edge_metadata.clone() });
-    let edge_json = serde_json::to_string(&edge_data).unwrap_or_default();
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_TOPO_ADD_EDGE").arg(1).arg(&topology_key)
-        .arg(&from_id).arg(&to_id).arg(&edge_json)
-        .query(conn);
-    match result {
-        Ok(json_str) => CommandResult::success_json(json_str),
-        Err(e) => CommandResult::error(format!("topo_add_edge failed: {}", e)),
-    }
-}
-
-/// Sync version of handle_topo_discover
-pub fn handle_topo_discover(
-    command: &Command,
-    conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    _site_id: &str,
-    debug_mode: bool,
-) -> CommandResult {
-    if debug_mode { debug!("Handling topo_discover command"); }
-    let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-    };
-    let topology_key = match &params.topology_key {
-        Some(k) if !k.is_empty() => k.clone(),
-        _ => return CommandResult::error("Missing 'topology_key' parameter"),
-    };
-    let bucket_key = if let Some(bk) = &params.bucket_key {
-        bk.clone()
-    } else {
-        let x = params.x.unwrap_or(0.5);
-        let y = params.y.unwrap_or(0.5);
-        let z = params.z.unwrap_or(0.5);
-        GeometricTopology::compute_3d_bucket_key(x, y, z, 10)
-    };
-    let include_data = if params.include_data.unwrap_or(false) { "true" } else { "false" };
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_TOPO_QUERY_VOXEL").arg(1).arg(&topology_key).arg(&bucket_key).arg(include_data)
-        .query(conn);
-    match result {
-        Ok(json_str) => CommandResult::success_json(json_str),
-        Err(e) => CommandResult::error(format!("topo_discover failed: {}", e)),
-    }
-}
-
-/// Sync version of handle_topo_z_order
-pub fn handle_topo_z_order(
-    command: &Command,
-    conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    _site_id: &str,
-    debug_mode: bool,
-) -> CommandResult {
-    if debug_mode { debug!("Handling topo_z_order command"); }
-    let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-    };
-    let topology_key = match &params.topology_key {
-        Some(k) if !k.is_empty() => k.clone(),
-        _ => return CommandResult::error("Missing 'topology_key' parameter"),
-    };
-    let direction = params.direction.as_deref().unwrap_or("asc");
-    let limit = params.limit.unwrap_or(100);
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_TOPO_Z_ORDER").arg(1).arg(&topology_key).arg(direction).arg(limit)
-        .query(conn);
-    match result {
-        Ok(json_str) => CommandResult::success_json(json_str),
-        Err(e) => CommandResult::error(format!("topo_z_order failed: {}", e)),
-    }
-}
-
-/// Sync version of handle_topo_z_range
-pub fn handle_topo_z_range(
-    command: &Command,
-    conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    _site_id: &str,
-    debug_mode: bool,
-) -> CommandResult {
-    if debug_mode { debug!("Handling topo_z_range command"); }
-    let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-    };
-    let topology_key = match &params.topology_key {
-        Some(k) if !k.is_empty() => k.clone(),
-        _ => return CommandResult::error("Missing 'topology_key' parameter"),
-    };
-    let min_z = params.z_min.unwrap_or(0.0);
-    let max_z = params.z_max.unwrap_or(1.0);
-    let include_data = if params.include_data.unwrap_or(false) { "true" } else { "false" };
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_TOPO_Z_RANGE").arg(1).arg(&topology_key).arg(min_z).arg(max_z).arg(include_data)
-        .query(conn);
-    match result {
-        Ok(json_str) => CommandResult::success_json(json_str),
-        Err(e) => CommandResult::error(format!("topo_z_range failed: {}", e)),
-    }
-}
-
-/// Sync version of handle_topo_chain
-pub fn handle_topo_chain(
-    command: &Command,
-    conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    _site_id: &str,
-    debug_mode: bool,
-) -> CommandResult {
-    if debug_mode { debug!("Handling topo_chain command"); }
-    let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-    };
-    let topology_key = match &params.topology_key {
-        Some(k) if !k.is_empty() => k.clone(),
-        _ => return CommandResult::error("Missing 'topology_key' parameter"),
-    };
-    let entity_id = match &params.entity_id {
-        Some(id) if !id.is_empty() => id.clone(),
-        _ => return CommandResult::error("Missing 'entity_id' parameter"),
-    };
-    let direction = params.direction.as_deref().unwrap_or("outgoing");
-    let max_depth = params.max_depth.unwrap_or(10);
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_TOPO_CHAIN").arg(1).arg(&topology_key).arg(&entity_id).arg(direction).arg(max_depth)
-        .query(conn);
-    match result {
-        Ok(json_str) => CommandResult::success_json(json_str),
-        Err(e) => CommandResult::error(format!("topo_chain failed: {}", e)),
-    }
-}
-
-/// Sync version of handle_topo_stats
-pub fn handle_topo_stats(
-    command: &Command,
-    conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    _site_id: &str,
-    debug_mode: bool,
-) -> CommandResult {
-    if debug_mode { debug!("Handling topo_stats command"); }
-    let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-    };
-    let topology_key = match &params.topology_key {
-        Some(k) if !k.is_empty() => k.clone(),
-        _ => return CommandResult::error("Missing 'topology_key' parameter"),
-    };
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_TOPO_STATS").arg(1).arg(&topology_key)
-        .query(conn);
-    match result {
-        Ok(json_str) => CommandResult::success_json(json_str),
-        Err(e) => CommandResult::error(format!("topo_stats failed: {}", e)),
-    }
-}
-
-/// Sync version of handle_topo_list
-pub fn handle_topo_list(
-    command: &Command,
-    conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    site_id: &str,
-    debug_mode: bool,
-) -> CommandResult {
-    if debug_mode { debug!("Handling topo_list command"); }
-    // Extract prefix from parameters if provided, otherwise empty
-    let prefix = command.parameters.get("prefix")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_TOPO_LIST").arg(1).arg(site_id).arg(prefix)
-        .query(conn);
-    match result {
-        Ok(json_str) => CommandResult::success_json(json_str),
-        Err(e) => CommandResult::error(format!("topo_list failed: {}", e)),
-    }
-}
-
-/// Sync version of handle_topo_delete
-pub fn handle_topo_delete(
-    command: &Command,
-    conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    _site_id: &str,
-    debug_mode: bool,
-) -> CommandResult {
-    if debug_mode { debug!("Handling topo_delete command"); }
-    let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-    };
-    let topology_key = match &params.topology_key {
-        Some(k) if !k.is_empty() => k.clone(),
-        _ => return CommandResult::error("Missing 'topology_key' parameter"),
-    };
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_TOPO_DELETE").arg(1).arg(&topology_key)
-        .query(conn);
-    match result {
-        Ok(json_str) => CommandResult::success_json(json_str),
-        Err(e) => CommandResult::error(format!("topo_delete failed: {}", e)),
-    }
-}
-
-/// Sync version of handle_topo_get_entity
-pub fn handle_topo_get_entity(
-    command: &Command,
-    conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    _site_id: &str,
-    debug_mode: bool,
-) -> CommandResult {
-    if debug_mode { debug!("Handling topo_get_entity command"); }
-    let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-    };
-    let topology_key = match &params.topology_key {
-        Some(k) if !k.is_empty() => k.clone(),
-        _ => return CommandResult::error("Missing 'topology_key' parameter"),
-    };
-    let entity_id = match &params.entity_id {
-        Some(id) if !id.is_empty() => id.clone(),
-        _ => return CommandResult::error("Missing 'entity_id' parameter"),
-    };
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_TOPO_GET_ENTITY").arg(1).arg(&topology_key).arg(&entity_id)
-        .query(conn);
-    match result {
-        Ok(json_str) => CommandResult::success_json(json_str),
-        Err(e) => CommandResult::error(format!("topo_get_entity failed: {}", e)),
-    }
-}
-
-/// Sync version of handle_topo_validate_edge
-pub fn handle_topo_validate_edge(
-    command: &Command,
-    conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    _site_id: &str,
-    debug_mode: bool,
-) -> CommandResult {
-    if debug_mode { debug!("Handling topo_validate_edge command"); }
-    let params: TopoParams = match serde_json::from_value(command.parameters.clone()) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-    };
-    let topology_key = match &params.topology_key {
-        Some(k) if !k.is_empty() => k.clone(),
-        _ => return CommandResult::error("Missing 'topology_key' parameter"),
-    };
-    let from_id = match &params.from_id {
-        Some(id) if !id.is_empty() => id.clone(),
-        _ => return CommandResult::error("Missing 'from_id' parameter"),
-    };
-    let to_id = match &params.to_id {
-        Some(id) if !id.is_empty() => id.clone(),
-        _ => return CommandResult::error("Missing 'to_id' parameter"),
-    };
-    // Get entities to validate Z constraint
-    let entities_json = serde_json::to_string(&vec![&from_id, &to_id]).unwrap_or_default();
-    let entities_result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_TOPO_GET_ENTITIES").arg(1).arg(&topology_key).arg(&entities_json).arg("false")
-        .query(conn);
-    match entities_result {
-        Ok(json_str) => {
-            match serde_json::from_str::<serde_json::Value>(&json_str) {
-                Ok(data) => {
-                    let from_z = data.get("entities").and_then(|e| e.get(&from_id))
-                        .and_then(|e| e.get("position")).and_then(|p| p.get("z")).and_then(|z| z.as_f64());
-                    let to_z = data.get("entities").and_then(|e| e.get(&to_id))
-                        .and_then(|e| e.get("position")).and_then(|p| p.get("z")).and_then(|z| z.as_f64());
-                    match (from_z, to_z) {
-                        (Some(fz), Some(tz)) => {
-                            let (valid, reason) = GeometricTopology::validate_z_monotonic(fz, tz);
-                            let z_delta = GeometricTopology::compute_z_delta(fz, tz);
-                            CommandResult::success(json!({
-                                "valid": valid, "reason": reason, "from_z": fz, "to_z": tz, "z_delta": z_delta
-                            }))
-                        }
-                        _ => CommandResult::error("Could not get Z coordinates for both entities"),
-                    }
-                }
-                Err(e) => CommandResult::error(format!("Failed to parse entities: {}", e)),
-            }
+    #[test]
+    fn descriptors_name_only_fields_the_shared_parser_reads() {
+        let (mut handlers, mut async_handlers, mut descriptors) = (HashMap::new(), HashMap::new(), Vec::new());
+        register(&mut handlers, &mut async_handlers, &mut descriptors);
+        for d in &descriptors {
+            assert_descriptor_fields::<TopoParams>(&descriptors, d.name, false);
         }
-        Err(e) => CommandResult::error(format!("Failed to get entities: {}", e)),
+    }
+
+    #[test]
+    fn delete_requires_confirm_on_every_lane() {
+        assert!(plan_delete(&params(json!({"topology_key": "{s}:t"})), "s").is_err());
+        let call = plan_delete(&params(json!({"topology_key": "{s}:t", "confirm": "CONFIRM"})), "s").ok().unwrap();
+        assert_eq!((call.function, call.keys.clone(), call.args.clone()), ("GNODE_TOPO_DELETE", vec!["s".to_string()], vec!["{s}:t".to_string(), "CONFIRM".to_string()]));
+    }
+
+    #[test]
+    fn z_order_and_z_range_send_the_arguments_the_lua_reads() {
+        let order = plan_z_order(&params(json!({"topology_key": "k", "limit": 5, "descending": true})), "s").ok().unwrap();
+        assert_eq!(order.args, vec!["5", "0", "true"]);
+        let range = plan_z_range(&params(json!({"topology_key": "k"})), "s").ok().unwrap();
+        assert_eq!(range.function, "GNODE_TOPO_QUERY_Z_RANGE");
+        assert_eq!(range.args, vec!["-inf", "+inf", "false", ""]);
+    }
+
+    #[test]
+    fn a_3d_topology_never_writes_the_shared_service_snapshot() {
+        let (register, _) = plan_register(&params(json!({"topology_key": "{s}:t", "entity_id": "auth"})), "s").ok().unwrap();
+        assert_eq!(register.args[4], "");
+        let deregister = plan_deregister(&params(json!({"topology_key": "{s}:t", "entity_id": "auth"})), "s").ok().unwrap();
+        assert_eq!(deregister.args, vec!["auth", ""]);
+    }
+
+    #[test]
+    fn edge_commands_read_z_from_the_ents_reply() {
+        let reply = json!({"ents": {"a": {"position": {"z": 0.8}}, "b": {"position": {"z": 0.2}}}}).to_string();
+        assert_eq!(entity_z(&reply, "a"), Some(0.8));
+        let v = validate_edge_reply(&reply, "a", "b").result.unwrap();
+        assert_eq!(v["from_z"], 0.8);
+        assert!(validate_edge_reply(&reply, "a", "missing").error.unwrap().contains("missing"));
     }
 }

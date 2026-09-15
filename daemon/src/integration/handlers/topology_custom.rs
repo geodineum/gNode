@@ -2,7 +2,8 @@
 //
 // Handles: custom_topology_discover, custom_topology_distance, custom_topology_knn,
 //          custom_topology_similarity
-// These use Rust's fixed-point arithmetic for cluster-safe calculations.
+// A custom topology is one JSON document its owner stores with SET at `topology_key`
+// (format: COMMAND_SCHEMA.md). Both lanes share one compute per command.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -14,6 +15,7 @@ use redis::aio::MultiplexedConnection as AsyncConnection;
 use serde::Deserialize;
 use log::debug;
 use serde_json::json;
+use crate::custom_topology::{fixed_distance, CustomTopology};
 use crate::daemon::Command;
 use crate::GeometricTopology;
 
@@ -49,24 +51,27 @@ pub fn register(
     descriptors.push(CommandDescriptor {
         name: "custom_topology_discover",
         category: "topology_custom",
-        description: "Discover entities in a custom topology by capability matching",
+        description: "Filter and rank the entities of a custom topology document by per-dimension requirements",
         params_schema: json!({
             "type": "object",
             "properties": {
-                "topology": {"type": "string", "description": "Topology name"},
-                "capabilities": {"type": "object", "description": "Capability requirements for matching"},
-                "limit": {"type": "integer", "description": "Maximum results to return"}
+                "topology_key": {"type": "string", "description": "Key of the topology document"},
+                "requirements": {"type": "object", "description": "Dimension name → exact value, {min}, {max} or {min, max}; values may be names from the document's `values` map"},
+                "max_results": {"type": "integer", "default": 10, "description": "Maximum results to return"},
+                "include_metadata": {"type": "boolean", "default": true, "description": "Include each entity's metadata"}
             },
-            "required": ["topology", "capabilities"]
+            "required": ["topology_key", "requirements"]
         }),
         returns_schema: json!({
             "type": "object",
             "properties": {
-                "results": {"type": "array", "description": "Matching entities"},
-                "count": {"type": "integer", "description": "Number of matches"}
+                "total_matches": {"type": "integer", "description": "Results returned"},
+                "results": {"type": "array", "description": "{id, score, distance, point, metadata?}: highest score first, then nearest the origin, then id"},
+                "precision": {"type": "string"},
+                "cluster_safe": {"type": "boolean"}
             }
         }),
-        example: r#"{"cmd":"custom_topology_discover","params":{"topology":"services","capabilities":{"compute":0.8},"limit":10}}"#,
+        example: r#"{"cmd":"custom_topology_discover","params":{"topology_key":"{mysite}:signals","requirements":{"regime":"range_bound","confidence":{"min":0.6}},"max_results":5}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
@@ -74,23 +79,26 @@ pub fn register(
     descriptors.push(CommandDescriptor {
         name: "custom_topology_distance",
         category: "topology_custom",
-        description: "Calculate distance between two entities in a custom topology",
+        description: "Q64.64 Euclidean distance between two points; reads no stored data",
         params_schema: json!({
             "type": "object",
             "properties": {
-                "topology": {"type": "string", "description": "Topology name"},
-                "entity_a": {"type": "string", "description": "First entity identifier"},
-                "entity_b": {"type": "string", "description": "Second entity identifier"}
+                "topology_key": {"type": "string", "description": "Accepted for symmetry with the other custom-topology commands; not read"},
+                "point1": {"type": "array", "items": {"type": "number"}, "description": "First point"},
+                "point2": {"type": "array", "items": {"type": "number"}, "description": "Second point, same width"}
             },
-            "required": ["topology", "entity_a", "entity_b"]
+            "required": ["point1", "point2"]
         }),
         returns_schema: json!({
             "type": "object",
             "properties": {
-                "distance": {"type": "number", "description": "Euclidean distance between entities"}
+                "distance": {"type": "number"},
+                "dimensions": {"type": "integer"},
+                "precision": {"type": "string"},
+                "cluster_safe": {"type": "boolean"}
             }
         }),
-        example: r#"{"cmd":"custom_topology_distance","params":{"topology":"services","entity_a":"svc-auth","entity_b":"svc-gateway"}}"#,
+        example: r#"{"cmd":"custom_topology_distance","params":{"topology_key":"{mysite}:signals","point1":[0.5,0.7],"point2":[0.3,0.9]}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
@@ -98,24 +106,26 @@ pub fn register(
     descriptors.push(CommandDescriptor {
         name: "custom_topology_knn",
         category: "topology_custom",
-        description: "K-nearest-neighbors search in a custom topology",
+        description: "The k entities nearest a query point in a custom topology document",
         params_schema: json!({
             "type": "object",
             "properties": {
-                "topology": {"type": "string", "description": "Topology name"},
-                "entity_id": {"type": "string", "description": "Reference entity identifier"},
-                "k": {"type": "integer", "description": "Number of nearest neighbors to return"}
+                "topology_key": {"type": "string", "description": "Key of the topology document"},
+                "query_point": {"type": "array", "items": {"type": "number"}, "description": "Point with the document's dimension count"},
+                "k": {"type": "integer", "default": 5, "description": "Number of neighbours"}
             },
-            "required": ["topology", "entity_id", "k"]
+            "required": ["topology_key", "query_point"]
         }),
         returns_schema: json!({
             "type": "object",
             "properties": {
-                "results": {"type": "array", "description": "Array of k nearest entities with distances"},
-                "k": {"type": "integer", "description": "Requested neighbor count"}
+                "k": {"type": "integer"},
+                "results": {"type": "array", "description": "{id, score, distance, point, metadata}: nearest first, equal distances by id"},
+                "precision": {"type": "string"},
+                "cluster_safe": {"type": "boolean"}
             }
         }),
-        example: r#"{"cmd":"custom_topology_knn","params":{"topology":"services","entity_id":"svc-auth","k":5}}"#,
+        example: r#"{"cmd":"custom_topology_knn","params":{"topology_key":"{mysite}:signals","query_point":[0.5,0.6,0.67,0.5],"k":3}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
@@ -123,30 +133,35 @@ pub fn register(
     descriptors.push(CommandDescriptor {
         name: "custom_topology_similarity",
         category: "topology_custom",
-        description: "Similarity search in a custom topology",
+        description: "Distance and similarity (1 / (1 + distance)) between two entities of a custom topology document",
         params_schema: json!({
             "type": "object",
             "properties": {
-                "topology": {"type": "string", "description": "Topology name"},
-                "entity_id": {"type": "string", "description": "Reference entity identifier"},
-                "threshold": {"type": "number", "description": "Similarity threshold (0.0-1.0)"}
+                "topology_key": {"type": "string", "description": "Key of the topology document"},
+                "entity_id_1": {"type": "string", "description": "First entity"},
+                "entity_id_2": {"type": "string", "description": "Second entity"}
             },
-            "required": ["topology", "entity_id"]
+            "required": ["topology_key", "entity_id_1", "entity_id_2"]
         }),
         returns_schema: json!({
             "type": "object",
             "properties": {
-                "results": {"type": "array", "description": "Entities within similarity threshold"},
-                "count": {"type": "integer", "description": "Number of matches"}
+                "entity_id_1": {"type": "string"},
+                "entity_id_2": {"type": "string"},
+                "distance": {"type": "number"},
+                "similarity": {"type": "number"},
+                "precision": {"type": "string"},
+                "cluster_safe": {"type": "boolean"}
             }
         }),
-        example: r#"{"cmd":"custom_topology_similarity","params":{"topology":"services","entity_id":"svc-auth","threshold":0.8}}"#,
+        example: r#"{"cmd":"custom_topology_similarity","params":{"topology_key":"{mysite}:signals","entity_id_1":"s01","entity_id_2":"s02"}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
 }
 
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize, Default))]
 struct CustomTopologyDiscoverParams {
     topology_key: String,
     requirements: serde_json::Value,
@@ -159,16 +174,18 @@ struct CustomTopologyDiscoverParams {
 fn default_max_results() -> usize { 10 }
 fn default_true() -> bool { true }
 
-/// Parameters for custom topology distance calculation
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize, Default))]
 struct CustomTopologyDistanceParams {
+    #[serde(default)]
+    #[allow(dead_code)]
     topology_key: String,
     point1: Vec<f64>,
     point2: Vec<f64>,
 }
 
-/// Parameters for custom topology KNN search
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize, Default))]
 struct CustomTopologyKnnParams {
     topology_key: String,
     query_point: Vec<f64>,
@@ -178,18 +195,103 @@ struct CustomTopologyKnnParams {
 
 fn default_k() -> usize { 5 }
 
-/// Parameters for custom topology similarity calculation
 #[derive(Debug, Deserialize)]
+#[cfg_attr(test, derive(serde::Serialize, Default))]
 struct CustomTopologySimilarityParams {
     topology_key: String,
     entity_id_1: String,
     entity_id_2: String,
 }
 
-/// Async handler for custom topology discovery using Rust Q64.64 precision
-///
-/// Loads topology from ValKey, performs discovery with fixed-point math,
-/// returns cluster-safe deterministic results.
+// =========================================================================
+// Compute shared by both lanes
+// =========================================================================
+
+fn parse<T: for<'de> Deserialize<'de>>(command: &Command) -> Result<T, CommandResult> {
+    serde_json::from_value(command.parameters.clone())
+        .map_err(|e| CommandResult::error(format!("Invalid parameters: {}", e)))
+}
+
+fn load(topology_key: &str, stored: Option<String>) -> Result<CustomTopology, CommandResult> {
+    let json = stored.ok_or_else(|| CommandResult::error(format!("No custom topology stored at {}", topology_key)))?;
+    CustomTopology::from_json(&json)
+        .map_err(|e| CommandResult::error(format!("Invalid topology document at {}: {}", topology_key, e)))
+}
+
+fn discover(p: &CustomTopologyDiscoverParams, stored: Option<String>) -> CommandResult {
+    let topology = match load(&p.topology_key, stored) { Ok(t) => t, Err(e) => return e };
+    match topology.discover_precise(&p.requirements, p.max_results, p.include_metadata) {
+        Ok(results) => CommandResult::success(json!({
+            "total_matches": results.len(),
+            "results": results,
+            "precision": "Q64.64",
+            "cluster_safe": true
+        })),
+        Err(e) => CommandResult::error(e),
+    }
+}
+
+fn distance(p: &CustomTopologyDistanceParams) -> CommandResult {
+    if p.point1.len() != p.point2.len() {
+        return CommandResult::error(format!(
+            "Points must have same dimensions: {} vs {}",
+            p.point1.len(), p.point2.len()
+        ));
+    }
+    CommandResult::success(json!({
+        "distance": fixed_distance(&p.point1, &p.point2),
+        "dimensions": p.point1.len(),
+        "precision": "Q64.64",
+        "cluster_safe": true
+    }))
+}
+
+fn knn(p: &CustomTopologyKnnParams, stored: Option<String>) -> CommandResult {
+    let topology = match load(&p.topology_key, stored) { Ok(t) => t, Err(e) => return e };
+    match topology.knn_precise(&p.query_point, p.k) {
+        Ok(results) => CommandResult::success(json!({
+            "k": p.k,
+            "results": results,
+            "precision": "Q64.64",
+            "cluster_safe": true
+        })),
+        Err(e) => CommandResult::error(e),
+    }
+}
+
+fn similarity(p: &CustomTopologySimilarityParams, stored: Option<String>) -> CommandResult {
+    let topology = match load(&p.topology_key, stored) { Ok(t) => t, Err(e) => return e };
+    let point = |id: &str| {
+        topology.services.get(id).map(|e| e.point.clone()).ok_or_else(|| format!("Entity not found: {}", id))
+    };
+    let (a, b) = match (point(&p.entity_id_1), point(&p.entity_id_2)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(e), _) | (_, Err(e)) => return CommandResult::error(e),
+    };
+    CommandResult::success(json!({
+        "entity_id_1": p.entity_id_1,
+        "entity_id_2": p.entity_id_2,
+        "distance": fixed_distance(&a, &b),
+        "similarity": topology.similarity_precise(&a, &b),
+        "precision": "Q64.64",
+        "cluster_safe": true
+    }))
+}
+
+async fn stored_async(conn: &mut AsyncConnection, key: &str) -> Result<Option<String>, CommandResult> {
+    redis::cmd("GET").arg(key).query_async(conn).await
+        .map_err(|e| CommandResult::error(format!("Failed to load topology {}: {}", key, e)))
+}
+
+fn stored_sync(conn: &mut Connection, key: &str) -> Result<Option<String>, CommandResult> {
+    redis::cmd("GET").arg(key).query(conn)
+        .map_err(|e| CommandResult::error(format!("Failed to load topology {}: {}", key, e)))
+}
+
+// =========================================================================
+// Async handlers
+// =========================================================================
+
 pub fn handle_custom_topology_discover_async<'a>(
     command: &'a Command,
     conn: &'a mut AsyncConnection,
@@ -198,111 +300,25 @@ pub fn handle_custom_topology_discover_async<'a>(
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
-        if debug_mode {
-            debug!("Handling custom_topology_discover with Q64.64 precision");
-        }
-
-        let params: CustomTopologyDiscoverParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-
-        // Load topology from ValKey
-        let topology_json: redis::RedisResult<String> = redis::cmd("GET")
-            .arg(&params.topology_key)
-            .query_async(conn)
-            .await;
-
-        let topology_data = match topology_json {
-            Ok(json) => json,
-            Err(e) => return CommandResult::error(format!("Failed to load topology: {}", e)),
-        };
-
-        // Parse into CustomTopology
-        let custom_topology = match crate::custom_topology::CustomTopology::from_json(&topology_data) {
-            Ok(t) => t,
-            Err(e) => return CommandResult::error(format!("Invalid topology data: {}", e)),
-        };
-
-        // Perform discovery with Q64.64 precision
-        let results = custom_topology.discover_precise(
-            &params.requirements,
-            params.max_results,
-            params.include_metadata,
-        );
-
-        CommandResult::success(json!({
-            "total_matches": results.len(),
-            "results": results,
-            "precision": "Q64.64",
-            "cluster_safe": true
-        }))
+        if debug_mode { debug!("Handling custom_topology_discover"); }
+        let p: CustomTopologyDiscoverParams = match parse(command) { Ok(p) => p, Err(e) => return e };
+        match stored_async(conn, &p.topology_key).await { Ok(s) => discover(&p, s), Err(e) => e }
     })
 }
 
-/// Async handler for custom topology distance using Rust Q64.64 precision
 pub fn handle_custom_topology_distance_async<'a>(
     command: &'a Command,
-    conn: &'a mut AsyncConnection,
+    _conn: &'a mut AsyncConnection,
     _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
-        if debug_mode {
-            debug!("Handling custom_topology_distance with Q64.64 precision");
-        }
-
-        let params: CustomTopologyDistanceParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-
-        if params.point1.len() != params.point2.len() {
-            return CommandResult::error(format!(
-                "Points must have same dimensions: {} vs {}",
-                params.point1.len(), params.point2.len()
-            ));
-        }
-
-        // Load topology from ValKey for context (optional, mainly for dimension validation)
-        let topology_json: redis::RedisResult<String> = redis::cmd("GET")
-            .arg(&params.topology_key)
-            .query_async(conn)
-            .await;
-
-        let custom_topology = match topology_json {
-            Ok(json) => crate::custom_topology::CustomTopology::from_json(&json).ok(),
-            Err(_) => None,
-        };
-
-        // Calculate distance using Q64.64 fixed-point
-        let distance = if let Some(topology) = custom_topology {
-            topology.distance_precise(&params.point1, &params.point2)
-        } else {
-            // Fallback: create minimal topology for calculation
-            let temp = crate::custom_topology::CustomTopology {
-                dimensions: params.point1.len(),
-                capability_dimensions: std::collections::HashMap::new(),
-                query_types: std::collections::HashMap::new(),
-                values: std::collections::HashMap::new(),
-                services: std::collections::HashMap::new(),
-                metadata: serde_json::Value::Null,
-                schema_version: None,
-            };
-            temp.distance_precise(&params.point1, &params.point2)
-        };
-
-        CommandResult::success(json!({
-            "distance": distance,
-            "dimensions": params.point1.len(),
-            "precision": "Q64.64",
-            "cluster_safe": true
-        }))
+        if debug_mode { debug!("Handling custom_topology_distance"); }
+        match parse::<CustomTopologyDistanceParams>(command) { Ok(p) => distance(&p), Err(e) => e }
     })
 }
 
-/// Async handler for custom topology KNN search using Rust Q64.64 precision
 pub fn handle_custom_topology_knn_async<'a>(
     command: &'a Command,
     conn: &'a mut AsyncConnection,
@@ -311,45 +327,12 @@ pub fn handle_custom_topology_knn_async<'a>(
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
-        if debug_mode {
-            debug!("Handling custom_topology_knn with Q64.64 precision");
-        }
-
-        let params: CustomTopologyKnnParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-
-        // Load topology from ValKey
-        let topology_json: redis::RedisResult<String> = redis::cmd("GET")
-            .arg(&params.topology_key)
-            .query_async(conn)
-            .await;
-
-        let topology_data = match topology_json {
-            Ok(json) => json,
-            Err(e) => return CommandResult::error(format!("Failed to load topology: {}", e)),
-        };
-
-        // Parse into CustomTopology
-        let custom_topology = match crate::custom_topology::CustomTopology::from_json(&topology_data) {
-            Ok(t) => t,
-            Err(e) => return CommandResult::error(format!("Invalid topology data: {}", e)),
-        };
-
-        // Perform KNN search with Q64.64 precision
-        let results = custom_topology.knn_precise(&params.query_point, params.k);
-
-        CommandResult::success(json!({
-            "k": params.k,
-            "results": results,
-            "precision": "Q64.64",
-            "cluster_safe": true
-        }))
+        if debug_mode { debug!("Handling custom_topology_knn"); }
+        let p: CustomTopologyKnnParams = match parse(command) { Ok(p) => p, Err(e) => return e };
+        match stored_async(conn, &p.topology_key).await { Ok(s) => knn(&p, s), Err(e) => e }
     })
 }
 
-/// Async handler for custom topology similarity using Rust Q64.64 precision
 pub fn handle_custom_topology_similarity_async<'a>(
     command: &'a Command,
     conn: &'a mut AsyncConnection,
@@ -358,55 +341,15 @@ pub fn handle_custom_topology_similarity_async<'a>(
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
-        if debug_mode {
-            debug!("Handling custom_topology_similarity with Q64.64 precision");
-        }
-
-        let params: CustomTopologySimilarityParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-
-        // Load topology from ValKey
-        let topology_json: redis::RedisResult<String> = redis::cmd("GET")
-            .arg(&params.topology_key)
-            .query_async(conn)
-            .await;
-
-        let topology_data = match topology_json {
-            Ok(json) => json,
-            Err(e) => return CommandResult::error(format!("Failed to load topology: {}", e)),
-        };
-
-        // Parse into CustomTopology
-        let custom_topology = match crate::custom_topology::CustomTopology::from_json(&topology_data) {
-            Ok(t) => t,
-            Err(e) => return CommandResult::error(format!("Invalid topology data: {}", e)),
-        };
-
-        // Get entity points
-        let entity1 = custom_topology.services.get(&params.entity_id_1);
-        let entity2 = custom_topology.services.get(&params.entity_id_2);
-
-        match (entity1, entity2) {
-            (Some(e1), Some(e2)) => {
-                let distance = custom_topology.distance_precise(&e1.point, &e2.point);
-                let similarity = custom_topology.similarity_precise(&e1.point, &e2.point);
-
-                CommandResult::success(json!({
-                    "entity_1": params.entity_id_1,
-                    "entity_2": params.entity_id_2,
-                    "distance": distance,
-                    "similarity": similarity,
-                    "precision": "Q64.64",
-                    "cluster_safe": true
-                }))
-            }
-            (None, _) => CommandResult::error(format!("Entity not found: {}", params.entity_id_1)),
-            (_, None) => CommandResult::error(format!("Entity not found: {}", params.entity_id_2)),
-        }
+        if debug_mode { debug!("Handling custom_topology_similarity"); }
+        let p: CustomTopologySimilarityParams = match parse(command) { Ok(p) => p, Err(e) => return e };
+        match stored_async(conn, &p.topology_key).await { Ok(s) => similarity(&p, s), Err(e) => e }
     })
 }
+
+// =========================================================================
+// Sync handlers
+// =========================================================================
 
 pub fn handle_custom_topology_discover(
     command: &Command,
@@ -416,85 +359,21 @@ pub fn handle_custom_topology_discover(
     debug_mode: bool,
 ) -> CommandResult {
     if debug_mode { debug!("Handling custom_topology_discover command"); }
-    let params: CustomTopologyDiscoverParams = match serde_json::from_value(command.parameters.clone()) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-    };
-    // Load topology from ValKey
-    let topology_json: redis::RedisResult<String> = redis::cmd("GET")
-        .arg(&params.topology_key)
-        .query(conn);
-    let topology_data = match topology_json {
-        Ok(json) => json,
-        Err(e) => return CommandResult::error(format!("Failed to load topology: {}", e)),
-    };
-    // Parse into CustomTopology
-    let custom_topology = match crate::custom_topology::CustomTopology::from_json(&topology_data) {
-        Ok(t) => t,
-        Err(e) => return CommandResult::error(format!("Invalid topology data: {}", e)),
-    };
-    // Perform discovery with Q64.64 precision
-    let results = custom_topology.discover_precise(&params.requirements, params.max_results, params.include_metadata);
-    CommandResult::success(json!({
-        "results": results,
-        "count": results.len(),
-        "precision": "Q64.64",
-        "cluster_safe": true
-    }))
+    let p: CustomTopologyDiscoverParams = match parse(command) { Ok(p) => p, Err(e) => return e };
+    match stored_sync(conn, &p.topology_key) { Ok(s) => discover(&p, s), Err(e) => e }
 }
 
-/// Sync version of handle_custom_topology_distance
 pub fn handle_custom_topology_distance(
     command: &Command,
-    conn: &mut Connection,
+    _conn: &mut Connection,
     _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool,
 ) -> CommandResult {
     if debug_mode { debug!("Handling custom_topology_distance command"); }
-    let params: CustomTopologyDistanceParams = match serde_json::from_value(command.parameters.clone()) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-    };
-    if params.point1.len() != params.point2.len() {
-        return CommandResult::error(format!(
-            "Points must have same dimensions: {} vs {}",
-            params.point1.len(), params.point2.len()
-        ));
-    }
-    // Load topology from ValKey for context (optional)
-    let topology_json: redis::RedisResult<String> = redis::cmd("GET")
-        .arg(&params.topology_key)
-        .query(conn);
-    let custom_topology = match topology_json {
-        Ok(json) => crate::custom_topology::CustomTopology::from_json(&json).ok(),
-        Err(_) => None,
-    };
-    // Calculate distance using Q64.64 fixed-point
-    let distance = if let Some(topology) = custom_topology {
-        topology.distance_precise(&params.point1, &params.point2)
-    } else {
-        // Fallback: create minimal topology for calculation
-        let temp = crate::custom_topology::CustomTopology {
-            dimensions: params.point1.len(),
-            capability_dimensions: std::collections::HashMap::new(),
-            query_types: std::collections::HashMap::new(),
-            values: std::collections::HashMap::new(),
-            services: std::collections::HashMap::new(),
-            metadata: serde_json::Value::Null,
-            schema_version: None,
-        };
-        temp.distance_precise(&params.point1, &params.point2)
-    };
-    CommandResult::success(json!({
-        "distance": distance,
-        "dimensions": params.point1.len(),
-        "precision": "Q64.64",
-        "cluster_safe": true
-    }))
+    match parse::<CustomTopologyDistanceParams>(command) { Ok(p) => distance(&p), Err(e) => e }
 }
 
-/// Sync version of handle_custom_topology_knn
 pub fn handle_custom_topology_knn(
     command: &Command,
     conn: &mut Connection,
@@ -503,34 +382,10 @@ pub fn handle_custom_topology_knn(
     debug_mode: bool,
 ) -> CommandResult {
     if debug_mode { debug!("Handling custom_topology_knn command"); }
-    let params: CustomTopologyKnnParams = match serde_json::from_value(command.parameters.clone()) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-    };
-    // Load topology from ValKey
-    let topology_json: redis::RedisResult<String> = redis::cmd("GET")
-        .arg(&params.topology_key)
-        .query(conn);
-    let topology_data = match topology_json {
-        Ok(json) => json,
-        Err(e) => return CommandResult::error(format!("Failed to load topology: {}", e)),
-    };
-    // Parse into CustomTopology
-    let custom_topology = match crate::custom_topology::CustomTopology::from_json(&topology_data) {
-        Ok(t) => t,
-        Err(e) => return CommandResult::error(format!("Invalid topology data: {}", e)),
-    };
-    // Perform KNN search with Q64.64 precision
-    let results = custom_topology.knn_precise(&params.query_point, params.k);
-    CommandResult::success(json!({
-        "k": params.k,
-        "results": results,
-        "precision": "Q64.64",
-        "cluster_safe": true
-    }))
+    let p: CustomTopologyKnnParams = match parse(command) { Ok(p) => p, Err(e) => return e };
+    match stored_sync(conn, &p.topology_key) { Ok(s) => knn(&p, s), Err(e) => e }
 }
 
-/// Sync version of handle_custom_topology_similarity
 pub fn handle_custom_topology_similarity(
     command: &Command,
     conn: &mut Connection,
@@ -539,39 +394,49 @@ pub fn handle_custom_topology_similarity(
     debug_mode: bool,
 ) -> CommandResult {
     if debug_mode { debug!("Handling custom_topology_similarity command"); }
-    let params: CustomTopologySimilarityParams = match serde_json::from_value(command.parameters.clone()) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-    };
-    // Load topology from ValKey
-    let topology_json: redis::RedisResult<String> = redis::cmd("GET")
-        .arg(&params.topology_key)
-        .query(conn);
-    let topology_data = match topology_json {
-        Ok(json) => json,
-        Err(e) => return CommandResult::error(format!("Failed to load topology: {}", e)),
-    };
-    // Parse into CustomTopology
-    let custom_topology = match crate::custom_topology::CustomTopology::from_json(&topology_data) {
-        Ok(t) => t,
-        Err(e) => return CommandResult::error(format!("Invalid topology data: {}", e)),
-    };
-    // Look up entities by ID to get their coordinates
-    let entity1 = match custom_topology.services.get(&params.entity_id_1) {
-        Some(e) => e,
-        None => return CommandResult::error(format!("Entity not found: {}", params.entity_id_1)),
-    };
-    let entity2 = match custom_topology.services.get(&params.entity_id_2) {
-        Some(e) => e,
-        None => return CommandResult::error(format!("Entity not found: {}", params.entity_id_2)),
-    };
-    // Calculate similarity with Q64.64 precision using entity point coordinates
-    let similarity = custom_topology.similarity_precise(&entity1.point, &entity2.point);
-    CommandResult::success(json!({
-        "entity_id_1": params.entity_id_1,
-        "entity_id_2": params.entity_id_2,
-        "similarity": similarity,
-        "precision": "Q64.64",
-        "cluster_safe": true
-    }))
+    let p: CustomTopologySimilarityParams = match parse(command) { Ok(p) => p, Err(e) => return e };
+    match stored_sync(conn, &p.topology_key) { Ok(s) => similarity(&p, s), Err(e) => e }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::types::assert_descriptor_fields;
+
+    fn descriptors() -> Vec<CommandDescriptor> {
+        let (mut handlers, mut async_handlers, mut descriptors) = (HashMap::new(), HashMap::new(), Vec::new());
+        register(&mut handlers, &mut async_handlers, &mut descriptors);
+        descriptors
+    }
+
+    #[test]
+    fn descriptors_name_exactly_the_fields_the_parsers_read() {
+        let d = descriptors();
+        assert_descriptor_fields::<CustomTopologyDiscoverParams>(&d, "custom_topology_discover", true);
+        assert_descriptor_fields::<CustomTopologyDistanceParams>(&d, "custom_topology_distance", true);
+        assert_descriptor_fields::<CustomTopologyKnnParams>(&d, "custom_topology_knn", true);
+        assert_descriptor_fields::<CustomTopologySimilarityParams>(&d, "custom_topology_similarity", true);
+    }
+
+    #[test]
+    fn a_missing_document_is_an_error_that_names_its_key() {
+        let p = CustomTopologyDiscoverParams { topology_key: "{s}:t".into(), requirements: json!({}), max_results: 10, include_metadata: false };
+        assert!(discover(&p, None).error.unwrap().contains("{s}:t"));
+    }
+
+    #[test]
+    fn similarity_reports_the_distance_it_scored() {
+        let doc = json!({
+            "dimensions": 2,
+            "services": {
+                "a": {"id": "a", "point": [0.0, 0.0]},
+                "b": {"id": "b", "point": [0.0, 1.0]}
+            }
+        }).to_string();
+        let p = CustomTopologySimilarityParams { topology_key: "k".into(), entity_id_1: "a".into(), entity_id_2: "b".into() };
+        let r = similarity(&p, Some(doc)).result.unwrap();
+        assert_eq!(r["entity_id_1"], "a");
+        assert!((r["distance"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+        assert!((r["similarity"].as_f64().unwrap() - 0.5).abs() < 1e-9);
+    }
 }

@@ -952,7 +952,7 @@ server.register_function{
     function_name = 'GNODE_TOPO_GET_ENTITIES',
     callback = function(keys, args)
         -- keys[1] = topology_key
-        -- args[1] = entity_ids_json (JSON array of entity IDs)
+        -- args[1] = entity_ids_json (JSON array of entity IDs), or "*" for every entity
         -- args[2] = include_edges (optional, "true" to include edge info)
 
         if #keys < 1 then
@@ -966,14 +966,19 @@ server.register_function{
         local ids_json = args[1]
         local include_edges = args[2] == "true"
 
-        -- Decode entity IDs
-        local entity_ids, decode_err = safe_json_decode(ids_json)
-        if not entity_ids then
-            return server.error_reply("Invalid entity_ids JSON: " .. (decode_err or "unknown"))
-        end
+        local entity_ids
+        if ids_json == "*" then
+            entity_ids = server.call('HKEYS', topology_key .. ':entities') or {}
+        else
+            local decode_err
+            entity_ids, decode_err = safe_json_decode(ids_json)
+            if not entity_ids then
+                return server.error_reply("Invalid entity_ids JSON: " .. (decode_err or "unknown"))
+            end
 
-        if type(entity_ids) ~= "table" then
-            return server.error_reply("entity_ids must be a JSON array")
+            if type(entity_ids) ~= "table" then
+                return server.error_reply("entity_ids must be a JSON array or \"*\"")
+            end
         end
 
         -- Fetch entities

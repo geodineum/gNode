@@ -103,7 +103,7 @@ AUTH="$(sudo cat /etc/geodineum/credentials/valkey.password)"
 #    keys in one slot. Write {mysite}, not mysite.
 REDISCLI_AUTH="$AUTH" redis-cli -p 47445 XADD '{mysite}:gnode:unified:production' '*' \
     id req-001 t c c register_service \
-    p '{"id":"svc-1","capabilities":{"compute":0.8,"latency_class":2}}' \
+    p '{"id":"svc-1","capabilities":{"protocol":0.1,"latency_class":0.25}}' \
     ss mysite sn node-1 ts 1718000000000
 
 # 2. Poll the response key (10-second TTL - read within a few seconds)

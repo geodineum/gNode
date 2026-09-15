@@ -142,7 +142,9 @@ compute_handler::ComputeRequest
 compute_handler::ComputeResponse
                            { status, result, error, error_code, computed_at, compute_time_ms, request_id }
 custom_topology::CustomTopology
-                           { name, dimensions (count), schema: dim_name→index map, entities, edges, metadata }
+                           { dimensions, capability_dimensions: name→index, query_types, values,
+                             services: id→{id, point, metadata}, metadata, schema_version }
+                           the JSON document custom_topology_* read with GET; its owner writes it with SET
 ```
 
 ---
@@ -155,7 +157,7 @@ XADD {mysite}:gnode:unified:production *
      id   req-001
      t    c
      c    register_service
-     p    {"id":"svc-1","capabilities":{"compute":0.8,"latency_class":2}}
+     p    {"id":"svc-1","capabilities":{"protocol":0.1,"latency_class":0.25}}
      ss   mysite
      sn   node-1
      ts   1718000000000
