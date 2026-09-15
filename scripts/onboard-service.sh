@@ -253,6 +253,8 @@ Options:
   --environments JSON  JSON array of environments (e.g. '["testing","production"]')
   --notify-email EMAIL Notification recipient (configures COMMS email channel)
   --dry-run            Preview all actions without making changes
+  --no-mail-probe      Skip the Step 5.5 dispatch probe (ACL-only operations such as --regrant;
+            a probe emails the site's configured recipients)
   --force              Regenerate ACL password even if it exists
   -h, --help           Show this help message
 
@@ -295,6 +297,7 @@ FORCE="false"
 # operation as re-minting an identity, and conflating them means every policy
 # fix costs a rotation.
 REGRANT="false"
+MAIL_PROBE="true"
 # Per-component cred isolation: the single-member group that may read THIS
 # component's cred (only its own runtime identity). Defaults to the shared
 # geodineum group for back-compat; `register component` passes the component's
@@ -313,6 +316,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run)      DRY_RUN="true"; shift ;;
         --force)        FORCE="true"; shift ;;
         --regrant)      REGRANT="true"; shift ;;
+        --no-mail-probe) MAIL_PROBE="false"; shift ;;
         -h|--help)      usage; exit 0 ;;
         -*)             log_error "Unknown option: $1"; usage; exit 1 ;;
         *)
@@ -826,14 +830,14 @@ verify_mail_dispatch() {
     local i
     for i in 1 2 3 4 5 6 7 8 9 10 11 12; do
         sleep 2
-        line=$(journalctl -u geodineum-comms --since "2 min ago" --no-pager 2>/dev/null             | grep -F "$probe_id" | grep -E 'dispatched successfully|Failed to send|dispatch failed|dry' | tail -1)
+        line=$(journalctl -u geodineum-comms --since "2 min ago" --no-pager 2>/dev/null             | grep -F "$probe_id" | grep -E 'dispatched successfully|Failed to send|dispatch failed|dry' | tail -1 || true)
         [[ -n "$line" ]] && break
     done
     if [[ "$line" == *"dispatched successfully"* ]]; then
         log_success "MAIL VERIFIED: probe dispatched through the email channel (env=${env})"
         local relay
         relay=$(grep -hE 'status=(sent|bounced|deferred)' /var/log/mail.log 2>/dev/null | tail -1)
-        [[ -n "$relay" ]] && log_info "relay: ${relay#*postfix/}"
+        [[ -n "$relay" ]] && log_info "latest postfix activity (NOT matched to this probe — see MAIL-PROBE-EVIDENCE): ${relay#*postfix/}"
     elif [[ "$line" == *"Failed to send"* || "$line" == *"dispatch failed"* ]]; then
         log_error "MAIL BROKEN — dispatch failed. The journal names the cause:"
         log_error "  ${line#*geodineum-comms*: }"
@@ -844,7 +848,7 @@ verify_mail_dispatch() {
         log_warning "Mail probe: no dispatch trace after 24s — is geodineum-comms running? ($(systemctl is-active geodineum-comms 2>/dev/null || echo unknown))"
     fi
 }
-if [[ "$DRY_RUN" != "true" ]] && valkey_daemon_cli EXISTS "{${SITE_ID}}:comms:config" 2>/dev/null | grep -q '^1$'; then
+if [[ "$DRY_RUN" != "true" && "$MAIL_PROBE" == "true" ]] && valkey_daemon_cli EXISTS "{${SITE_ID}}:comms:config" 2>/dev/null | grep -q '^1$'; then
     log_step "Step 5.5: Mail Dispatch Verification"
     verify_mail_dispatch "$SITE_ID" "${PRIMARY_ENV:-production}"
 fi
