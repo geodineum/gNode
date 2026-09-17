@@ -78,6 +78,10 @@ pub struct ToolServiceDef {
     pub capabilities: Vec<CapabilityEntry>,
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// The registered site this service belongs to. Discovery registers a service into
+    /// this site only; absent, the site whose id equals the service id.
+    #[serde(default)]
+    pub site: Option<String>,
 }
 
 /// Ecosystem tools config — deserialization of ecosystem_tools.yaml
@@ -141,6 +145,7 @@ pub struct CapabilityEntry {
 
 /// A service definition with pre-computed Q64.64 coordinates, bucket key, and z_score.
 /// Ready to be registered via FCALL GNODE_REGISTER_CAPABILITY_VECTOR.
+#[derive(Debug, Clone)]
 pub struct TranslatedService {
     pub id: String,
     pub entity_json: String,
@@ -149,6 +154,10 @@ pub struct TranslatedService {
     /// 0-based index of the tier's `registration_order` axis, -1 if none.
     /// Carried per service because the registration loop holds no schema.
     pub ro_index: i64,
+    /// The tier schema's total dimensions; the Lua primitive refuses any other width.
+    pub width: usize,
+    /// The site named by the manifest, if any.
+    pub site: Option<String>,
 }
 
 // ============================================================================
@@ -371,6 +380,8 @@ pub fn translate_all_services(
             bucket_key,
             z_score,
             ro_index: crate::integration::handlers::types::registration_order_index(&dim_map),
+            width: total_dims,
+            site: svc.site.clone(),
         });
     }
 
@@ -386,11 +397,16 @@ pub fn register_services_for_site(
     services: &[TranslatedService],
     args_namespace: &str,
 ) -> Result<(usize, usize)> {
-    // Ensure topology exists
+    let Some(width) = services.first().map(|s| s.width) else {
+        return Ok((0, 0));
+    };
+
+    // Ensure topology exists, stamped with this tier's width
     let ensure_result: redis::RedisResult<String> = redis::cmd("FCALL")
         .arg("GNODE_ENSURE_TOPOLOGY")
         .arg(1)  // numkeys
         .arg(site_id)
+        .arg(width)
         .query(conn);
 
     match ensure_result {
@@ -424,6 +440,7 @@ pub fn register_services_for_site(
             .arg(crate::daemon::GNodeDaemon::topology_snapshot_key())  // args[5]: (B) snapshot
             .arg(svc.ro_index)  // args[6]: resolved from this tier's schema at translation time
             .arg(crate::integration::handlers::types::POINT_FRAC_BITS)  // args[7]
+            .arg(svc.width)  // args[8]: refused unless the point has exactly this width
             .query(conn);
 
         match result {
@@ -987,6 +1004,7 @@ pub fn derive_profile_entity(
         }),
         capabilities: caps,
         depends_on: Vec::new(),
+        site: None,
     };
 
     translate_all_services(&[def], schema)
@@ -1055,6 +1073,7 @@ fn run_service_profile(args: &RegisterToolsArgs) -> Result<()> {
         }),
         capabilities: caps,
         depends_on: Vec::new(),
+        site: None,
     };
 
     let translated = translate_all_services(&[def], &schema);

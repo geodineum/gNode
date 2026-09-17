@@ -1644,7 +1644,8 @@ server.register_function{
 --   gnode:sites:registry (only the entry is removed, not the set itself)
 --
 -- @param args[1] service_id - The service identifier to deprovision
--- @param args[2] options_json - Optional: {"dry_run": true, "include_cache": true}
+-- @param args[2] options_json - Optional: {"dry_run": true, "include_cache": true,
+--                              "snapshot_key": "{geodineum}:gnode:topology:services"}
 -- @return JSON with cleanup results
 -- =============================================================================
 server.register_function{
@@ -1736,6 +1737,25 @@ server.register_function{
         -- 2. Delete site metadata
         -- =============================================================================
         delete_key(meta_key, "service metadata")
+
+        -- =============================================================================
+        -- 2b. Remove the service's entities from the composed snapshot, which lives
+        --     outside its namespace and would otherwise keep them as ghosts
+        -- =============================================================================
+        local snapshot_key = options.snapshot_key or '{geodineum}:gnode:topology:services'
+        local entity_ids = server.call('HKEYS', '{' .. service_id .. '}:gnode:services:entities')
+        for _, eid in ipairs(entity_ids) do
+            local mirror = snapshot_key .. " (HDEL " .. eid .. ")"
+            local owned_elsewhere = eid ~= service_id
+                and server.call('HEXISTS', '{' .. eid .. '}:gnode:services:entities', eid) == 1
+            if owned_elsewhere then
+                table.insert(skipped_keys, {key = mirror, reason = "entity registered in its own topology"})
+            elseif dry_run then
+                table.insert(deleted_keys, {key = mirror, reason = "snapshot entry", dry_run = true})
+            elseif server.call('HDEL', snapshot_key, eid) > 0 then
+                table.insert(deleted_keys, {key = mirror, reason = "snapshot entry"})
+            end
+        end
 
         -- =============================================================================
         -- 3. Delete unified streams (all DTAP environments)

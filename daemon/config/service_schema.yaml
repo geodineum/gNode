@@ -51,6 +51,7 @@ dimensions:
     index: 2
     query_type: equality
     values:
+      undefined: 0.00
       v1: 0.10
       v2: 0.20
       v3: 0.30
@@ -305,6 +306,7 @@ dimensions:
     index: 21
     query_type: equality
     values:
+      undefined: 0.00
       rust: 0.15
       php: 0.30
       lua: 0.45

@@ -348,7 +348,7 @@ pub fn handle_register_service(
 
     // STATELESS: ensure services topology exists (sync FCALL)
     if let Err(e) = redis::cmd("FCALL")
-        .arg("GNODE_ENSURE_TOPOLOGY").arg(1).arg(site_id)
+        .arg("GNODE_ENSURE_TOPOLOGY").arg(1).arg(site_id).arg(super::types::TOTAL_DIMENSIONS)
         .query::<String>(conn)
     {
         return CommandResult::error(format!("Failed to ensure services topology: {:?}", e));
@@ -367,6 +367,7 @@ pub fn handle_register_service(
         .arg(topology_snapshot_key())
         .arg(super::types::registration_order_index(super::types::get_service_dimensions()))
         .arg(super::types::POINT_FRAC_BITS)
+        .arg(super::types::TOTAL_DIMENSIONS)
         .query::<String>(conn);
 
     match register_result {
@@ -556,6 +557,7 @@ pub fn handle_register_service_async<'a>(
             .arg("GNODE_ENSURE_TOPOLOGY")
             .arg(1)
             .arg(site_id)
+            .arg(super::types::TOTAL_DIMENSIONS)
             .query_async(conn)
             .await;
 
@@ -577,6 +579,7 @@ pub fn handle_register_service_async<'a>(
             .arg(topology_snapshot_key())  // args[5]: Lua maintains (B) snapshot
             .arg(super::types::registration_order_index(super::types::get_service_dimensions()))  // args[6]
             .arg(super::types::POINT_FRAC_BITS)  // args[7]
+            .arg(super::types::TOTAL_DIMENSIONS)  // args[8]
             .query_async(conn)
             .await;
 

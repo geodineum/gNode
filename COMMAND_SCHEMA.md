@@ -410,8 +410,8 @@ Stateless topology persistence. Daemon computes Q64.64 bucket keys and z_scores;
 | Function | Keys | Args | Returns | Description |
 |----------|------|------|---------|-------------|
 | `GNODE_TOPO_CREATE` | site_id | topology_key, definition_json | JSON topology metadata | Create a named topology |
-| `GNODE_ENSURE_TOPOLOGY` | site_id | — | JSON topology info | Ensure default service topology exists |
-| `GNODE_REGISTER_CAPABILITY_VECTOR` | topology_key | entity_id, entity_json, bucket_key, z_score, snapshot_key?, ro_index?, frac_bits? | `{ok, eid, upd}` | Register/update entity (idempotent). Maintains the (B) snapshot when `snapshot_key` is given. Allocates `registration_order` atomically into `m.ro` and, when `ro_index` ≥ 0, mirrors it into `pd`/`pr` at that schema index in the point's Q-format (`frac_bits`, default 64); updates preserve it |
+| `GNODE_ENSURE_TOPOLOGY` | site_id | width? | `{ok, tk, cr, dm_was?}` | Ensure the site's service topology exists. `width` (the tier schema's total dimensions, default 30) is stamped as meta `dm` on create, and replaces a different `dm` on an existing topology (`dm_was` reports the old value) |
+| `GNODE_REGISTER_CAPABILITY_VECTOR` | topology_key | entity_id, entity_json, bucket_key, z_score, snapshot_key?, ro_index?, frac_bits?, width? | `{ok, eid, upd}` | Register/update entity (idempotent). With `width`, a point whose `pd` or `pr` has another length is refused before anything is written. Maintains the (B) snapshot when `snapshot_key` is given. Allocates `registration_order` atomically into `m.ro` and, when `ro_index` ≥ 0, mirrors it into `pd`/`pr` at that schema index in the point's Q-format (`frac_bits`, default 64); an update keeps a stored order and assigns one to an entity stored without |
 | `GNODE_DEREGISTER_CAPABILITY_VECTOR` | topology_key | entity_id | `{ok, eid}` | Remove entity and its edges |
 | `GNODE_TOPO_ADD_EDGE` | topology_key | from_id, to_id, edge_json | `{ok, f, t}` | Add directed edge |
 | `GNODE_TOPO_REMOVE_EDGE` | topology_key | from_id, to_id | `{ok}` | Remove directed edge |
@@ -490,7 +490,7 @@ Stream operations, consumer groups, service provisioning/deprovisioning, DTAP en
 | `GNODE_STREAM_CONSUMERS_INFO` | stream_key | group_name | JSON array of consumer info | XINFO CONSUMERS |
 | `GNODE_STREAM_ADD_RESP3` | stream_key | entry_data, site_id | RESP3 entry ID | XADD with backpressure |
 | `GNODE_PROVISION_SERVICE` | — | service_id, environments_json, namespace, owner | JSON created streams | Create DTAP streams + consumer groups |
-| `GNODE_DEPROVISION_SERVICE` | — | service_id, options_json | JSON cleanup results | Complete service removal |
+| `GNODE_DEPROVISION_SERVICE` | — | service_id, options_json | JSON cleanup results | Complete service removal. Also removes the service's topology entities from the composed snapshot (`options.snapshot_key`, default `{geodineum}:gnode:topology:services`), except an entity that its own topology still holds |
 | `GNODE_UPDATE_SERVICE` | — | service_id, updates_json | JSON update results | Update service metadata/status |
 | `GNODE_SERVICE_ADD_ENVIRONMENT` | — | service_id, environment, set_active | JSON creation results | Add DTAP environment to service |
 | `GNODE_SERVICE_REMOVE_ENVIRONMENT` | — | service_id, environment, options_json | JSON removal results | Remove DTAP environment |

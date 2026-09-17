@@ -1,8 +1,11 @@
 //! Service Discovery Module — Daemon-driven periodic registration from config files
 //!
-//! The daemon periodically scans whitelisted YAML config files and automatically
-//! registers discovered services for all known sites. This replaces the old pattern
-//! where PHP clients self-registered on every page load.
+//! The daemon periodically scans whitelisted YAML config files and registers each
+//! discovered service into its own site: the registered site its manifest names
+//! (`site:`), or else the registered site whose id equals the service id. A service
+//! with no such site is not registered anywhere, and the scan says so. A service is
+//! never copied into other sites' topologies. This replaces the old pattern where PHP
+//! clients self-registered on every page load.
 //!
 //! Architecture:
 //! - LOCAL services: Discovered from YAML config by this module (zero PHP involvement)
@@ -53,6 +56,7 @@
 //! Future direction: auto-scan OpenAPI specs from whitelisted /api directories
 //! for endpoint+format registration alongside capability-based services.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 use log::{info, warn, debug};
@@ -159,7 +163,7 @@ impl TrackedConfigSource {
 /// Supports multiple config sources (aggregated):
 /// - Default: gCore's geometric_topology.yaml (auto-resolved)
 /// - Extra: any number of --discovery-config-paths (whitelisted)
-/// - Each source contributes services; all are registered per-site
+/// - Each source contributes services; each registers into its own site only
 pub struct ServiceDiscoveryManager {
     config: ServiceDiscoveryConfig,
     /// Cached capability schema
@@ -430,6 +434,9 @@ impl ServiceDiscoveryManager {
                 }
                 Err(e) => {
                     warn!("[service-discovery] Failed to load {:?}: {:?}", source.path, e);
+                    // Retry when the file changes, not on every scan: an unrecorded
+                    // failure kept files_changed() true and re-registered everything.
+                    source.update_mtime();
                 }
             }
         }
@@ -509,14 +516,16 @@ impl ServiceDiscoveryManager {
             });
         }
 
-        // Register services for each site
+        let (owned, unowned) = assign_owner_sites(&self.translated, &sites);
         let mut total_registered = 0;
-        let mut total_errors = 0;
+        let mut total_errors = unowned.len();
+        for id in &unowned {
+            warn!("[service-discovery] Not registering '{}': its manifest names no registered site \
+                   and no registered site is called '{}'", id, id);
+        }
 
-        for site_id in &sites {
-            match tool_registration::register_services_for_site(
-                conn, site_id, &self.translated, ""
-            ) {
+        for (site_id, services) in &owned {
+            match tool_registration::register_services_for_site(conn, site_id, services, "") {
                 Ok((registered, errors)) => {
                     total_registered += registered;
                     total_errors += errors;
@@ -524,13 +533,13 @@ impl ServiceDiscoveryManager {
                 Err(e) => {
                     warn!("[service-discovery] Failed to register for site {}: {:?}",
                          site_id, e);
-                    total_errors += self.translated.len();
+                    total_errors += services.len();
                 }
             }
         }
 
-        info!("[service-discovery] Registered {} services for {} sites ({} errors)",
-             total_registered, sites.len(), total_errors);
+        info!("[service-discovery] Registered {} services into {} sites ({} errors)",
+             total_registered, owned.len(), total_errors);
 
         self.last_scan = Some(Instant::now());
 
@@ -538,7 +547,7 @@ impl ServiceDiscoveryManager {
             registered: total_registered,
             errors: total_errors,
             skipped: false,
-            sites: sites.len(),
+            sites: owned.len(),
         })
     }
 }
@@ -550,4 +559,90 @@ impl ServiceDiscoveryManager {
 /// Get file modification time, returning an error if the file doesn't exist.
 fn get_file_mtime(path: &Path) -> std::result::Result<SystemTime, std::io::Error> {
     std::fs::metadata(path)?.modified()
+}
+
+/// Group discovered services by the one site each belongs to: the registered site the
+/// manifest names, else the registered site whose id equals the service id. Returns the
+/// groups (sorted by site) and the ids of services that belong to no registered site.
+fn assign_owner_sites(
+    services: &[TranslatedService],
+    sites: &[String],
+) -> (BTreeMap<String, Vec<TranslatedService>>, Vec<String>) {
+    let mut owned: BTreeMap<String, Vec<TranslatedService>> = BTreeMap::new();
+    let mut unowned = Vec::new();
+    for svc in services {
+        let owner = svc.site.as_deref().unwrap_or(&svc.id);
+        if sites.iter().any(|s| s == owner) {
+            owned.entry(owner.to_string()).or_default().push(svc.clone());
+        } else {
+            unowned.push(svc.id.clone());
+        }
+    }
+    (owned, unowned)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn svc(id: &str, site: Option<&str>) -> TranslatedService {
+        TranslatedService {
+            id: id.into(),
+            entity_json: "{}".into(),
+            bucket_key: "0".into(),
+            z_score: 0,
+            ro_index: 29,
+            width: 30,
+            site: site.map(String::from),
+        }
+    }
+
+    #[test]
+    fn a_discovered_service_registers_into_its_own_site_only() {
+        let sites: Vec<String> = ["coursematch", "nierto_com", "quimba_cafe"].map(String::from).into();
+        let (owned, unowned) = assign_owner_sites(&[svc("coursematch", None)], &sites);
+        assert_eq!(owned.keys().collect::<Vec<_>>(), ["coursematch"]);
+        assert!(unowned.is_empty());
+    }
+
+    #[test]
+    fn a_named_site_wins_over_the_service_id() {
+        let sites: Vec<String> = ["tenant_a", "mailer"].map(String::from).into();
+        let (owned, _) = assign_owner_sites(&[svc("mailer", Some("tenant_a"))], &sites);
+        assert_eq!(owned.keys().collect::<Vec<_>>(), ["tenant_a"]);
+    }
+
+    #[test]
+    fn a_service_without_a_registered_site_is_registered_nowhere() {
+        let sites: Vec<String> = ["nierto_com"].map(String::from).into();
+        let (owned, unowned) =
+            assign_owner_sites(&[svc("orphan", None), svc("named", Some("unregistered"))], &sites);
+        assert!(owned.is_empty());
+        assert_eq!(unowned, ["orphan", "named"]);
+    }
+
+    #[test]
+    fn a_manifest_that_fails_to_load_is_not_reloaded_until_it_changes() {
+        let dir = std::env::temp_dir().join(format!("gnode-discovery-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bad = dir.join("gnode_services.yaml");
+        std::fs::write(&bad, "services: [unclosed").unwrap();
+        let schema = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/config/service_schema.yaml"));
+        let mut manager = ServiceDiscoveryManager::new(ServiceDiscoveryConfig {
+            extra_config_paths: vec![bad.clone()],
+            schema_path: Some(schema),
+            discovery_paths_file: None,
+            ..ServiceDiscoveryConfig::default()
+        });
+        manager.resolve_paths();
+        assert!(manager.config_sources.iter().any(|s| s.path == bad));
+        assert!(manager.files_changed());
+        manager.reload_and_translate().unwrap();
+        assert!(!manager.files_changed(), "a failed load must not force a reload on every scan");
+
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::fs::write(&bad, "services: []").unwrap();
+        assert!(manager.files_changed(), "an edit to the failing file must be picked up");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

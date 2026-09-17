@@ -267,6 +267,7 @@ pub fn register_node_geometrically(
         .arg(crate::daemon::GNodeDaemon::topology_snapshot_key())
         .arg(-1i64)  // args[6]: the constellation tier has no registration_order axis
         .arg(crate::integration::handlers::types::POINT_FRAC_BITS)  // args[7]
+        .arg(total)  // args[8]
         .query(conn);
 
     match result {

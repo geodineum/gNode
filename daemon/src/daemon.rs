@@ -558,6 +558,10 @@ fn register_gnode_as_service(
     // LAYER 7: Runtime State (initialized, will be updated by health stream)
     capabilities.insert("current_load".to_string(), 0.00);       // idle at startup
 
+    // LAYER 8: Classification
+    capabilities.insert("service_tier".to_string(), 0.90);       // orchestrator
+    capabilities.insert("implementation_language".to_string(), 0.15); // rust
+
     // Define service metadata for gCore integration
     let mut metadata: HashMap<String, String> = HashMap::new();
     metadata.insert("type".to_string(), "gnode-daemon".to_string());
@@ -649,6 +653,7 @@ fn register_gnode_as_service(
         .arg("GNODE_ENSURE_TOPOLOGY")
         .arg(1)
         .arg(topology_namespace)
+        .arg(TOTAL_DIMENSIONS)
         .query(&mut conn);
 
     if let Err(e) = ensure_result {
@@ -670,6 +675,7 @@ fn register_gnode_as_service(
         .arg(crate::integration::handlers::types::registration_order_index(
             crate::integration::handlers::types::get_service_dimensions()))  // args[6]
         .arg(crate::integration::handlers::types::POINT_FRAC_BITS)  // args[7]
+        .arg(TOTAL_DIMENSIONS)  // args[8]
         .query(&mut conn);
 
     match register_result {

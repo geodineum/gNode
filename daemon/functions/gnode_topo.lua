@@ -295,6 +295,9 @@ server.register_function{
     function_name = 'GNODE_ENSURE_TOPOLOGY',
     callback = function(keys, args)
         -- keys[1] = site_id (for keyspace isolation)
+        -- args[1] = width (OPTIONAL) — the tier schema's total dimensions, stamped as
+        --           meta dm on create and corrected on an existing topology that
+        --           records another width
 
         if #keys < 1 then
             return server.error_reply("Missing site_id key")
@@ -302,6 +305,8 @@ server.register_function{
 
         local site_id = keys[1]
         local topology_key = "{" .. site_id .. "}:gnode:services"
+        local width = tonumber(args[1])
+        if width and width <= 0 then width = nil end
 
         -- Check if topology already exists in registry AND data is actually present.
         -- Both conditions must be true — registry entry alone is not sufficient.
@@ -318,6 +323,20 @@ server.register_function{
                 tk = topology_key,
                 cr = false
             }
+            if width then
+                local stored = safe_json_decode(server.call('HGET', topology_key .. ':meta', 'data') or '')
+                if stored and stored.dm ~= width then
+                    result.dm_was = stored.dm
+                    stored.dm = width
+                    stored.d = "Default service discovery topology (stateless architecture)"
+                    stored.ua = get_timestamp()
+                    local fixed_json = safe_json_encode(stored)
+                    if fixed_json then
+                        server.call('HSET', topology_key .. ':meta', 'data', fixed_json)
+                        server.call('HSET', registry_key, topology_key, fixed_json)
+                    end
+                end
+            end
             local result_json, _ = safe_json_encode(result)
             return result_json
         end
@@ -344,7 +363,7 @@ server.register_function{
                 y = { n = "scope_domain", d = "Scope + Domain layers (dims 7-10)" },
                 z = { n = "perf_class", d = "Perf + Workflow + Runtime + Classification (dims 11-20)" }
             },
-            dm = TOTAL_DIMENSIONS,   -- service tier: 30 total, 25 discovery
+            dm = width or TOTAL_DIMENSIONS,   -- the caller's tier width; service tier by default
             ca = now,                -- created_at
             ua = now,                -- updated_at
             ec = 0,                  -- entity_count
@@ -400,6 +419,8 @@ server.register_function{
         --           registration_order axis; absent or < 0 = tier has none.
         -- args[7] = frac_bits (OPTIONAL, default 64) — fractional bits of the
         --           Q-format the daemon encoded pr with (g_math default Q64.64).
+        -- args[8] = width (OPTIONAL) — the tier schema's total dimensions; a
+        --           point of another length is refused.
 
         if #keys < 1 then
             return server.error_reply("Missing topology_key")
@@ -430,25 +451,33 @@ server.register_function{
             return server.error_reply("Topology not found: " .. topology_key)
         end
 
-        -- Check for existing entity
-        local existing = server.call('HEXISTS', topology_key .. ':entities', entity_id)
-        local is_update = (existing == 1)
-
-        -- If updating, remove from old voxel index
-        if is_update then
-            local old_json = server.call('HGET', topology_key .. ':entities', entity_id)
-            if old_json then
-                local old_entity, _ = safe_json_decode(old_json)
-                if old_entity and old_entity.bk then  -- bk = bucket_key
-                    server.call('SREM', topology_key .. ':voxel:' .. old_entity.bk, entity_id)
-                end
-            end
-        end
-
         -- Parse entity data to add computed fields
         local entity, decode_err = safe_json_decode(entity_json)
         if not entity then
             return server.error_reply("Invalid entity_json: " .. (decode_err or "unknown"))
+        end
+
+        -- args[8] = the tier schema's width: a point of any other length is refused, never stored.
+        local width = tonumber(args[8])
+        if width and width > 0 then
+            local pd_len = entity.pd and #entity.pd or 0
+            local pr_len = entity.pr and #entity.pr or pd_len
+            if pd_len ~= width or pr_len ~= width then
+                return server.error_reply(string.format(
+                    "Point width mismatch for %s: pd has %d values, pr has %d, the tier schema has %d",
+                    entity_id, pd_len, pr_len, width))
+            end
+        end
+
+        -- Check for existing entity
+        local old_json = server.call('HGET', topology_key .. ':entities', entity_id)
+        local is_update = (old_json ~= false and old_json ~= nil)
+        local old_entity = nil
+        if is_update then
+            old_entity = safe_json_decode(old_json)
+            if old_entity and old_entity.bk then  -- bk = bucket_key
+                server.call('SREM', topology_key .. ':voxel:' .. old_entity.bk, entity_id)
+            end
         end
 
         -- registration_order: a monotonic counter (meta.ro) allocated HERE so it
@@ -457,11 +486,24 @@ server.register_function{
         -- no such axis) and HOW WIDE the point is (args[7], fractional bits of the
         -- Q-format the daemon built pr with; default 64). The exact integer is
         -- kept in m.ro — that is what tie-breaks read. pd/pr at the axis are the
-        -- display projection of a storage-only dimension.
+        -- display projection of a storage-only dimension. An update keeps the
+        -- stored order; an entity stored without one is assigned one now.
         local ro_index = tonumber(args[6])
         local frac_bits = tonumber(args[7]) or 64
         entity.m = entity.m or {}
-        if not is_update then
+        local kept = old_entity and old_entity.m and old_entity.m.ro
+        if kept then
+            entity.m.ro = kept
+            if ro_index and ro_index >= 0 then
+                local slot = ro_index + 1
+                if old_entity.pd and entity.pd and #entity.pd >= slot and old_entity.pd[slot] ~= nil then
+                    entity.pd[slot] = old_entity.pd[slot]
+                end
+                if old_entity.pr and entity.pr and #entity.pr >= slot and old_entity.pr[slot] ~= nil then
+                    entity.pr[slot] = old_entity.pr[slot]
+                end
+            end
+        else
             local ro = server.call('HINCRBY', topology_key .. ':meta', 'ro', 1)
             entity.m.ro = ro
             if ro_index and ro_index >= 0 then
@@ -472,26 +514,6 @@ server.register_function{
                 end
                 if entity.pr and #entity.pr >= slot then
                     entity.pr[slot] = string.format('%.0f', ro_normalized * (2 ^ frac_bits))
-                end
-            end
-        else
-            -- Preserve the original registration_order from the stored entity
-            local old_json = server.call('HGET', topology_key .. ':entities', entity_id)
-            if old_json then
-                local old_entity, _ = safe_json_decode(old_json)
-                if old_entity then
-                    if old_entity.m and old_entity.m.ro then
-                        entity.m.ro = old_entity.m.ro
-                    end
-                    if ro_index and ro_index >= 0 then
-                        local slot = ro_index + 1
-                        if old_entity.pd and entity.pd and #entity.pd >= slot and old_entity.pd[slot] ~= nil then
-                            entity.pd[slot] = old_entity.pd[slot]
-                        end
-                        if old_entity.pr and entity.pr and #entity.pr >= slot and old_entity.pr[slot] ~= nil then
-                            entity.pr[slot] = old_entity.pr[slot]
-                        end
-                    end
                 end
             end
         end
