@@ -1,9 +1,9 @@
 #!/bin/bash
-# register.sh — register services/tools into the canonical (C) topology. Not a `geodineum`
-# verb (`geodineum register` is the installer's manifest generator); run it directly.
+# geodineum topology register — register services/tools into the canonical (C) topology.
+# (`geodineum register`, without `topology`, is the installer's manifest generator.)
 #
-#   sudo scripts/cli/register.sh tool                                  (re)register the ecosystem tools
-#   sudo scripts/cli/register.sh service <site> [profile] [--env <dtap>]  register <site>'s OWN entity
+#   sudo geodineum topology register tool                                 (re)register the ecosystem tools
+#   sudo geodineum topology register service <site> [profile] [--env <dtap>]  register <site>'s OWN entity
 #
 #   profiles: web (default) | headless | service | system | component
 #
@@ -25,8 +25,8 @@ DAEMON_CRED="${DAEMON_CRED:-${CRED_DIR}/valkey_daemon.password}"
 
 usage() {
     echo "Usage:"
-    echo "  register.sh tool                                    register the ecosystem tools (global, once)"
-    echo "  register.sh service <site> [profile] [--env <dtap>] register <site> from a profile (default: web)"
+    echo "  geodineum topology register tool                                    register the ecosystem tools (global, once)"
+    echo "  geodineum topology register service <site> [profile] [--env <dtap>] register <site> from a profile (default: web)"
     echo
     echo "  profiles: web | headless | service | system | component"
     exit "${1:-0}"
