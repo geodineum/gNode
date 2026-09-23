@@ -380,6 +380,23 @@ mod tests {
     }
 
     #[test]
+    fn service_axes_match_the_schema_in_order() {
+        // SERVICE_AXES is the one list both index maps are built from. Pinned to
+        // the schema by name AND position, because the drift this replaces was a
+        // stale copy that still described the 23-D layout.
+        use crate::integration::handlers::types::SERVICE_AXES;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let service = load_schema(&root.join("config/service_schema.yaml")).unwrap();
+        assert_eq!(SERVICE_AXES.len(), service.total_dimensions,
+            "axis list width must equal the schema's total_dimensions");
+        for (index, name) in SERVICE_AXES.iter().enumerate() {
+            let dim = service.dimensions.get(*name)
+                .unwrap_or_else(|| panic!("{name} is not a dimension in service_schema.yaml"));
+            assert_eq!(dim.index, index, "{name} sits at {} in the schema", dim.index);
+        }
+    }
+
+    #[test]
     fn registration_order_index_follows_each_tier_schema() {
         // The registration primitive used to write registration_order at a
         // fixed slot (index 22, the 23-D layout). It now receives the index

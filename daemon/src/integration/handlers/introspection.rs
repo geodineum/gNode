@@ -110,35 +110,15 @@ fn classify_tier(service_tier_value: f64) -> &'static str {
 }
 
 /// Build a reverse mapping from dimension index to canonical capability name.
-/// Skips aliases (multiple names mapping to same index) — keeps the first seen.
+/// Derived from the one axis list: this used to be a hand-written 23-D table, so
+/// service_describe labelled dims 17-22 with the names of other axes and left
+/// everything above 22 unnamed.
 fn build_index_to_name() -> HashMap<usize, String> {
-    // Canonical names (non-alias) for each dimension
-    let canonical: [(usize, &str); 23] = [
-        (0, "protocol"),
-        (1, "native_format"),
-        (2, "api_version"),
-        (3, "contract_stability"),
-        (4, "clearance_required"),
-        (5, "auth_method"),
-        (6, "data_sensitivity"),
-        (7, "service_scope"),
-        (8, "domain_primary"),
-        (9, "domain_secondary"),
-        (10, "specialization"),
-        (11, "throughput_tier"),
-        (12, "latency_class"),
-        (13, "reliability_tier"),
-        (14, "pipeline_stage"),
-        (15, "execution_priority"),
-        (16, "current_load"),
-        (17, "service_tier"),
-        (18, "environment"),
-        (19, "user_x"),
-        (20, "user_y"),
-        (21, "user_z"),
-        (22, "registration_order"),
-    ];
-    canonical.iter().map(|&(i, n)| (i, n.to_string())).collect()
+    super::types::SERVICE_AXES
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (index, name.to_string()))
+        .collect()
 }
 
 /// Enrich entity JSON from GNODE_TOPO_GET_ENTITY into a service_describe response.

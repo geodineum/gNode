@@ -85,62 +85,41 @@ pub const SERVICE_DIMENSION_ALIASES: [(&str, &str); 6] = [
     ("language", "implementation_language"),
 ];
 
-pub static SERVICE_DIMENSIONS: Lazy<HashMap<String, usize>> = Lazy::new(|| {
-    let mut dims = HashMap::new();
-
+/// The service tier's axes in index order — the ONE list. Both views (name to
+/// index, index to name) are built from it, and a test pins it to
+/// service_schema.yaml, so an index can no longer drift in a second copy.
+pub const SERVICE_AXES: [&str; TOTAL_DIMENSIONS] = [
     // Layer 1: Interface Identity (0-3)
-    dims.insert("protocol".to_string(), 0);
-    dims.insert("native_format".to_string(), 1);
-    dims.insert("api_version".to_string(), 2);
-    dims.insert("contract_stability".to_string(), 3);
-
+    "protocol", "native_format", "api_version", "contract_stability",
     // Layer 2: Access Control (4-6)
-    dims.insert("clearance_required".to_string(), 4);
-    dims.insert("auth_method".to_string(), 5);
-    dims.insert("data_sensitivity".to_string(), 6);
-
+    "clearance_required", "auth_method", "data_sensitivity",
     // Layer 3: Service Scope (7)
-    dims.insert("service_scope".to_string(), 7);
-
+    "service_scope",
     // Layer 4: Functional Domain (8-10)
-    dims.insert("domain_primary".to_string(), 8);
-    dims.insert("domain_secondary".to_string(), 9);
-    dims.insert("specialization".to_string(), 10);
-
+    "domain_primary", "domain_secondary", "specialization",
     // Layer 5: Performance Profile (11-13)
-    dims.insert("throughput_tier".to_string(), 11);
-    dims.insert("latency_class".to_string(), 12);
-    dims.insert("reliability_tier".to_string(), 13);
-
+    "throughput_tier", "latency_class", "reliability_tier",
     // Layer 6: Workflow Context (14-15)
-    dims.insert("pipeline_stage".to_string(), 14);
-    dims.insert("execution_priority".to_string(), 15);
-
-    // Layer 7: Runtime State (16-18) — dynamic
-    dims.insert("current_load".to_string(), 16);
-    dims.insert("health_status".to_string(), 17);
-    dims.insert("lifecycle_state".to_string(), 18);
-
+    "pipeline_stage", "execution_priority",
+    // Layer 7: Runtime State (16-18)
+    "current_load", "health_status", "lifecycle_state",
     // Layer 8: Classification (19-21)
-    dims.insert("service_tier".to_string(), 19);
-    dims.insert("environment".to_string(), 20);
-    dims.insert("implementation_language".to_string(), 21);
-
+    "service_tier", "environment", "implementation_language",
     // Layer 9: Network Context (22-24)
-    dims.insert("network_zone".to_string(), 22);
-    dims.insert("data_persistence".to_string(), 23);
-    dims.insert("update_channel".to_string(), 24);
-
+    "network_zone", "data_persistence", "update_channel",
     // Layer 10: Visual Topology (25-27) — storage-only
-    dims.insert("user_x".to_string(), 25);
-    dims.insert("user_y".to_string(), 26);
-    dims.insert("user_z".to_string(), 27);
-
+    "user_x", "user_y", "user_z",
     // Layer 11: Metadata (28-29) — storage-only
-    dims.insert("deployment_model".to_string(), 28);
-    dims.insert("registration_order".to_string(), 29);
+    "deployment_model", "registration_order",
+];
 
-    // Common aliases
+pub static SERVICE_DIMENSIONS: Lazy<HashMap<String, usize>> = Lazy::new(|| {
+    let mut dims: HashMap<String, usize> = SERVICE_AXES
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.to_string(), index))
+        .collect();
+
     for (alias, canonical) in SERVICE_DIMENSION_ALIASES {
         let index = dims[canonical];
         dims.insert(alias.to_string(), index);
