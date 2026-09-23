@@ -1873,16 +1873,29 @@ impl GNodeDaemon {
         // operator dashboard reads for every component ({..}:gnode:heartbeat:
         // {env}:{component}). Distinct from the pid key above: a stable
         // component name and a fresh ts, refreshed by the heartbeat loop below.
-        if let Ok(mut conn) = crate::integration::connection_manager::get_connection() {
-            let hb_key = crate::integration::heartbeat::heartbeat_key(
-                &self.topology_namespace, &self.environment, "gnode-daemon", &self.node_id);
-            let hb_ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            let hb_val = crate::integration::heartbeat::node_heartbeat_value("gnode-daemon", &self.node_id, hb_ts, pid);
-            let _: redis::RedisResult<()> = redis::cmd("SETEX").arg(&hb_key)
-                .arg(crate::integration::heartbeat::HEARTBEAT_TTL_SECS).arg(&hb_val).query(&mut conn);
+match crate::integration::connection_manager::get_connection() {
+            Ok(mut conn) => {
+                let hb_key = crate::integration::heartbeat::heartbeat_key(
+                    &self.topology_namespace, &self.environment, "gnode-daemon", &self.node_id);
+                let hb_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let hb_val = crate::integration::heartbeat::node_heartbeat_value("gnode-daemon", &self.node_id, hb_ts, pid);
+                // The result was discarded here. CONTRACTS/heartbeat.md warns
+                // about exactly this: COMMS once failed NOPERM on every beat
+                // and "the dashboard showed a mail-delivering daemon as down".
+                // A liveness signal whose write can fail in silence is worse
+                // than none — absence is the contract's DOWN signal, so a
+                // silent write failure reports a healthy daemon as dead.
+                if let Err(e) = redis::cmd("SETEX").arg(&hb_key)
+                    .arg(crate::integration::heartbeat::HEARTBEAT_TTL_SECS)
+                    .arg(&hb_val).query::<()>(&mut conn)
+                {
+                    error!("heartbeat SETEX {} failed: {} — this daemon will read as ABSENT to every dashboard. Verify the writer's grant: ACL DRYRUN <user> SETEX {} 120 x", hb_key, e, hb_key);
+                }
+            }
+            Err(e) => error!("heartbeat skipped, no ValKey connection: {} — this daemon will read as ABSENT to every dashboard", e),
         }
 
         // ========================================
@@ -2004,17 +2017,26 @@ impl GNodeDaemon {
 
                 // Refresh the unified component heartbeat with a fresh ts so the
                 // dashboard's last-seen stays accurate.
-                if let Ok(mut conn) = crate::integration::connection_manager::get_connection() {
-                    let hb_key = crate::integration::heartbeat::heartbeat_key(
-                        &self.topology_namespace, &self.environment, "gnode-daemon", &self.node_id);
-                    let hb_ts = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    let hb_val = crate::integration::heartbeat::node_heartbeat_value(
-                        "gnode-daemon", &self.node_id, hb_ts, std::process::id());
-                    let _: redis::RedisResult<()> = redis::cmd("SETEX").arg(&hb_key)
-                        .arg(crate::integration::heartbeat::HEARTBEAT_TTL_SECS).arg(&hb_val).query(&mut conn);
+match crate::integration::connection_manager::get_connection() {
+                    Ok(mut conn) => {
+                        let hb_key = crate::integration::heartbeat::heartbeat_key(
+                            &self.topology_namespace, &self.environment, "gnode-daemon", &self.node_id);
+                        let hb_ts = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        let hb_val = crate::integration::heartbeat::node_heartbeat_value(
+                            "gnode-daemon", &self.node_id, hb_ts, std::process::id());
+                        // Logged at most once a minute — the loop's own cadence —
+                        // so a persistent failure is visible without flooding.
+                        if let Err(e) = redis::cmd("SETEX").arg(&hb_key)
+                            .arg(crate::integration::heartbeat::HEARTBEAT_TTL_SECS)
+                            .arg(&hb_val).query::<()>(&mut conn)
+                        {
+                            error!("heartbeat SETEX {} failed: {} — this daemon reads as ABSENT to every dashboard", hb_key, e);
+                        }
+                    }
+                    Err(e) => error!("heartbeat skipped, no ValKey connection: {}", e),
                 }
 
                 // Log current stream discovery status
