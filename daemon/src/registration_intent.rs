@@ -52,7 +52,7 @@ pub struct RegistrationIntent {
     pub site: String,
     /// Capability profile: web | headless | service | system | component.
     pub profile: String,
-    /// DTAP environment stamped into dim-20.
+    /// DTAP environment stamped into the schema's environment axis.
     pub environment: String,
     /// Schema version at declaration time. NOT used to derive — recorded so a
     /// reconciliation can say *why* a vector changed rather than only that it did.

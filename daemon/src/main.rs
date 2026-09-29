@@ -254,11 +254,13 @@ struct Cli {
     node_type: String,
 
     /// Number of dimensions in the SERVICE TIER capability space.
-    /// Default: 30 (25 discovery + 5 storage) per daemon/config/service_schema.yaml.
-    /// Discovery dims 0-24 feed the spatial-hash bucket key; dims 25-29 are storage-only.
-    /// Other tiers (tool/constellation/galaxy) and custom topologies (created via
+    /// Defaults to the compiled service-tier width, so this flag cannot print a
+    /// layout the daemon does not have. Zones are index ranges, both cuts being
+    /// prefix truncations: declared and hashed, then derived (measured, ranked,
+    /// never hashed), then storage — see daemon/config/service_schema.yaml.
+    /// Other tiers (tool/constellation) and custom topologies (created via
     /// topo_create / gNode-TOPO) load their own dim count from their tier schema.
-    #[clap(long, default_value = "30")]
+    #[clap(long, default_value_t = gnode::integration::handlers::TOTAL_DIMENSIONS)]
     dimensions: usize,
     
     /// Number of worker threads per stream processor

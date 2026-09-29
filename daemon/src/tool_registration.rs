@@ -200,7 +200,7 @@ pub struct RegisterToolsArgs {
     /// profile (web|headless|…) instead of looping geometric_topology.yaml.
     pub profile: Option<String>,
     /// DTAP environment override (testing|staging|acceptance|production) injected
-    /// into dim-20 of the profile entity, so a non-prod site's geometric placement
+    /// into the environment axis of the profile entity, so a non-prod site's geometric placement
     /// matches its active_environment. None → profile/schema default (production).
     pub environment: Option<String>,
 }
@@ -1111,9 +1111,12 @@ fn run_service_profile(args: &RegisterToolsArgs) -> Result<()> {
         ))
     })?;
 
-    // Embed the DTAP environment into dim-20. The profiles set no `environment`,
-    // so without this it defaults to production — leaving a non-prod site's
-    // geometric placement (dim-20) diverged from its active_environment. When
+    // Embed the DTAP environment into its axis. The profiles set no
+    // `environment`, so without this it defaults to production — leaving a
+    // non-prod site's geometric placement diverged from its
+    // active_environment. The index comes from the schema, never a literal:
+    // the axis moved from 20 to 15 in v4.0 and a hardcoded slot would have
+    // written the wrong coordinate confidently. When
     // --environment is given, override it (validated against the schema's
     // environment values). This is the single re-embed path used by initial
     // registration AND `geodineum env set` (promotion), keeping the two env
@@ -1134,7 +1137,8 @@ fn run_service_profile(args: &RegisterToolsArgs) -> Result<()> {
             name: "environment".to_string(),
             value: serde_yaml::Value::String(env.clone()),
         });
-        info!("  Embedding environment='{}' into dim-20 for site '{}'", env, site);
+        info!("  Embedding environment='{}' into dim-{} for site '{}'",
+              env, env_dim.map(|d| d.index as i64).unwrap_or(-1), site);
     }
 
     let def = ToolServiceDef {
