@@ -23,7 +23,7 @@ use crate::GeometricTopology;
 
 use super::types::{
     CommandResult, CommandHandlerFn, AsyncCommandHandlerFn, CommandDescriptor,
-    parse_parameters, get_service_dimensions, DISCOVERY_DIMENSIONS,
+    parse_parameters, get_service_dimensions, DISCOVERY_DIMENSIONS, HASHED_DIMENSIONS,
     SERVICE_DIMENSION_ALIASES, TOTAL_DIMENSIONS, default_group, Lane,
 };
 
@@ -306,14 +306,16 @@ impl DiscoveryQuery {
         })
     }
 
-    /// The query's voxel cell, only when every discovery axis is named: a cell built
-    /// from defaulted axes would describe a request nobody made.
+    /// The query's voxel cell, only when every HASHED axis is named and no
+    /// derived axis is: a cell built from defaulted axes would describe a
+    /// request nobody made, and the derived axes are not in the key at all.
     fn bucket_key(&self) -> Option<String> {
-        if self.axes.len() != DISCOVERY_DIMENSIONS {
+        let hashed: Vec<_> = self.axes.iter().filter(|(i, _)| *i < HASHED_DIMENSIONS).collect();
+        if hashed.len() != HASHED_DIMENSIONS {
             return None;
         }
-        let mut point = FixedVector::new(DISCOVERY_DIMENSIONS);
-        for (index, value) in &self.axes {
+        let mut point = FixedVector::new(HASHED_DIMENSIONS);
+        for (index, value) in hashed {
             point[*index] = *value;
         }
         Some(GeometricTopology::point_to_bucket_key(&point, 10))
@@ -835,7 +837,7 @@ mod tests {
     fn axes_the_query_does_not_name_do_not_count_against_a_provider() {
         let q = query(json!({"protocol": 0.1, "domain_primary": 0.9})).unwrap();
         let reply = json!({"ents": {
-            "mailer": entity(&[(axis("protocol"), 0.1), (axis("domain_primary"), 0.9), (axis("environment"), 1.0), (axis("network_zone"), 1.0)]),
+            "mailer": entity(&[(axis("protocol"), 0.1), (axis("domain_primary"), 0.9), (axis("environment"), 1.0), (axis("service_tier"), 0.3)]),
             "cache": entity(&[(axis("protocol"), 0.1), (axis("domain_primary"), 0.25)]),
         }}).to_string();
         let ranked = q.rank(&reply).unwrap();
@@ -844,20 +846,34 @@ mod tests {
     }
 
     #[test]
-    fn only_a_query_naming_every_discovery_axis_has_a_voxel_cell() {
+    fn only_a_query_naming_every_hashed_axis_has_a_voxel_cell() {
         assert!(query(json!({"protocol": 0.1})).unwrap().bucket_key().is_none());
         let aliases: Vec<&str> = SERVICE_DIMENSION_ALIASES.iter().map(|(alias, _)| *alias).collect();
-        let every_axis: serde_json::Map<String, Value> = get_service_dimensions()
+        let hashed: serde_json::Map<String, Value> = get_service_dimensions()
             .iter()
-            .filter(|(name, i)| **i < DISCOVERY_DIMENSIONS && !aliases.contains(&name.as_str()))
+            .filter(|(name, i)| **i < HASHED_DIMENSIONS && !aliases.contains(&name.as_str()))
             .map(|(name, _)| (name.clone(), json!(0.5)))
             .collect();
-        assert!(query(Value::Object(every_axis)).unwrap().bucket_key().is_some());
+        assert!(query(Value::Object(hashed.clone())).unwrap().bucket_key().is_some());
+
+        // A derived axis is queryable but never part of the cell: naming one on
+        // top of every hashed axis must not change the key, and naming it
+        // instead of a hashed axis leaves the query without one.
+        let mut with_derived = hashed.clone();
+        with_derived.insert("current_load".into(), json!(0.5));
+        assert_eq!(
+            query(Value::Object(with_derived)).unwrap().bucket_key(),
+            query(Value::Object(hashed.clone())).unwrap().bucket_key()
+        );
+        let mut missing_hashed = hashed;
+        missing_hashed.remove("protocol");
+        missing_hashed.insert("current_load".into(), json!(0.5));
+        assert!(query(Value::Object(missing_hashed)).unwrap().bucket_key().is_none());
     }
 
     #[test]
     fn unknown_storage_only_out_of_range_and_empty_queries_are_refused() {
-        for caps in [json!({"compute": 0.8}), json!({"user_x": 0.5}), json!({"protocol": 2.0}), json!({}), json!({"load": 0.5, "current_load": 0.5})] {
+        for caps in [json!({"compute": 0.8}), json!({"native_format": 0.5}), json!({"protocol": 2.0}), json!({}), json!({"load": 0.5, "current_load": 0.5})] {
             assert!(query(caps.clone()).is_err(), "accepted {caps}");
         }
     }
@@ -893,7 +909,7 @@ mod tests {
     #[test]
     fn dimensions_come_from_the_map_discovery_matches_against() {
         let r = dimensions_reply().result.unwrap();
-        assert_eq!(r["dimension_index"]["network_zone"], axis("network_zone"));
+        assert_eq!(r["dimension_index"]["current_load"], axis("current_load"));
         assert_eq!(r["discovery_dimensions"], DISCOVERY_DIMENSIONS);
         assert!(r["dimension_index"].get("load").is_none());
         assert_eq!(r["aliases"]["load"], "current_load");

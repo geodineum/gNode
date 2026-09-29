@@ -239,7 +239,8 @@ pub fn register_node_geometrically(
     named.clear();
 
     let total = schema.total_dimensions;
-    let discovery = schema.discovery_dimensions.unwrap_or(total);
+    let hashed = crate::tool_registration::hashed_dimensions(&schema);
+    let sampler_csv = crate::tool_registration::sampler_indices_csv(&schema);
     let dim_map: HashMap<String, usize> =
         schema.dimensions.iter().map(|(n, d)| (n.clone(), d.index)).collect();
 
@@ -248,7 +249,7 @@ pub fn register_node_geometrically(
         &capabilities,
         &None,
         total,
-        discovery,
+        hashed,
         &dim_map,
     );
 
@@ -268,17 +269,18 @@ pub fn register_node_geometrically(
         .arg(-1i64)  // args[6]: the constellation tier has no registration_order axis
         .arg(crate::integration::handlers::types::POINT_FRAC_BITS)  // args[7]
         .arg(total)  // args[8]
+        .arg(&sampler_csv)  // args[9]: sampler-owned indices, preserved on update
         .query(conn);
 
     match result {
         Ok(_) => {
             info!(
                 "Registered node '{}' in the constellation topology: {} of {} dimensions declared \
-                 ({} discovery), schema v{}",
+                 ({} hashed), schema v{}",
                 facts.node_id,
                 capabilities.len(),
                 total,
-                discovery,
+                hashed,
                 schema.schema_version
             );
             Ok(())
@@ -407,26 +409,40 @@ mod tests {
         let service = load_schema(&root.join("config/service_schema.yaml")).unwrap();
         let tool = load_schema(&root.join("config/tool_schema.yaml")).unwrap();
         let constellation = load_schema(&root.join("config/constellation_schema.yaml")).unwrap();
-        assert_eq!(service.dimensions.get("registration_order").unwrap().index, 29);
-        assert_eq!(registration_order_index(get_service_dimensions()), 29,
+        assert!(service.dimensions.get("registration_order").is_none(),
+            "schema 4.0 dropped the axis: the order lives in m.ro, which decodes and is \
+             invariant-checked, and the axis held values its own enum could not name");
+        assert_eq!(registration_order_index(get_service_dimensions()), -1,
             "static service map must agree with service_schema.yaml");
         assert_eq!(tool.dimensions.get("registration_order").unwrap().index, 15);
         assert!(constellation.dimensions.get("registration_order").is_none(),
             "constellation tier has no registration_order axis; callers pass -1");
-        assert_eq!(service.dimensions.get("network_zone").unwrap().index, 22,
-            "index 22 is a hashed discovery axis — the slot the old code clobbered");
     }
 
     #[test]
-    fn measured_dimensions_sit_above_the_discovery_cut() {
-        // discovery_point() is a prefix truncation, so a measured value below
-        // the cut bakes a config-time default into the bucket key.
+    fn measured_dimensions_sit_between_the_two_cuts() {
+        // Both cuts are prefix truncations. Below the hashed cut a measured value
+        // would bake a config-time default into the bucket key and move the
+        // entity between voxels whenever it changed; above the discovery cut it
+        // could not be named in a query at all.
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let schema = load_schema(&root.join("config/constellation_schema.yaml")).unwrap();
-        let cut = schema.discovery_dimensions.unwrap();
-        for dim in ["aggregate_load", "storage_available", "node_health"] {
-            let idx = schema.dimensions.get(dim).unwrap().index;
-            assert!(idx >= cut, "{} is measured but sits at {}, inside the {}-dim cut", dim, idx, cut);
+        let discovery = schema.discovery_dimensions.unwrap();
+        let hashed = crate::tool_registration::hashed_dimensions(&schema);
+        assert!(hashed <= discovery, "the hashed cut cannot sit above the discovery cut");
+        let measured = crate::tool_registration::sampler_indices(&schema);
+        assert_eq!(measured.len(), 3, "aggregate_load, storage_available, node_health");
+        for idx in measured {
+            assert!(idx >= hashed, "measured axis {} is hashed into the bucket key", idx);
+            assert!(idx < discovery, "measured axis {} cannot be ranked in a query", idx);
+        }
+        // Every axis the sampler owns must also declare an unknown code at 0.00,
+        // or an unwritten coordinate asserts the first name in its enum.
+        for (name, dim) in &schema.dimensions {
+            if dim.writer.as_deref() == Some("sampler") {
+                assert_eq!(dim.values.get("unknown").copied(), Some(0.00),
+                    "{} is measured but 0.00 is not `unknown`", name);
+            }
         }
     }
 }

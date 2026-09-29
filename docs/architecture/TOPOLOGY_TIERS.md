@@ -37,18 +37,28 @@ Each topology stores data in distributed keys (NOT a single JSON blob):
 
 The production topology for per-site service discovery. 25 discovery dimensions used for spatial hash bucket keys, 5 storage-only for visualization and metadata.
 
-**Layers:**
-- 0-3: Interface Identity (protocol, native_format, api_version, contract_stability)
-- 4-6: Access Control (clearance_required, auth_method, data_sensitivity)
-- 7: Service Scope
-- 8-10: Functional Domain (domain_primary, domain_secondary, specialization)
-- 11-13: Performance (throughput_tier, latency_class, reliability_tier)
-- 14-15: Workflow (pipeline_stage, execution_priority)
-- 16-18: Runtime State — DYNAMIC (current_load, health_status, lifecycle_state)
-- 19-21: Classification (service_tier, environment, implementation_language)
-- 22-24: Network Context (network_zone, data_persistence, update_channel)
-- 25-27: Visual Topology — storage-only (user_x, user_y, user_z)
-- 28-29: Metadata — storage-only (deployment_model, registration_order)
+**Zones** (an axis's index IS its zone; both cuts are prefix truncations —
+`hashed_dimensions` 16, `discovery_dimensions` 19, `total_dimensions` 23):
+
+*Declared by the provider, hashed into the bucket key*
+- 0-2: Interface Identity (protocol, api_version, contract_stability)
+- 3-5: Access Control (clearance_required, auth_method, data_sensitivity)
+- 6-9: Scope and Domain (service_scope, domain_primary, domain_secondary, specialization)
+- 10-12: Declared service levels (throughput_tier, latency_class, reliability_tier)
+- 13-15: Workflow and placement (pipeline_stage, execution_priority, environment)
+
+*Derived by the daemon, ranked in a query, never hashed*
+- 16-18: current_load, health_status (`writer: sampler`), lifecycle_state
+  (`writer: daemon`). Code 0.00 is `unknown`, never a real state.
+
+*Storage: stored and returned, refused in a query*
+- 19-22: native_format, implementation_language, data_persistence, service_tier
+
+Dropped in v4.0 (30D → 23D): `network_zone` and `data_residency` live at the
+constellation tier, where the fact belongs and a service inherits its node's;
+`registration_order` duplicated `m.ro` and held values its own enum could not
+name; `user_x/y/z` duplicated the projection the topology meta already declares
+from the real axes; `update_channel` and `deployment_model` were never written.
 
 **Registration**: `gnode-daemon register-tools --tier service --site {service_id}`
 

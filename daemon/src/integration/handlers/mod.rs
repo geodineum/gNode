@@ -60,8 +60,10 @@ include!(concat!(env!("OUT_DIR"), "/ext_handlers.rs"));
 pub use types::{
     // Constants (service tier defaults)
     DISCOVERY_DIMENSIONS,
+    HASHED_DIMENSIONS,
     TOTAL_DIMENSIONS,
     SERVICE_DIMENSIONS,
+    SERVICE_AXES,
 
     // Schema-driven generic functions (multi-tier; pass dim count + dim map)
     build_capability_vector,
@@ -71,6 +73,8 @@ pub use types::{
     get_service_dimensions,
     build_service_capability_vector,
     discovery_point_from_full,
+    hashed_point_from_full,
+    sampler_axes_csv,
 
     // Core types
     CommandResult,

@@ -28,22 +28,32 @@ use once_cell::sync::Lazy;
 // SERVICE TIER CAPABILITY DIMENSION MAPPING (Schema: service_schema.yaml)
 // ============================================================================
 //
-// Static mapping of capability names to dimension indices for the 30-dimensional
-// service topology (25 discovery + 5 storage-only). Schema version 3.0.
+// Static mapping of capability names to dimension indices for the 23-dimensional
+// service topology. Schema version 4.0, three zones cut by index:
+//
+//   0..HASHED_DIMENSIONS      declared by the provider AND hashed into the
+//                             bucket key
+//   HASHED..DISCOVERY         derived: written by the sampler or the daemon,
+//                             ranked in a query, never hashed (a coordinate
+//                             that moves must not decide voxel membership)
+//   DISCOVERY..TOTAL          storage: stored and returned, refused in a query
 //
 // Used by stateless command handlers for:
 //   - Building capability vectors from service registration
-//   - Computing bucket keys for voxel storage (discovery dims 0-24)
+//   - Computing bucket keys for voxel storage (hashed dims only)
 //   - Distance calculations for service discovery
 //
-// These defaults are for the SERVICE tier. Other tiers (tool=16D, constellation=20D,
-// galaxy=20D) use the generic build_capability_vector() with schema-derived counts.
-// See: gNode/daemon/config/{service,tool,constellation,galaxy}_schema.yaml
+// These defaults are for the SERVICE tier. Other tiers (tool=16D,
+// constellation=24D) use the generic build_capability_vector() with
+// schema-derived counts.
+// See: gNode/daemon/config/{service,tool,constellation}_schema.yaml
 
-/// Service tier: dimensions used for discovery (bucket key hashing)
-pub const DISCOVERY_DIMENSIONS: usize = 25;
-/// Service tier: total dimensions (discovery + storage-only)
-pub const TOTAL_DIMENSIONS: usize = 30;
+/// Service tier: dimensions a query may name (declared + derived)
+pub const DISCOVERY_DIMENSIONS: usize = 19;
+/// Service tier: dimensions that feed the spatial-hash bucket key
+pub const HASHED_DIMENSIONS: usize = 16;
+/// Service tier: total dimensions (declared + derived + storage)
+pub const TOTAL_DIMENSIONS: usize = 23;
 
 /// Fractional bits of the Q-format `pr` is encoded with. g_math's default
 /// table format is Q64.64; the registration primitive needs this to place a
@@ -64,17 +74,14 @@ pub fn registration_order_index(dim_map: &HashMap<String, usize>) -> i64 {
 /// Maps capability names to their dimension indices (0-29).
 ///
 /// Layer architecture:
-///   Layer 1 (0-3):   Interface Identity - protocol, format, version, stability
-///   Layer 2 (4-6):   Access Control - clearance, auth, sensitivity
-///   Layer 3 (7):     Service Scope
-///   Layer 4 (8-10):  Functional Domain - primary, secondary, specialization
-///   Layer 5 (11-13): Performance Profile - throughput, latency, reliability
-///   Layer 6 (14-15): Workflow Context - pipeline_stage, priority
-///   Layer 7 (16-18): Runtime State - current_load, health_status, lifecycle_state
-///   Layer 8 (19-21): Classification - service_tier, environment, implementation_language
-///   Layer 9 (22-24): Network Context - network_zone, data_persistence, update_channel
-///   Layer 10 (25-27): Visual Topology - user_x, user_y, user_z (storage-only)
-///   Layer 11 (28-29): Metadata - deployment_model, registration_order (storage-only)
+///   Layer 1 (0-2):   Interface Identity - protocol, version, stability
+///   Layer 2 (3-5):   Access Control - clearance, auth, sensitivity
+///   Layer 3 (6-9):   Scope and Domain - scope, primary, secondary, specialization
+///   Layer 4 (10-12): Declared service levels - throughput, latency, reliability
+///   Layer 5 (13-15): Workflow and placement - pipeline_stage, priority, environment
+///   Derived (16-18):  current_load, health_status, lifecycle_state — measured
+///   Storage (19-22):  native_format, implementation_language, data_persistence,
+///                     service_tier
 /// Accepted alternative names for service-tier axes: (alias, canonical axis).
 pub const SERVICE_DIMENSION_ALIASES: [(&str, &str); 6] = [
     ("load", "current_load"),
@@ -89,29 +96,33 @@ pub const SERVICE_DIMENSION_ALIASES: [(&str, &str); 6] = [
 /// index, index to name) are built from it, and a test pins it to
 /// service_schema.yaml, so an index can no longer drift in a second copy.
 pub const SERVICE_AXES: [&str; TOTAL_DIMENSIONS] = [
-    // Layer 1: Interface Identity (0-3)
-    "protocol", "native_format", "api_version", "contract_stability",
-    // Layer 2: Access Control (4-6)
+    // Declared, hashed (0-15)
+    "protocol", "api_version", "contract_stability",
     "clearance_required", "auth_method", "data_sensitivity",
-    // Layer 3: Service Scope (7)
-    "service_scope",
-    // Layer 4: Functional Domain (8-10)
-    "domain_primary", "domain_secondary", "specialization",
-    // Layer 5: Performance Profile (11-13)
+    "service_scope", "domain_primary", "domain_secondary", "specialization",
     "throughput_tier", "latency_class", "reliability_tier",
-    // Layer 6: Workflow Context (14-15)
-    "pipeline_stage", "execution_priority",
-    // Layer 7: Runtime State (16-18)
+    "pipeline_stage", "execution_priority", "environment",
+    // Derived, ranked, never hashed (16-18)
     "current_load", "health_status", "lifecycle_state",
-    // Layer 8: Classification (19-21)
-    "service_tier", "environment", "implementation_language",
-    // Layer 9: Network Context (22-24)
-    "network_zone", "data_persistence", "update_channel",
-    // Layer 10: Visual Topology (25-27) — storage-only
-    "user_x", "user_y", "user_z",
-    // Layer 11: Metadata (28-29) — storage-only
-    "deployment_model", "registration_order",
+    // Storage (19-22)
+    "native_format", "implementation_language", "data_persistence", "service_tier",
 ];
+
+/// Indices whose value belongs to the sampler, not to the registering provider.
+/// Passed to GNODE_REGISTER_CAPABILITY_VECTOR so a re-registration preserves the
+/// last measurement instead of resetting it to the schema's unknown code, the
+/// same way `m.ro` is preserved. `lifecycle_state` is absent on purpose: the
+/// registration itself is that axis's writer.
+pub const SERVICE_SAMPLER_AXES: [usize; 2] = [16, 17];
+
+/// The sampler-owned indices as the CSV the registration primitive expects.
+pub fn sampler_axes_csv() -> String {
+    SERVICE_SAMPLER_AXES
+        .iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
 
 pub static SERVICE_DIMENSIONS: Lazy<HashMap<String, usize>> = Lazy::new(|| {
     let mut dims: HashMap<String, usize> = SERVICE_AXES
@@ -173,8 +184,10 @@ pub fn build_capability_vector(
     point
 }
 
-/// Extract discovery-only dimensions from a full point (for bucket key computation).
-/// The discovery_dims count comes from the tier's schema.
+/// Extract a prefix of a full point. Both zone cuts are prefix truncations, so
+/// this serves the discovery slice (what a query may name) and the hashed slice
+/// (what the bucket key is built from); the caller says which by the count it
+/// passes, and that count comes from the tier's schema.
 pub fn discovery_point(
     full_point: &crate::geometric_precision::FixedVector,
     discovery_dims: usize,
@@ -194,24 +207,31 @@ pub fn discovery_point(
 // Service tier convenience wrappers
 // ============================================================================
 //
-// Service tier = the local-per-site service topology. 30 total dimensions,
-// 25 of which feed the discovery bucket key. Other tiers (tool, constellation,
-// galaxy) have their own dim counts loaded from their tier schema YAML —
-// see daemon/config/{service,tool,constellation,galaxy}_schema.yaml.
+// Service tier = the local-per-site service topology. 23 total dimensions, 19
+// of which a query may name, 16 of which feed the bucket key. Other tiers
+// (tool, constellation) have their own dim counts loaded from their tier schema
+// YAML — see daemon/config/{service,tool,constellation}_schema.yaml.
 //
 // Custom topologies created via topo_create / gNode-TOPO have user-defined
 // dim counts and live in handlers/topology_custom.rs + custom_topology.rs.
 
 /// Build a service-tier FixedVector from a capability name→value HashMap.
-/// Reads dim count + dim map from the service tier (TOTAL_DIMENSIONS = 30).
+/// Reads dim count + dim map from the service tier (TOTAL_DIMENSIONS = 23).
 pub fn build_service_capability_vector(capabilities: &HashMap<String, f64>) -> crate::geometric_precision::FixedVector {
     build_capability_vector(capabilities, TOTAL_DIMENSIONS, get_service_dimensions())
 }
 
 /// Build a discovery-only point from a full service-tier point.
-/// Service tier: 25 discovery dims sliced from the 30D full vector.
+/// Service tier: 19 queryable dims sliced from the 23D full vector.
 pub fn discovery_point_from_full(full_point: &crate::geometric_precision::FixedVector) -> crate::geometric_precision::FixedVector {
     discovery_point(full_point, DISCOVERY_DIMENSIONS)
+}
+
+/// Build the hashed point from a full service-tier point — what the bucket key
+/// is computed over. Stops below the derived axes: load and health move, and an
+/// entity must not change voxel because it got busy.
+pub fn hashed_point_from_full(full_point: &crate::geometric_precision::FixedVector) -> crate::geometric_precision::FixedVector {
+    discovery_point(full_point, HASHED_DIMENSIONS)
 }
 
 // ============================================================================

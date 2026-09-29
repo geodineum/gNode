@@ -15,7 +15,8 @@
 | Unified stream | stream | `{site_id}:gnode:unified:{environment}` — RESP3 command stream, field aliases resolved by `utils::field_names` | config.rs, COMMAND_SCHEMA.md |
 | Response polling key | stream (kv) | `SET {ss}:res:{request_id} '<json>' EX 10` — written by daemon after execution | COMMAND_SCHEMA.md, integration/concurrent_lane.rs |
 | Receipt stream | stream | `XADD {site_id}:gnode:receipts:{environment}` — signed durable receipt per keyed response (ed25519 per-node key; verifiers resolve `signer` via `{topology_ns}:gnode:receipt_pubkeys` HASH), MINID age-trim 30 d | integration/receipt.rs, installer CONTRACTS/receipt-stream.md |
-| Health stream | stream | `{site_id}:gnode:health:{environment}` — optional health-check consumer groups | config.rs, integration/processor/health_processor.rs |
+| Health stream | stream | `{site_id}:gnode:health` — **no suffix**: the key `gnode_site.lua` provisions and reports through stream discovery, which is what publishers and the daemon meet on. Groups: `gnode-workers` (dynamic discovery path) and `gnode-daemon` (static fallback); a message is acked by whichever group read it, and a message this daemon does not understand is dismissed AND acked | config.rs `build_health_stream_key`, integration/processor/health_processor.rs |
+| Derived axes | data | `current_load`, `health_status` carry `writer: sampler` in the tier schema. Written by `FCALL GNODE_TOPO_SET_DERIVED` (never by a registering provider), which changes coordinates without touching `bk` or voxel membership; `GNODE_REGISTER_CAPABILITY_VECTOR` args[9] names them so an update preserves the last measurement, with its `m.ds` stamp and the `zs` ordering computed from it. Code 0.00 on a derived axis means **unknown**, never a real state | daemon/config/*_schema.yaml, functions/gnode_topo.lua |
 | Broadcast stream | stream | `{site_id}:gnode:broadcast` — one-to-many, environment-independent | config.rs, integration/processor/broadcast_reader.rs |
 | Field-alias resolver | method | `utils::get_field(map, keys) -> String` — resolves canonical alias lists | utils.rs (alias lists) |
 | Inter-service routing | command | Commands carrying `_rt` (relay target) are routed to the target site's unified stream; `_rr` overrides the reply-to stream. Resolution: entity lookup → `site_id` direct → JSON capability query | README.md, integration/relay/router.rs |
@@ -104,7 +105,7 @@ producer is visible in the journal, never silent.
 {"id":"", "x":<float>, "y":<float>, "z":<float>, "bk":"<bucket_key>", "zs":<z_score>, "ra":[outgoing_ids], "m":{metadata}}
 ```
 
-**Capability vector:** `{"dimension_name": <float_value>, ...}` mapped to the tier's dimension count (30D for service tier).
+**Capability vector:** `{"dimension_name": <float_value>, ...}` mapped to the tier's dimension count. An axis's index is its zone, both cuts being prefix truncations: `[0, hashed_dimensions)` declared and hashed, `[hashed_dimensions, discovery_dimensions)` derived and ranked but never hashed, `[discovery_dimensions, total_dimensions)` storage-only and refused in a query. Read the counts from the published schema, never from prose.
 
 **FCALL args (Lua):** positional, auto-JSON-encoded for non-scalar; keys array first, then args array per ValKey function spec.
 
@@ -214,4 +215,4 @@ Latent inconsistency (not a live mismatch):
 - The `face_mapping` cache key is written **braced** by gCube (`content-sync.php`) and **unbraced** by other child themes; `GNODE_CACHE_SET` `build_key` (gnode_cache.lua) normalizes both to identical `{site_id}:gnode:face_mapping`. Harmless today; would split the keyspace if either ever wrote via raw `XADD`/`SET`.
 
 Unconfirmed:
-- **Health-metrics compressed field names** (`t='lu',si,l,cpu,mem,rq,lat,err,ts`) on `{site_id}:gnode:health:{env}` — producer (gNode-Client `HealthMetrics`) verified; the daemon's `health_processor.rs` reader was not byte-for-byte confirmed in the audit pass.
+- **Health-metrics compressed field names** (`t='lu',si,l,cpu,mem,rq,lat,err,ts`) on `{site_id}:gnode:health` — producer (gNode-Client `HealthMetrics`) verified; the reader consumes `t='lu'` and dismisses every other type. A self-reported load is a secondary signal: the daemon derives load from reply latency against each provider's own baseline, and a report is mapped into the measured band (`idle` 0.20 … `saturated` 1.00) so that 0.00 stays reserved for unknown.

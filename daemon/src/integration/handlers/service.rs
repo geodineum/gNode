@@ -19,7 +19,7 @@ use crate::GeometricTopology;
 
 use super::types::{
     CommandResult, CommandHandlerFn, AsyncCommandHandlerFn, CommandDescriptor,
-    parse_parameters, build_service_capability_vector, discovery_point_from_full, Lane,
+    parse_parameters, build_service_capability_vector, Lane,
 };
 
 /// Register all service command handlers
@@ -233,8 +233,8 @@ fn plan_registration(params: &RegisterServiceParams, site_id: &str) -> Result<Re
     let point = build_service_capability_vector(&params.capabilities);
 
     // Bucket key from discovery dims (25D for service tier), z-score from dim#16
-    let disc_point = discovery_point_from_full(&point);
-    let bucket_key = GeometricTopology::point_to_bucket_key(&disc_point, 10);
+    let hashed = super::types::hashed_point_from_full(&point);
+    let bucket_key = GeometricTopology::point_to_bucket_key(&hashed, 10);
     let z_score = GeometricTopology::compute_service_z_score(&point);
 
     let point_raw: Vec<String> = (0..point.len()).map(|i| point[i].raw().to_string()).collect();
@@ -580,6 +580,7 @@ pub fn handle_register_service_async<'a>(
             .arg(super::types::registration_order_index(super::types::get_service_dimensions()))  // args[6]
             .arg(super::types::POINT_FRAC_BITS)  // args[7]
             .arg(super::types::TOTAL_DIMENSIONS)  // args[8]
+            .arg(super::types::sampler_axes_csv())  // args[9]
             .query_async(conn)
             .await;
 

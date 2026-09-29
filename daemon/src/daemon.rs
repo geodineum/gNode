@@ -274,7 +274,7 @@ impl GNodeDaemon {
 
         // STATELESS ARCHITECTURE:
         // Capability dimensions are statically defined in integration/handlers/types.rs
-        // via SERVICE_DIMENSIONS lazy_static (30 dims, TOTAL_DIMENSIONS constant).
+        // via SERVICE_DIMENSIONS lazy_static (23 dims, TOTAL_DIMENSIONS constant).
         // No runtime registration needed for the canonical service tier; custom
         // topologies created via topo_create / gNode-TOPO have their own dim counts
         // declared at creation time and stored in ValKey.
@@ -555,8 +555,12 @@ fn register_gnode_as_service(
     capabilities.insert("pipeline_stage".to_string(), 0.40);     // process (central router)
     capabilities.insert("execution_priority".to_string(), 0.75); // high (critical infrastructure)
 
-    // LAYER 7: Runtime State (initialized, will be updated by health stream)
-    capabilities.insert("current_load".to_string(), 0.00);       // idle at startup
+    // DERIVED axes: start at the schema's unknown code. The registration
+    // primitive keeps whatever the sampler last wrote, so this only applies to
+    // a first registration.
+    capabilities.insert("current_load".to_string(), 0.00);       // unknown
+    capabilities.insert("health_status".to_string(), 0.00);      // unknown
+    capabilities.insert("lifecycle_state".to_string(), 0.25);    // active — this registration
 
     // LAYER 8: Classification
     capabilities.insert("service_tier".to_string(), 0.90);       // orchestrator
@@ -596,8 +600,9 @@ fn register_gnode_as_service(
     };
 
     // Build the service-tier Q64.64 capability vector.
-    // Dim count comes from the canonical service-tier schema (TOTAL_DIMENSIONS = 30
-    // = 25 discovery + 5 storage; see daemon/config/service_schema.yaml).
+    // Dim count comes from the canonical service-tier schema (TOTAL_DIMENSIONS
+    // = 23 = 16 declared + 3 derived + 4 storage; see
+    // daemon/config/service_schema.yaml).
     use crate::integration::handlers::TOTAL_DIMENSIONS;
     let mut point = FixedVector::new(TOTAL_DIMENSIONS);
     let dims = crate::integration::command_handler::get_service_dimensions();
@@ -611,11 +616,12 @@ fn register_gnode_as_service(
         }
     }
 
-    // Compute bucket key from the discovery slice (DISCOVERY_DIMENSIONS = 25 for
-    // service tier) using Q64.64 arithmetic. Storage-only dims (25-29) are excluded
-    // from the bucket key.
-    let disc_point = crate::integration::command_handler::discovery_point_from_full(&point);
-    let bucket_key = GeometricTopology::point_to_bucket_key(&disc_point, 10);
+    // Compute the bucket key over the hashed prefix (HASHED_DIMENSIONS = 16 for
+    // the service tier) using Q64.64 arithmetic. The derived axes (16-18) and
+    // the storage axes (19-22) are excluded: a coordinate that moves must not
+    // decide voxel membership.
+    let hashed = crate::integration::command_handler::hashed_point_from_full(&point);
+    let bucket_key = GeometricTopology::point_to_bucket_key(&hashed, 10);
 
     // Compute z_score (dimension 16: current_load) for ZADD ordering
     let z_score = GeometricTopology::compute_service_z_score(&point);
@@ -644,7 +650,7 @@ fn register_gnode_as_service(
 
     if debug_mode {
         debug!("Daemon registration: service_id={}, topology_key={}", service_id, topology_key);
-        debug!("Daemon bucket_key: {} (68 chars)", bucket_key);
+        debug!("Daemon bucket_key: {} ({} chars)", bucket_key, bucket_key.len());
         debug!("Daemon z_score: {}", z_score);
     }
 
@@ -676,6 +682,7 @@ fn register_gnode_as_service(
             crate::integration::handlers::types::get_service_dimensions()))  // args[6]
         .arg(crate::integration::handlers::types::POINT_FRAC_BITS)  // args[7]
         .arg(TOTAL_DIMENSIONS)  // args[8]
+        .arg(crate::integration::handlers::types::sampler_axes_csv())  // args[9]
         .query(&mut conn);
 
     match register_result {

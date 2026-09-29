@@ -1,4 +1,4 @@
-# Constellation Topology Schema — 24D (16 discovery + 8 storage)
+# Constellation Topology Schema — 24D (16 declared + 3 derived + 5 storage)
 # Tier: CONSTELLATION — nodes within a WireGuard VPN cluster
 #
 # Registers each node's role, capacity, placement and health, so that
@@ -6,22 +6,33 @@
 # ValKey replica" and "capacity planning" become discovery queries rather
 # than hand-maintained configuration.
 #
-# ORDER IS LOAD-BEARING. discovery_point() is a prefix truncation, so dims
-# 0..discovery_dimensions-1 form the spatial-hash bucket key and everything
-# from discovery_dimensions upward is storage-only. A dimension a MEASUREMENT
-# can change must therefore sit above the cut: registration reads static
-# configuration, so a measured value placed below the cut bakes a config-time
-# default into the bucket key and lets a query for "lightly loaded" silently
-# match a number that was never live.
+# ORDER IS LOAD-BEARING, and there are now TWO cuts, both prefix truncations:
 #
-# Live values belong in z_score, which is range-queryable and updates without
-# re-registration. compute_service_z_score reads dimension 16 — which is
-# exactly why aggregate_load sits there.
+#   0..hashed_dimensions-1        DECLARED. Read from static configuration at
+#                                 registration and hashed into the bucket key.
+#   hashed..discovery-1           DERIVED. Written by the sampler
+#                                 (`writer: sampler`), ranked in a query, never
+#                                 hashed — a measured value below the hash cut
+#                                 would bake a config-time default into the
+#                                 bucket key and let a query for "lightly
+#                                 loaded" match a number that was never live.
+#   discovery..total-1            STORAGE. Stored and returned, refused in a
+#                                 query.
+#
+# The measured block used to sit above the discovery cut, which kept it out of
+# the bucket key but also out of every query, leaving z_score as the only way to
+# ask "which node is least busy". It is now between the cuts: rankable and
+# unhashed. compute_service_z_score still reads dimension 16, so the sorted set
+# keeps working as the fast path.
+#
+# On a derived axis, code 0.00 is `unknown` and never a real state: an
+# unwritten coordinate has to abstain, not claim the first name in the enum.
 
 schema_version: "4.0"
 tier: constellation
 total_dimensions: 24
-discovery_dimensions: 16
+discovery_dimensions: 19
+hashed_dimensions: 16
 
 dimensions:
   # ═══════════════════════════════════════════════════════════════
@@ -165,11 +176,19 @@ dimensions:
   # Reserved. Width changes are expensive downstream — an .htt fixes its
   # semantic dimension count in the header at creation — so slots are held
   # open rather than appended later.
-  semantic_reserved_1:
+  # The one hardware fact routing actually needs and the tier could not state:
+  # cpu/memory/bandwidth tiers say how much, nothing said whether there is an
+  # accelerator. Declared by the operator in the node YAML's
+  # `capabilities.dimensions`, never auto-detected — a guessed capability
+  # matches the wrong work confidently.
+  accelerator_tier:
     index: 13
-    query_type: equality
+    query_type: range
     values:
-      unset: 0.00
+      none: 0.00
+      igpu: 0.33
+      gpu: 0.67
+      multi_gpu: 1.00
 
   semantic_reserved_2:
     index: 14
@@ -184,44 +203,53 @@ dimensions:
       unset: 0.00
 
   # ═══════════════════════════════════════════════════════════════
-  # STORAGE BLOCK (16-23) — measured, visual, temporal.
-  # Excluded from the bucket key. Never assume these are fresh in a
-  # registered entity; read live values from the health stream or z_order.
+  # DERIVED BLOCK (16-18) — measured by the sampler, ranked, never hashed.
+  # A registered entity's copy is as fresh as m.ds says; a value with no stamp
+  # was never measured, which is what code 0.00 (unknown) means.
   # ═══════════════════════════════════════════════════════════════
 
-  # Dim 16 exactly: compute_service_z_score reads this index, so live load
-  # becomes the sorted-set ordering behind "route to the least busy node"
-  # without re-registering anything.
+  # Dim 16 exactly: compute_service_z_score reads this index, so live load is
+  # also the sorted-set ordering behind "route to the least busy node".
   aggregate_load:
     index: 16
     query_type: range
+    writer: sampler
     values:
-      idle: 0.00
-      light: 0.25
-      moderate: 0.50
-      heavy: 0.75
+      unknown: 0.00
+      idle: 0.20
+      light: 0.40
+      moderate: 0.60
+      heavy: 0.80
       saturated: 1.00
 
   storage_available:
     index: 17
     query_type: range
+    writer: sampler
     values:
-      critical: 0.00
-      low: 0.25
-      adequate: 0.50
-      ample: 0.75
+      unknown: 0.00
+      critical: 0.20
+      low: 0.40
+      adequate: 0.60
+      ample: 0.80
       plenty: 1.00
 
   node_health:
     index: 18
     query_type: range
+    writer: sampler
     values:
-      dead: 0.00
-      degraded: 0.33
-      healthy: 0.67
+      unknown: 0.00
+      dead: 0.25
+      degraded: 0.50
+      healthy: 0.75
       optimal: 1.00
 
-  # Visual placement for the topology viewer. Storage-only by construction.
+  # ═══════════════════════════════════════════════════════════════
+  # STORAGE BLOCK (19-23) — visual and temporal. Refused in a query.
+  # ═══════════════════════════════════════════════════════════════
+
+  # Visual placement for the topology viewer.
   vpn_position_x:
     index: 19
     query_type: range

@@ -3,8 +3,15 @@
 // This module processes load update (lu) messages from the dedicated health stream,
 // updating the LoadMetricsManager for optimal service selection.
 //
-// Also updates topology dimension 16 (current_load) for geometric service discovery.
-// See: docs/architecture/NEW_PRACTICAL_TOPOLOGY.md
+// Also writes topology dimension 16 (current_load) for geometric service
+// discovery, through GNODE_TOPO_SET_DERIVED — the canonical (C) entities. It
+// used to call GNODE_TOPOLOGY_BATCH_UPDATE_LOAD, which wrote a JSON blob at the
+// topology key that the live store does not have, so every load update ever
+// received failed as "Topology not found" at trace level.
+//
+// A self-reported load is a SECONDARY signal: the daemon's own sampler derives
+// load from reply latency against each provider's baseline. This path exists for
+// a provider that knows something the daemon cannot see.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -53,9 +60,14 @@ pub fn process_health_updates(
     messages: Vec<(String, HashMap<String, String>)>,
     conn: &mut Connection,
     health_stream: &str,
+    consumer_group: &str,
     debug_mode: bool
 ) -> IntegrationResult<usize> {
-    process_health_updates_with_topology(load_manager, messages, conn, health_stream, None, debug_mode)
+    let topology_key = crate::config::site_of_stream_key(health_stream)
+        .map(crate::GeometricTopology::get_services_topology_key);
+    process_health_updates_with_topology(
+        load_manager, messages, conn, health_stream, consumer_group,
+        topology_key.as_deref(), debug_mode)
 }
 
 /// Process health update messages with optional topology update
@@ -71,6 +83,7 @@ pub fn process_health_updates_with_topology(
     messages: Vec<(String, HashMap<String, String>)>,
     conn: &mut Connection,
     health_stream: &str,
+    consumer_group: &str,
     topology_key: Option<&str>,
     debug_mode: bool
 ) -> IntegrationResult<usize> {
@@ -97,11 +110,18 @@ pub fn process_health_updates_with_topology(
             }
         };
 
-        // Only process lu (load update) messages
+        // Only lu (load update) messages carry a load factor. Anything else on
+        // this stream is dismissed AND acknowledged: a message left pending
+        // because nothing here understands it never leaves the group's pending
+        // list. One site's stream held 114 such records, all of them `rq`
+        // latency reports, read once and pending ever since. (The sampler that
+        // derives load from those latencies reads them separately, from the
+        // stream, not from this group.)
         if msg_type != "lu" {
             if debug_mode {
-                debug!("Skipping non-lu health message: type={}", msg_type);
+                debug!("Dismissing non-lu health message: type={}", msg_type);
             }
+            ack_ids.push(msg_id);
             continue;
         }
 
@@ -168,7 +188,7 @@ pub fn process_health_updates_with_topology(
 
     // Acknowledge all successfully processed messages
     if !ack_ids.is_empty() {
-        match conn.xack::<_, _, _, usize>(health_stream, "gnode-daemon", &ack_ids) {
+        match conn.xack::<_, _, _, usize>(health_stream, consumer_group, &ack_ids) {
             Ok(ack_count) => {
                 if debug_mode {
                     debug!("Acknowledged {} health messages", ack_count);
@@ -181,38 +201,44 @@ pub fn process_health_updates_with_topology(
         }
     }
 
-    // Update topology dimension 16 (current_load) if topology_key is provided
-    // Uses batch update for efficiency: GNODE_TOPOLOGY_BATCH_UPDATE_LOAD
+    // Write dimension 16 into the canonical (C) entities. One FCALL per service
+    // rather than a batch: the primitive is per entity, the message rate is per
+    // provider per interval, and a partial failure must not lose the rest.
+    //
+    // The measured band starts at `idle` (0.20), not at 0.00: code 0.00 on a
+    // derived axis means UNKNOWN, so a measured idle service must not be
+    // indistinguishable from one nothing has ever measured.
     if let Some(topo_key) = topology_key {
-        if !load_updates.is_empty() {
-            // Serialize updates to JSON
-            let updates_json = match serde_json::to_string(&load_updates) {
-                Ok(json) => json,
-                Err(e) => {
-                    warn!("Failed to serialize load updates for topology: {}", e);
-                    return Ok(processed_count);
-                }
-            };
-
-            // Call GNODE_TOPOLOGY_BATCH_UPDATE_LOAD
+        for (service_id, load_factor) in &load_updates {
+            let measured = 0.20 + 0.80 * load_factor.clamp(0.0, 1.0);
+            let raw = crate::geometric_precision::FixedPoint::from_f64(measured).raw();
+            let updates = format!(
+                r#"{{"{}":{{"pd":{:.4},"pr":"{}"}}}}"#,
+                crate::integration::handlers::types::SERVICE_SAMPLER_AXES[0], measured, raw
+            );
+            let z_score = (measured * 1_000_000.0) as i64;
             let result: Result<String, redis::RedisError> = redis::cmd("FCALL")
-                .arg("GNODE_TOPOLOGY_BATCH_UPDATE_LOAD")
+                .arg("GNODE_TOPO_SET_DERIVED")
                 .arg(1)
                 .arg(topo_key)
-                .arg(&updates_json)
+                .arg(service_id)
+                .arg(&updates)
+                .arg(z_score)
+                .arg(crate::daemon::GNodeDaemon::topology_snapshot_key())
+                .arg(crate::integration::processor::stream_utils::current_timestamp())
+                .arg(crate::integration::handlers::types::HASHED_DIMENSIONS)
                 .query(conn);
 
             match result {
-                Ok(response) => {
-                    trace!("Topology dimension 16 batch update: {}", response);
+                Ok(_) => {
                     if debug_mode {
-                        debug!("Updated topology current_load for {} services", load_updates.len());
+                        debug!("Wrote derived load {:.2} for {}", measured, service_id);
                     }
                 },
-                Err(e) => {
-                    // Non-fatal - topology may not exist yet or function not loaded
-                    trace!("Failed to update topology dimension 16: {} (non-fatal)", e);
-                }
+                // A provider can report for a service that is not registered here;
+                // that is the provider's error, not this node's, and it must not
+                // stop the rest of the batch.
+                Err(e) => trace!("Derived load write for {} refused: {}", service_id, e),
             }
         }
     }

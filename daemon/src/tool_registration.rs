@@ -45,6 +45,10 @@ pub struct CapabilitySchema {
     pub tier: Option<String>,
     pub total_dimensions: usize,
     pub discovery_dimensions: Option<usize>,
+    /// Axes that feed the spatial-hash bucket key: a prefix, and never the
+    /// whole discovery block, because the derived axes between the two cuts
+    /// move. Absent = the discovery count (a tier with no derived axes).
+    pub hashed_dimensions: Option<usize>,
     pub dimensions: HashMap<String, DimensionDef>,
     /// Named capability profiles (web|headless|service|system|component) that
     /// supply 30-dim defaults for registering one service entity per site.
@@ -56,6 +60,11 @@ pub struct CapabilitySchema {
 pub struct DimensionDef {
     pub index: usize,
     pub values: HashMap<String, f64>,
+    /// Who owns this axis's value: absent or `provider` = the registering
+    /// service, `sampler` = the daemon's measurement (preserved across a
+    /// re-registration), `daemon` = written by the registration path itself.
+    #[serde(default)]
+    pub writer: Option<String>,
 }
 
 // ============================================================================
@@ -156,6 +165,9 @@ pub struct TranslatedService {
     pub ro_index: i64,
     /// The tier schema's total dimensions; the Lua primitive refuses any other width.
     pub width: usize,
+    /// Indices the sampler owns, as CSV. The primitive keeps the stored values
+    /// for these instead of the ones in this entity.
+    pub sampler_axes: String,
     /// The site named by the manifest, if any.
     pub site: Option<String>,
 }
@@ -204,6 +216,37 @@ pub fn load_schema(path: &Path) -> Result<CapabilitySchema> {
     let schema: CapabilitySchema = serde_yaml::from_str(&content)
         .map_err(|e| GeometricError::Other(format!("Failed to parse schema {:?}: {}", path, e)))?;
     Ok(schema)
+}
+
+/// The tier's hashed prefix: what the bucket key is computed over.
+pub fn hashed_dimensions(schema: &CapabilitySchema) -> usize {
+    schema
+        .hashed_dimensions
+        .or(schema.discovery_dimensions)
+        .unwrap_or(schema.total_dimensions)
+}
+
+/// Indices the sampler owns, ascending. The registration primitive keeps these
+/// coordinates from the stored entity instead of taking the caller's value, so
+/// a re-registration cannot reset a measurement to the schema's unknown code.
+pub fn sampler_indices(schema: &CapabilitySchema) -> Vec<usize> {
+    let mut out: Vec<usize> = schema
+        .dimensions
+        .values()
+        .filter(|d| d.writer.as_deref() == Some("sampler"))
+        .map(|d| d.index)
+        .collect();
+    out.sort_unstable();
+    out
+}
+
+/// `sampler_indices` as the CSV the registration primitive expects.
+pub fn sampler_indices_csv(schema: &CapabilitySchema) -> String {
+    sampler_indices(schema)
+        .iter()
+        .map(|i| i.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Publish the active tier schema so clients stop hardcoding its shape.
@@ -315,8 +358,38 @@ pub fn assert_lua_dimension_constants(schema: &CapabilitySchema, functions_dir: 
             continue;
         }
         let Ok(src) = std::fs::read_to_string(&path) else { continue };
+
+        // A library that carries its own name→index map is checked entry by
+        // entry, not just by width: the map that shipped as a 23-D copy of a
+        // 30-D schema had the right length for neither and drifted silently.
+        let mut in_map = false;
         for line in src.lines() {
             let t = line.trim();
+            if t.starts_with("local DIMENSIONS = {") {
+                in_map = true;
+                continue;
+            }
+            if in_map {
+                if t == "}" {
+                    in_map = false;
+                    continue;
+                }
+                let Some((name, rest)) = t.split_once('=') else { continue };
+                let name = name.trim();
+                let Ok(index) = rest.trim().trim_end_matches(',').trim().parse::<usize>() else { continue };
+                match schema.dimensions.get(name) {
+                    Some(d) if d.index == index => { checked += 1; }
+                    Some(d) => return Err(GeometricError::Other(format!(
+                        "{:?} puts '{}' at index {} but the {} schema says {}. \
+                         Both describe the same capability space; fix the schema or the library, \
+                         not one of them.",
+                        path, name, index, schema.tier.as_deref().unwrap_or("service"), d.index))),
+                    None => return Err(GeometricError::Other(format!(
+                        "{:?} declares axis '{}' (index {}), which the {} schema does not have.",
+                        path, name, index, schema.tier.as_deref().unwrap_or("service")))),
+                }
+                continue;
+            }
             let Some(rest) = t.strip_prefix("local TOTAL_DIMENSIONS") else { continue };
             let Some(v) = rest.trim_start().strip_prefix('=') else { continue };
             let n: usize = match v.split("--").next().unwrap_or("").trim().parse() {
@@ -336,8 +409,8 @@ pub fn assert_lua_dimension_constants(schema: &CapabilitySchema, functions_dir: 
     }
 
     if checked > 0 {
-        info!("Lua dimension constants agree with the schema ({} checked, all {})",
-              checked, schema.total_dimensions);
+        info!("Lua dimension constants agree with the {}-dimension schema ({} checks)",
+              schema.total_dimensions, checked);
     }
 
     Ok(())
@@ -364,7 +437,8 @@ pub fn translate_all_services(
         .map(|(name, def)| (name.clone(), def.index))
         .collect();
     let total_dims = schema.total_dimensions;
-    let discovery_dims = schema.discovery_dimensions.unwrap_or(total_dims);
+    let hashed_dims = hashed_dimensions(schema);
+    let sampler_csv = sampler_indices_csv(schema);
 
     for svc in services {
         let mut capabilities = translate_capabilities(&svc.capabilities, schema);
@@ -372,7 +446,7 @@ pub fn translate_all_services(
 
         let (entity_json, bucket_key, z_score) =
             build_entity_data(&svc.id, &capabilities, &svc.metadata,
-                              total_dims, discovery_dims, &dim_map);
+                              total_dims, hashed_dims, &dim_map);
 
         translated.push(TranslatedService {
             id: svc.id.clone(),
@@ -381,6 +455,7 @@ pub fn translate_all_services(
             z_score,
             ro_index: crate::integration::handlers::types::registration_order_index(&dim_map),
             width: total_dims,
+            sampler_axes: sampler_csv.clone(),
             site: svc.site.clone(),
         });
     }
@@ -441,6 +516,7 @@ pub fn register_services_for_site(
             .arg(svc.ro_index)  // args[6]: resolved from this tier's schema at translation time
             .arg(crate::integration::handlers::types::POINT_FRAC_BITS)  // args[7]
             .arg(svc.width)  // args[8]: refused unless the point has exactly this width
+            .arg(&svc.sampler_axes)  // args[9]: sampler-owned indices, preserved on update
             .query(conn);
 
         match result {
@@ -617,54 +693,54 @@ fn inject_classification_dims(
         capabilities.insert("service_tier".to_string(), resolved.unwrap_or(0.10));
     }
 
-    // Inject environment (dimension 18) — default production=1.0
+    // Environment defaults to production when a manifest does not say.
     if !capabilities.contains_key("environment") {
         capabilities.insert("environment".to_string(), 1.0);
     }
 
-    // Inject visual defaults (dims 19-21) — 0.5 center
-    if !capabilities.contains_key("user_x") {
-        capabilities.insert("user_x".to_string(), 0.5);
+    // The derived axes start at their schema code for unknown (0.00) and are
+    // never taken from the caller after that: the primitive preserves what the
+    // sampler wrote. Registration is lifecycle_state's own writer, so it states
+    // the transition it just completed.
+    for axis in ["current_load", "health_status"] {
+        capabilities.insert(axis.to_string(), 0.0);
     }
-    if !capabilities.contains_key("user_y") {
-        capabilities.insert("user_y".to_string(), 0.5);
-    }
-    if !capabilities.contains_key("user_z") {
-        capabilities.insert("user_z".to_string(), 0.5);
-    }
-
-    // Inject current_load default (dim 16) — idle=0.0
-    if !capabilities.contains_key("current_load") {
-        capabilities.insert("current_load".to_string(), 0.0);
+    let active = schema
+        .dimensions
+        .get("lifecycle_state")
+        .and_then(|d| d.values.get("active").copied());
+    if let Some(active) = active {
+        capabilities.insert("lifecycle_state".to_string(), active);
     }
 }
 
 /// Build the entity JSON for GNODE_REGISTER_CAPABILITY_VECTOR.
-/// Schema-driven: uses total_dims and discovery_dims from the loaded schema.
+/// Schema-driven: uses total_dims and hashed_dims from the loaded schema.
 /// Returns (entity_json, bucket_key, z_score).
 pub(crate) fn build_entity_data(
     _service_id: &str,
     capabilities: &HashMap<String, f64>,
     metadata: &Option<ServiceMetadata>,
     total_dims: usize,
-    discovery_dims: usize,
+    hashed_dims: usize,
     dim_map: &HashMap<String, usize>,
 ) -> (String, String, i64) {
     // Build capability vector using schema-derived dimension count and mapping
     let full_point = build_capability_vector(capabilities, total_dims, dim_map);
 
-    // Extract discovery-only point for bucket key (schema-driven count)
-    let discovery_point = discovery_point(&full_point, discovery_dims);
+    // The bucket key is built over the HASHED prefix, which stops below the
+    // derived axes: an entity must not change voxel because it got busy.
+    let hashed_point = discovery_point(&full_point, hashed_dims);
 
-    // Compute bucket key from discovery point (reconstruct from public raw function)
     let grid_size = 10;
-    let bucket_key_raw = GeometricTopology::point_to_bucket_key_raw(&discovery_point, grid_size);
+    let bucket_key_raw = GeometricTopology::point_to_bucket_key_raw(&hashed_point, grid_size);
     let bucket_key: String = bucket_key_raw
         .iter()
         .map(|&v| format!("{:04}", v))
         .collect();
 
-    // Compute z_score from full point (dim 16 = current_load)
+    // Compute z_score from full point (dim 16 = current_load, a derived axis:
+    // the ordering follows the measurement without re-registering anything)
     let z_score = GeometricTopology::compute_service_z_score(&full_point);
 
     // Build point_raw (pr): Q64.64 i128 values for all tier dimensions.
@@ -1307,10 +1383,11 @@ mod dimension_constant_tests {
 
     fn schema(total: usize) -> CapabilitySchema {
         CapabilitySchema {
-            schema_version: "3.0".into(),
+            schema_version: "4.0".into(),
             tier: Some("service".into()),
             total_dimensions: total,
             discovery_dimensions: Some(total),
+            hashed_dimensions: Some(total),
             dimensions: HashMap::new(),
             profiles: Default::default(),
         }
@@ -1348,8 +1425,47 @@ mod dimension_constant_tests {
     }
 
     #[test]
+    fn a_disagreeing_dimension_map_is_an_error() {
+        // The generated map is generated at authoring time, not at build time,
+        // so it still needs a guard: this is the exact 23-D-copy drift.
+        let mut schema = schema(23);
+        schema.dimensions.insert("protocol".into(), DimensionDef {
+            index: 0, values: HashMap::new(), writer: None });
+        let d = dir_with(&["local DIMENSIONS = {\n    protocol = 7\n}"]);
+        let err = assert_lua_dimension_constants(&schema, d.path()).unwrap_err();
+        assert!(format!("{}", err).contains("protocol"), "{}", err);
+
+        let d = dir_with(&["local DIMENSIONS = {\n    protocol = 0\n}"]);
+        assert!(assert_lua_dimension_constants(&schema, d.path()).is_ok());
+
+        let d = dir_with(&["local DIMENSIONS = {\n    network_zone = 22\n}"]);
+        let err = assert_lua_dimension_constants(&schema, d.path()).unwrap_err();
+        assert!(format!("{}", err).contains("does not have"), "{}", err);
+    }
+
+    #[test]
+    fn the_hashed_cut_and_the_sampler_axes_come_from_the_schema() {
+        use crate::integration::handlers::types::{
+            DISCOVERY_DIMENSIONS, HASHED_DIMENSIONS, SERVICE_SAMPLER_AXES, TOTAL_DIMENSIONS,
+        };
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let schema = load_schema(&root.join("config/service_schema.yaml")).unwrap();
+        assert_eq!(TOTAL_DIMENSIONS, schema.total_dimensions);
+        assert_eq!(DISCOVERY_DIMENSIONS, schema.discovery_dimensions.unwrap());
+        assert_eq!(HASHED_DIMENSIONS, hashed_dimensions(&schema));
+        assert_eq!(SERVICE_SAMPLER_AXES.to_vec(), sampler_indices(&schema));
+        // The zones are cuts, so every sampler axis has to sit between them: a
+        // sampler axis below the hashed cut would move voxel membership, and one
+        // above the discovery cut could not be ranked.
+        for index in sampler_indices(&schema) {
+            assert!(index >= HASHED_DIMENSIONS && index < DISCOVERY_DIMENSIONS,
+                "sampler axis {} is outside the derived zone", index);
+        }
+    }
+
+    #[test]
     fn a_missing_directory_is_not_a_disagreement() {
-        assert!(assert_lua_dimension_constants(&schema(30), Path::new("/nonexistent-xyz")).is_ok());
+        assert!(assert_lua_dimension_constants(&schema(23), Path::new("/nonexistent-xyz")).is_ok());
     }
 
     #[test]
@@ -1520,7 +1636,8 @@ mod tier_tests {
 
     fn service_tier_of(t: &TranslatedService) -> f64 {
         let entity: serde_json::Value = serde_json::from_str(&t.entity_json).unwrap();
-        entity["pd"][19].as_f64().expect("pd[19]")
+        let index = service_schema().dimensions["service_tier"].index;
+        entity["pd"][index].as_f64().expect("service_tier coordinate")
     }
 
     /// Profile placement stamps tier "SERVICE"; the schema names it "service". A
@@ -1528,7 +1645,7 @@ mod tier_tests {
     #[test]
     fn a_profile_entity_is_placed_at_its_declared_tier() {
         let schema = service_schema();
-        assert_eq!(schema.dimensions["service_tier"].index, 19);
+        assert_eq!(schema.dimensions["service_tier"].index, 22);
         let t = derive_profile_entity("site_a", "service", Some("production"), &schema).unwrap();
         assert!((service_tier_of(&t) - 0.30).abs() < 1e-9, "service_tier = {}", service_tier_of(&t));
     }

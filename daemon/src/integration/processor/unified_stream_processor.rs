@@ -318,14 +318,15 @@ pub fn initialize_unified_stream(
 /// # Arguments
 ///
 /// * `site_id` - Site identifier for namespacing
-/// * `stream_prefix` - Stream prefix to use in the stream name
-/// * `node_id` - Node identifier
 ///
 /// # Returns
 ///
 /// * `String` - Health stream name
-pub fn get_health_stream(site_id: &str, stream_prefix: &str, node_id: &str) -> String {
-    format!("{{{0}}}:{1}:health:{2}", site_id, stream_prefix, node_id)
+///
+/// One builder, in config.rs: this used to append the node id, naming a stream
+/// no publisher ever wrote to.
+pub fn get_health_stream(site_id: &str) -> String {
+    crate::config::build_health_stream_key(site_id)
 }
 
 /// Initialize health stream for load-aware service discovery
@@ -338,7 +339,6 @@ pub fn get_health_stream(site_id: &str, stream_prefix: &str, node_id: &str) -> S
 /// * `conn` - Redis connection
 /// * `node_id` - Node identifier
 /// * `site_id` - Site identifier for namespacing
-/// * `stream_prefix` - Stream prefix
 /// * `debug_mode` - Whether debug mode is enabled
 ///
 /// # Returns
@@ -348,10 +348,9 @@ pub fn initialize_health_stream(
     conn: &mut Connection,
     node_id: &str,
     site_id: &str,
-    stream_prefix: &str,
     debug_mode: bool
 ) -> IntegrationResult<String> {
-    let health_stream = get_health_stream(site_id, stream_prefix, node_id);
+    let health_stream = get_health_stream(site_id);
     let _config = GNodeSettings::default();
 
     info!("Initializing health stream for node {}: stream={}", node_id, health_stream);
@@ -476,7 +475,7 @@ pub fn initialize_streams(
     let unified_stream = get_unified_stream(site_id, stream_prefix, node_id);
 
     // Initialize health stream
-    let health_stream = initialize_health_stream(conn, node_id, site_id, stream_prefix, debug_mode)?;
+    let health_stream = initialize_health_stream(conn, node_id, site_id, debug_mode)?;
 
     info!("Both streams initialized successfully for node {}: unified={}, health={}",
         node_id, unified_stream, health_stream);

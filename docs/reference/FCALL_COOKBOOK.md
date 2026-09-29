@@ -118,12 +118,15 @@ Register a service into the service-tier topology (30D = 25 discovery + 5 storag
 ```
 
 **Direct FCALL** (advanced — the daemon normally computes these; shown so
-the argument contract is visible). `pr` is the full 30-axis point as Q64.64
-raw integers (strings), `pd` the display floats, `bucket_key` the 25 hashed
-axes at grid 10, `z_score` = axis 16 × 1e6. args[5] is the (B) snapshot key
-(empty = skip), args[6] the schema index of `registration_order` (29 on the
-service tier, 15 on the tool tier, -1 = none), args[7] the point's fractional
-bits (64):
+the argument contract is visible). `pr` is the full point as Q64.64 raw
+integers (strings), `pd` the display floats, `bucket_key` the HASHED axes at
+grid 10 (16 on the service tier, so 64 characters — not the whole discovery
+block, because the derived axes move), `z_score` = axis 16 × 1e6. args[5] is
+the (B) snapshot key (empty = skip), args[6] the schema index of the
+registration-order axis (-1 = none, which is the service tier since v4.0 and
+15 on the tool tier), args[7] the point's fractional bits (64), args[8] the
+tier width, args[9] the sampler-owned axes as CSV (`16,17` on the service
+tier) whose stored values an update preserves:
 ```bash
 ./scripts/valkey-cli-secure.sh FCALL GNODE_REGISTER_CAPABILITY_VECTOR 1 \
   "{staging_my_app}:gnode:services" \

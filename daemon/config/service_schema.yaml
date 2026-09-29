@@ -1,20 +1,45 @@
-# Service Topology Schema — 30D (25 discovery + 5 storage)
+# Service Topology Schema — 23D (16 declared + 3 derived + 4 storage)
 # Tier: LOCAL SERVICE — per-site service registration and discovery
-# Used by: register-tools --tier service, gNode-Client getCapabilitySchema()
-# Replaces: capability_schema.yaml (23D) — clean break, pre-release
+# Used by: register-tools --tier service, gNode-Client getPublishedCapabilitySchema()
+# Replaces: 30D v3.0 — clean break, pre-release
 #
 # Each dimension maps human-readable names to normalized [0.0, 1.0] coordinates.
-# Discovery dimensions (0-24) are used for spatial hash bucket keys.
-# Storage dimensions (25-29) are persisted but not hashed.
+#
+# ORDER IS LOAD-BEARING. Both cuts are prefix truncations, so an axis's index IS
+# its zone:
+#
+#   0 .. hashed_dimensions-1      DECLARED. Written by the provider at
+#                                 registration and hashed into the spatial
+#                                 bucket key. A measurement never belongs here:
+#                                 a coordinate that moves would rewrite voxel
+#                                 membership on every sample.
+#   hashed .. discovery-1         DERIVED. Written only by the writer named in
+#                                 `writer:`. A provider's value for one of these
+#                                 is ignored, and a re-registration preserves
+#                                 what the writer last wrote. Ranked in a query,
+#                                 never hashed.
+#   discovery .. total-1          STORAGE. Stored and returned, refused in a
+#                                 query.
+#
+# On a derived axis, code 0.00 is `unknown` and never a real state. An unwritten
+# coordinate has to abstain, not claim the first name in the enum — the 30D
+# schema coded dead=0.00 and registering=0.00, so every live service read as
+# dead and still registering.
+#
+# Per-axis query semantics (role, weight, prefer) are frozen in
+# Geodineum-pro/tests/geometry-roles/SERVICE-AXIS-ROLES.reviewed.md and land here
+# with the AXIS-ROLES engine, not before: a key nothing reads is a blank column.
 
-schema_version: "3.0"
+schema_version: "4.0"
 tier: service
-total_dimensions: 30
-discovery_dimensions: 25
+total_dimensions: 23
+discovery_dimensions: 19
+hashed_dimensions: 16
 
 dimensions:
   # ═══════════════════════════════════════════════════════════════
-  # Layer 1: Interface Identity (0-3) — How to communicate
+  # DECLARED, HASHED (0-15) — the provider's own claims.
+  # Layer 1: Interface Identity (0-2) — how to communicate
   # ═══════════════════════════════════════════════════════════════
 
   protocol:
@@ -32,23 +57,8 @@ dimensions:
       kafka: 0.80
       custom_tcp: 0.90
 
-  native_format:
-    index: 1
-    query_type: informational
-    values:
-      undefined: 0.00
-      plaintext: 0.10
-      json: 0.20
-      xml: 0.30
-      yaml: 0.40
-      msgpack: 0.50
-      protobuf: 0.60
-      cbor: 0.70
-      resp3: 0.80
-      custom_binary: 0.90
-
   api_version:
-    index: 2
+    index: 1
     query_type: equality
     values:
       undefined: 0.00
@@ -59,7 +69,7 @@ dimensions:
       v5: 0.50
 
   contract_stability:
-    index: 3
+    index: 2
     query_type: range
     values:
       experimental: 0.00
@@ -69,11 +79,11 @@ dimensions:
       frozen: 1.00
 
   # ═══════════════════════════════════════════════════════════════
-  # Layer 2: Access Control (4-6) — Who can use it
+  # Layer 2: Access Control (3-5) — who can use it
   # ═══════════════════════════════════════════════════════════════
 
   clearance_required:
-    index: 4
+    index: 3
     query_type: range
     values:
       public: 0.00
@@ -84,7 +94,7 @@ dimensions:
       classified: 1.00
 
   auth_method:
-    index: 5
+    index: 4
     query_type: equality
     values:
       none: 0.00
@@ -95,7 +105,7 @@ dimensions:
       hardware_token: 1.00
 
   data_sensitivity:
-    index: 6
+    index: 5
     query_type: range
     values:
       public_data: 0.00
@@ -105,11 +115,11 @@ dimensions:
       regulated: 1.00
 
   # ═══════════════════════════════════════════════════════════════
-  # Layer 3: Service Scope (7) — Where it runs
+  # Layer 3: Scope and Domain (6-9) — where it runs, what it does
   # ═══════════════════════════════════════════════════════════════
 
   service_scope:
-    index: 7
+    index: 6
     query_type: equality
     values:
       infrastructure: 0.00
@@ -121,14 +131,11 @@ dimensions:
       client_facing: 0.90
       edge: 1.00
 
-  # ═══════════════════════════════════════════════════════════════
-  # Layer 4: Functional Domain (8-10) — What it does
-  # ═══════════════════════════════════════════════════════════════
-
   domain_primary:
-    index: 8
+    index: 7
     query_type: proximity
     values:
+      undefined: 0.00
       platform: 0.05
       identity: 0.10
       configuration: 0.15
@@ -150,9 +157,10 @@ dimensions:
       presentation: 0.95
 
   domain_secondary:
-    index: 9
+    index: 8
     query_type: proximity
     values:
+      undefined: 0.00
       platform: 0.05
       identity: 0.10
       configuration: 0.15
@@ -174,7 +182,7 @@ dimensions:
       presentation: 0.95
 
   specialization:
-    index: 10
+    index: 9
     query_type: range
     values:
       platform: 0.00
@@ -184,11 +192,12 @@ dimensions:
       single_purpose: 1.00
 
   # ═══════════════════════════════════════════════════════════════
-  # Layer 5: Performance Profile (11-13) — How fast / reliable
+  # Layer 4: Declared service levels (10-12) — promises, not measurements.
+  # What a provider says it offers; the derived block is what it does.
   # ═══════════════════════════════════════════════════════════════
 
   throughput_tier:
-    index: 11
+    index: 10
     query_type: range
     values:
       minimal: 0.00
@@ -198,7 +207,7 @@ dimensions:
       hyperscale: 1.00
 
   latency_class:
-    index: 12
+    index: 11
     query_type: range
     values:
       realtime: 0.00
@@ -208,7 +217,7 @@ dimensions:
       batch: 1.00
 
   reliability_tier:
-    index: 13
+    index: 12
     query_type: range
     values:
       best_effort: 0.00
@@ -218,11 +227,11 @@ dimensions:
       ultra: 1.00
 
   # ═══════════════════════════════════════════════════════════════
-  # Layer 6: Workflow Context (14-15) — Pipeline position
+  # Layer 5: Workflow and placement (13-15)
   # ═══════════════════════════════════════════════════════════════
 
   pipeline_stage:
-    index: 14
+    index: 13
     query_type: equality
     values:
       source: 0.00
@@ -233,7 +242,7 @@ dimensions:
       sink: 1.00
 
   execution_priority:
-    index: 15
+    index: 14
     query_type: range
     values:
       background: 0.00
@@ -242,35 +251,54 @@ dimensions:
       high: 0.75
       critical: 1.00
 
+  environment:
+    index: 15
+    query_type: equality
+    # global serves every requested DTAP value; the reverse never holds.
+    values:
+      global: 0.00
+      testing: 0.25
+      staging: 0.50
+      acceptance: 0.75
+      production: 1.00
+
   # ═══════════════════════════════════════════════════════════════
-  # Layer 7: Runtime State (16-18) — Dynamic, updated at runtime
+  # DERIVED, RANKED, NEVER HASHED (16-18) — measured, not claimed.
+  # `writer: sampler` means the daemon's sampler owns the value; a provider
+  # sending one is ignored and a re-registration preserves the last measurement.
+  # Dim 16 exactly: compute_service_z_score reads this index, so live load is
+  # also the sorted-set ordering behind "route to the least busy provider".
   # ═══════════════════════════════════════════════════════════════
 
   current_load:
     index: 16
     query_type: range
-    dynamic: true
+    writer: sampler
+    # derived from reply latency against the provider's own rolling baseline
     values:
-      idle: 0.00
-      light: 0.25
-      moderate: 0.50
-      heavy: 0.75
+      unknown: 0.00
+      idle: 0.20
+      light: 0.40
+      moderate: 0.60
+      heavy: 0.80
       saturated: 1.00
 
   health_status:
     index: 17
-    query_type: range
-    dynamic: true
+    query_type: equality
+    writer: sampler
+    # a category, not a scale: unknown is not 'worse than dead'
     values:
-      dead: 0.00
-      degraded: 0.33
-      healthy: 0.67
-      unknown: 1.00
+      unknown: 0.00
+      dead: 0.33
+      degraded: 0.67
+      healthy: 1.00
 
   lifecycle_state:
     index: 18
     query_type: equality
-    dynamic: true
+    writer: daemon
+    # the registration state machine writes this; registering=0.00 is honest for a fresh entity
     values:
       registering: 0.00
       active: 0.25
@@ -279,32 +307,28 @@ dimensions:
       failed: 1.00
 
   # ═══════════════════════════════════════════════════════════════
-  # Layer 8: Classification (19-21) — What kind of thing
+  # STORAGE (19-22) — stored and returned, refused in a query.
+  # Facts about a provider that no routing decision reads.
   # ═══════════════════════════════════════════════════════════════
 
-  service_tier:
+  native_format:
     index: 19
-    query_type: equality
+    query_type: informational
     values:
-      tool: 0.10
-      service: 0.30
-      pipeline: 0.50
-      infrastructure: 0.70
-      orchestrator: 0.90
-
-  environment:
-    index: 20
-    query_type: equality
-    values:
-      global: 0.00
-      testing: 0.25
-      staging: 0.50
-      acceptance: 0.75
-      production: 1.00
+      undefined: 0.00
+      plaintext: 0.10
+      json: 0.20
+      xml: 0.30
+      yaml: 0.40
+      msgpack: 0.50
+      protobuf: 0.60
+      cbor: 0.70
+      resp3: 0.80
+      custom_binary: 0.90
 
   implementation_language:
-    index: 21
-    query_type: equality
+    index: 20
+    query_type: informational
     values:
       undefined: 0.00
       rust: 0.15
@@ -315,91 +339,27 @@ dimensions:
       javascript: 0.75
       bash: 0.90
 
-  # ═══════════════════════════════════════════════════════════════
-  # Layer 9: Network Context (22-24) — Where it lives, how it persists
-  # ═══════════════════════════════════════════════════════════════
-
-  network_zone:
-    index: 22
-    query_type: equality
-    values:
-      localhost: 0.00
-      vpn: 0.25
-      internal: 0.50
-      dmz: 0.75
-      public: 1.00
-
   data_persistence:
-    index: 23
-    query_type: equality
+    index: 21
+    query_type: informational
     values:
       stateless: 0.00
       ephemeral: 0.33
       persistent: 0.67
       replicated: 1.00
 
-  update_channel:
-    index: 24
-    query_type: equality
+  service_tier:
+    index: 22
+    query_type: informational
     values:
-      stable: 0.00
-      beta: 0.33
-      canary: 0.67
-      pinned: 1.00
-
-  # ═══════════════════════════════════════════════════════════════
-  # Layer 10: Visual Topology (25-27) — Storage-only, for rendering
-  # ═══════════════════════════════════════════════════════════════
-
-  user_x:
-    index: 25
-    storage_only: true
-    values:
-      left: 0.00
-      center: 0.50
-      right: 1.00
-
-  user_y:
-    index: 26
-    storage_only: true
-    values:
-      bottom: 0.00
-      middle: 0.50
-      top: 1.00
-
-  user_z:
-    index: 27
-    storage_only: true
-    values:
-      back: 0.00
-      center: 0.50
-      front: 1.00
-
-  # ═══════════════════════════════════════════════════════════════
-  # Layer 11: Metadata (28-29) — Storage-only
-  # ═══════════════════════════════════════════════════════════════
-
-  deployment_model:
-    index: 28
-    storage_only: true
-    values:
-      bare_metal: 0.00
-      container: 0.33
-      serverless: 0.67
-      embedded: 1.00
-
-  registration_order:
-    index: 29
-    storage_only: true
-    values:
-      first: 0.00
-      early: 0.25
-      middle: 0.50
-      late: 0.75
-      recent: 1.00
+      tool: 0.10
+      service: 0.30
+      pipeline: 0.50
+      infrastructure: 0.70
+      orchestrator: 0.90
 
 # ═══════════════════════════════════════════════════════════════
-# Capability profiles — 30-dim defaults per service archetype.
+# Capability profiles — 23-dim defaults per service archetype.
 # `register-tools --tier service --site <id> --profile <name>` registers ONE
 # entity (the site/service itself) from these defaults, instead of looping
 # framework components. Dynamic dims (current_load/health/etc.) are

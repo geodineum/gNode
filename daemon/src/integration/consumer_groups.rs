@@ -944,9 +944,7 @@ pub fn create_unified_stream_worker(
 
                     // Get health stream key
                     let health_stream = crate::integration::processor::unified_stream_processor::get_health_stream(
-                        &site_id_owned,
-                        &stream_prefix_owned,
-                        &node_id_owned
+                        &site_id_owned
                     );
 
                     // Read from both streams simultaneously
@@ -1019,6 +1017,7 @@ pub fn create_unified_stream_worker(
                                     health_messages,
                                     &mut conn,
                                     &health_stream,
+                                    "gnode-daemon",
                                     debug_mode
                                 ) {
                                     Ok(processed) => {
@@ -1845,6 +1844,7 @@ pub fn create_environment_stream_worker_dynamic(
                                         health_messages,
                                         &mut conn,
                                         current_health_stream,
+                                        consumer_group,
                                         debug_mode
                                     ) {
                                         Ok(processed) => {

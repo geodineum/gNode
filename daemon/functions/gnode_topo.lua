@@ -123,7 +123,7 @@ local CONSTRAINT_TYPES = {
 -- trusted: the daemon compares both to service_schema.yaml at startup and
 -- refuses to load on disagreement. Changing this without changing the YAML is a
 -- startup failure, not a silent drift.
-local TOTAL_DIMENSIONS = 30
+local TOTAL_DIMENSIONS = 23
 
 local REGISTRY_SUFFIX = ":gnode:topo:registry"
 local TYPE_INDEX_PREFIX = ":gnode:topo:by_type:"
@@ -357,11 +357,11 @@ server.register_function{
             d = "Default service discovery topology (stateless architecture)",
             ax = {
                 -- Capability space projected to 3D for visualisation. Axis dim
-                -- ranges follow service_schema.yaml; storage-only dims are
-                -- excluded from bucket keys.
-                x = { n = "interface_access", d = "Interface + Access layers (dims 0-6)" },
-                y = { n = "scope_domain", d = "Scope + Domain layers (dims 7-10)" },
-                z = { n = "perf_class", d = "Perf + Workflow + Runtime + Classification (dims 11-20)" }
+                -- ranges follow service_schema.yaml v4.0: 0-15 declared and
+                -- hashed, 16-18 derived, 19-22 storage.
+                x = { n = "interface_access", d = "Interface + Access layers (dims 0-5)" },
+                y = { n = "scope_domain", d = "Scope + Domain layer (dims 6-9)" },
+                z = { n = "levels_state", d = "Declared levels + workflow + derived state (dims 10-18)" }
             },
             dm = width or TOTAL_DIMENSIONS,   -- the caller's tier width; service tier by default
             ca = now,                -- created_at
@@ -421,6 +421,10 @@ server.register_function{
         --           Q-format the daemon encoded pr with (g_math default Q64.64).
         -- args[8] = width (OPTIONAL) — the tier schema's total dimensions; a
         --           point of another length is refused.
+        -- args[9] = sampler_axes (OPTIONAL) — CSV of 0-based indices the sampler
+        --           owns. On an update their stored coordinates are kept, so a
+        --           re-registration cannot reset a measurement to the schema's
+        --           unknown code.
 
         if #keys < 1 then
             return server.error_reply("Missing topology_key")
@@ -518,6 +522,37 @@ server.register_function{
             end
         end
 
+        -- Derived axes belong to their writer, not to whoever is registering.
+        -- The daemon names them in args[9] (from the schema's `writer:` keys);
+        -- on an update their stored coordinates are kept, together with the
+        -- measurement stamp m.ds and the z_score computed from them. Without
+        -- this, every re-registration — and the discovery scanner re-registers
+        -- on every manifest change — resets load and health to unknown.
+        local preserved = 0
+        if is_update and old_entity and args[9] and args[9] ~= "" then
+            for idx in string.gmatch(args[9], '([^,]+)') do
+                local slot = tonumber(idx)
+                if slot and slot >= 0 then
+                    slot = slot + 1
+                    if old_entity.pd and entity.pd and #entity.pd >= slot and old_entity.pd[slot] ~= nil then
+                        entity.pd[slot] = old_entity.pd[slot]
+                        preserved = preserved + 1
+                    end
+                    if old_entity.pr and entity.pr and #entity.pr >= slot and old_entity.pr[slot] ~= nil then
+                        entity.pr[slot] = old_entity.pr[slot]
+                    end
+                end
+            end
+            if old_entity.m and old_entity.m.ds then
+                entity.m.ds = old_entity.m.ds
+            end
+            -- The caller computed z_score from the unknown code it sent; the
+            -- stored one matches the coordinate that is actually kept.
+            if preserved > 0 and old_entity.zs then
+                z_score = old_entity.zs
+            end
+        end
+
         -- Add computed fields from daemon (abbreviated)
         entity.id = entity_id
         entity.bk = bucket_key   -- bucket_key
@@ -573,12 +608,122 @@ server.register_function{
             eid = entity_id,
             bk = bucket_key,
             zs = z_score,
-            upd = is_update
+            upd = is_update,
+            kept = preserved
         }
 
         local result_json, _ = safe_json_encode(result)
         return result_json
     end
+}
+
+-- ============================================================================
+-- GNODE_TOPO_SET_DERIVED
+-- Write measured coordinates into a stored entity without moving it.
+--
+-- A derived axis (load, health) changes far more often than anything a provider
+-- declares, so it is written here rather than through a re-registration: the
+-- bucket key and voxel membership are untouched, and nothing re-sends a whole
+-- vector to update one number. An index below the tier's hashed width is
+-- refused — those coordinates ARE the bucket key, and a value that moves cannot
+-- be one of them.
+-- ============================================================================
+server.register_function{
+    function_name = 'GNODE_TOPO_SET_DERIVED',
+    callback = function(keys, args)
+        -- keys[1] = topology_key
+        -- args[1] = entity_id
+        -- args[2] = updates JSON, { "<index>": { "pd": <float>, "pr": "<raw>" } }
+        --           Both scales come from the daemon: Lua has no Q64.64.
+        -- args[3] = z_score (OPTIONAL) — recomputed by the daemon when an update
+        --           touches the z axis; omitted leaves the stored ordering.
+        -- args[4] = snapshot_key (OPTIONAL) — keeps the (B) projection current.
+        -- args[5] = ts (OPTIONAL) — the measurement's time, stored as m.ds.
+        -- args[6] = hashed_width (OPTIONAL) — an index below this is refused.
+
+        if #keys < 1 then
+            return server.error_reply("Missing topology_key")
+        end
+        if #args < 2 then
+            return server.error_reply("Missing entity_id or updates JSON")
+        end
+
+        local topology_key = keys[1]
+        local entity_id = args[1]
+        local hashed_width = tonumber(args[6])
+
+        local updates, parse_err = safe_json_decode(args[2])
+        if not updates then
+            return server.error_reply("Invalid updates JSON: " .. (parse_err or "unknown"))
+        end
+
+        local entity_json = server.call('HGET', topology_key .. ':entities', entity_id)
+        if not entity_json or entity_json == false then
+            return server.error_reply("Entity not found: " .. entity_id)
+        end
+        local entity, decode_err = safe_json_decode(entity_json)
+        if not entity then
+            return server.error_reply("Stored entity is not decodable: " .. (decode_err or "unknown"))
+        end
+
+        local written = 0
+        for index, value in pairs(updates) do
+            local slot = tonumber(index)
+            if not slot then
+                return server.error_reply("Update key is not an axis index: " .. tostring(index))
+            end
+            if hashed_width and slot < hashed_width then
+                return server.error_reply(string.format(
+                    "Axis %d is hashed into the bucket key and cannot be written as derived", slot))
+            end
+            slot = slot + 1
+            if not entity.pd or #entity.pd < slot then
+                return server.error_reply(string.format(
+                    "Axis %d is outside %s's stored point", slot - 1, entity_id))
+            end
+            if value.pd ~= nil then
+                entity.pd[slot] = tonumber(value.pd)
+            end
+            if value.pr ~= nil and entity.pr and #entity.pr >= slot then
+                entity.pr[slot] = tostring(value.pr)
+            end
+            written = written + 1
+        end
+
+        entity.m = entity.m or {}
+        entity.m.ds = tonumber(args[5]) or get_timestamp()
+
+        local z_score = tonumber(args[3])
+        if z_score then
+            entity.zs = z_score
+        end
+
+        local final_json, encode_err = safe_json_encode(entity)
+        if not final_json then
+            return server.error_reply("Failed to encode entity: " .. (encode_err or "unknown"))
+        end
+        server.call('HSET', topology_key .. ':entities', entity_id, final_json)
+        if z_score then
+            server.call('ZADD', topology_key .. ':z_order', z_score, entity_id)
+        end
+
+        local snapshot_key = args[4]
+        if snapshot_key and snapshot_key ~= "" then
+            local snap_json, _ = safe_json_encode({ point = entity.pd, metadata = entity.m })
+            if snap_json then
+                server.call('HSET', snapshot_key, entity_id, snap_json)
+            end
+        end
+
+        return safe_json_encode({
+            ok = true,
+            eid = entity_id,
+            n = written,
+            ds = entity.m.ds,
+            zs = entity.zs
+        })
+    end,
+    description = 'Writes derived (sampler-owned) coordinates into an entity without rehashing it'
 }
 
 -- ============================================================================

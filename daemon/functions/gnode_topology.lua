@@ -6,8 +6,13 @@
 -- The live geometric Service Topology engine (register / discover / voxel) is
 -- gnode_topo.lua. This library now provides only:
 --   GNODE_TOPOLOGY_GET_SCHEMA / GET_FULL_SCHEMA — the capability-dimension
---     schema + named values (consumed by the wp-admin topology viewer), and
---   GNODE_TOPOLOGY_BATCH_UPDATE_LOAD — bulk service load updates (daemon health).
+--     schema + named values (consumed by the wp-admin topology viewer).
+--
+-- GNODE_TOPOLOGY_BATCH_UPDATE_LOAD is gone: it wrote dimension 16 into
+-- topology.services inside a JSON blob at the topology key — a model the live
+-- store does not have (TYPE none on every site), so every load update it ever
+-- received failed as "Topology not found" and was logged at trace. Derived axes
+-- are written into the canonical (C) entities by GNODE_TOPO_SET_DERIVED.
 --
 -- The legacy string-blob semantic-discovery family (DISCOVER / BY_DOMAIN /
 -- DESCRIBE_* / …) read a model the daemon stopped populating and has been
@@ -18,70 +23,45 @@
 -- retained because the schema functions read them.
 --
 
--- ============================================================================
--- DIMENSION CONSTANTS
--- Maps dimension names to their 0-based indices
--- ============================================================================
-
+-- GENERATED FROM config/service_schema.yaml v4.0 — do not hand-edit.
+-- assert_lua_dimension_constants() fails daemon startup if these disagree
+-- with the schema, because three hand-kept copies of one map is how the
+-- 23-D and 30-D layouts came to coexist.
 local DIMENSIONS = {
-    -- Layer 1: Interface Identity (0-3)
+    -- declared, hashed
     protocol = 0,
-    native_format = 1,
-    api_version = 2,
-    contract_stability = 3,
-
-    -- Layer 2: Access Control (4-6)
-    clearance_required = 4,
-    auth_method = 5,
-    data_sensitivity = 6,
-
-    -- Layer 3: Service Scope (7)
-    service_scope = 7,
-
-    -- Layer 4: Functional Domain (8-10)
-    domain_primary = 8,
-    domain_secondary = 9,
-    specialization = 10,
-
-    -- Layer 5: Performance Profile (11-13)
-    throughput_tier = 11,
-    latency_class = 12,
-    reliability_tier = 13,
-
-    -- Layer 6: Workflow Context (14-15)
-    pipeline_stage = 14,
-    execution_priority = 15,
-
-    -- Layer 7: Runtime State (16-18) - Dynamic
+    api_version = 1,
+    contract_stability = 2,
+    clearance_required = 3,
+    auth_method = 4,
+    data_sensitivity = 5,
+    service_scope = 6,
+    domain_primary = 7,
+    domain_secondary = 8,
+    specialization = 9,
+    throughput_tier = 10,
+    latency_class = 11,
+    reliability_tier = 12,
+    pipeline_stage = 13,
+    execution_priority = 14,
+    environment = 15,
+    -- derived, ranked, never hashed
     current_load = 16,
     health_status = 17,
     lifecycle_state = 18,
-
-    -- Layer 8: Classification (19-21)
-    service_tier = 19,
-    environment = 20,
-    implementation_language = 21,
-
-    -- Layer 9: Network Context (22-24)
-    network_zone = 22,
-    data_persistence = 23,
-    update_channel = 24,
-
-    -- Layer 10: Visual Topology (25-27) - Storage-only
-    user_x = 25,
-    user_y = 26,
-    user_z = 27,
-
-    -- Layer 11: Metadata (28-29) - Storage-only
-    deployment_model = 28,
-    registration_order = 29
+    -- storage
+    native_format = 19,
+    implementation_language = 20,
+    data_persistence = 21,
+    service_tier = 22
 }
 
--- Total dimensions (30D) — service_schema.yaml v3.0
--- Discovery dims (0-24): used for spatial hash bucket key (100 chars = 25 × 4)
--- Storage-only dims (25-29): visual topology + metadata, queryable via range filters
-local TOTAL_DIMENSIONS = 30
-local DISCOVERY_DIMENSIONS = 25
+-- Two cuts, both prefix truncations: 0..15 are hashed into the bucket key
+-- (64 chars = 16 x 4), 16..18 are derived and ranked but never hashed,
+-- 19..22 are stored and refused in a query.
+local TOTAL_DIMENSIONS = 23
+local DISCOVERY_DIMENSIONS = 19
+local HASHED_DIMENSIONS = 16
 
 -- ============================================================================
 -- SEMANTIC VALUE CONSTANTS
@@ -89,7 +69,6 @@ local DISCOVERY_DIMENSIONS = 25
 -- ============================================================================
 
 local VALUES = {
-    -- Protocol values
     protocol = {
         undefined = 0.00,
         http_rest = 0.10,
@@ -102,22 +81,14 @@ local VALUES = {
         kafka = 0.80,
         custom_tcp = 0.90
     },
-
-    -- Native format values
-    native_format = {
+    api_version = {
         undefined = 0.00,
-        plaintext = 0.10,
-        json = 0.20,
-        xml = 0.30,
-        yaml = 0.40,
-        msgpack = 0.50,
-        protobuf = 0.60,
-        cbor = 0.70,
-        resp3 = 0.80,
-        custom_binary = 0.90
+        v1 = 0.10,
+        v2 = 0.20,
+        v3 = 0.30,
+        v4 = 0.40,
+        v5 = 0.50
     },
-
-    -- Contract stability values
     contract_stability = {
         experimental = 0.00,
         alpha = 0.25,
@@ -125,8 +96,6 @@ local VALUES = {
         stable = 0.75,
         frozen = 1.00
     },
-
-    -- Clearance values
     clearance_required = {
         public = 0.00,
         authenticated = 0.20,
@@ -135,8 +104,6 @@ local VALUES = {
         confidential = 0.80,
         classified = 1.00
     },
-
-    -- Auth method values
     auth_method = {
         none = 0.00,
         api_key = 0.20,
@@ -145,8 +112,6 @@ local VALUES = {
         mtls = 0.80,
         hardware_token = 1.00
     },
-
-    -- Data sensitivity values
     data_sensitivity = {
         public_data = 0.00,
         internal = 0.25,
@@ -154,8 +119,6 @@ local VALUES = {
         pii = 0.75,
         regulated = 1.00
     },
-
-    -- Service scope values
     service_scope = {
         infrastructure = 0.00,
         daemon = 0.15,
@@ -166,9 +129,8 @@ local VALUES = {
         client_facing = 0.90,
         edge = 1.00
     },
-
-    -- Domain primary values
     domain_primary = {
+        undefined = 0.00,
         platform = 0.05,
         identity = 0.10,
         configuration = 0.15,
@@ -189,8 +151,28 @@ local VALUES = {
         notification = 0.90,
         presentation = 0.95
     },
-
-    -- Specialization values
+    domain_secondary = {
+        undefined = 0.00,
+        platform = 0.05,
+        identity = 0.10,
+        configuration = 0.15,
+        storage = 0.20,
+        cache = 0.25,
+        compute = 0.30,
+        transform = 0.35,
+        messaging = 0.40,
+        workflow = 0.45,
+        template = 0.50,
+        content = 0.55,
+        gateway = 0.60,
+        integration = 0.65,
+        analytics = 0.70,
+        logging = 0.75,
+        ml_inference = 0.80,
+        search = 0.85,
+        notification = 0.90,
+        presentation = 0.95
+    },
     specialization = {
         platform = 0.00,
         generalist = 0.25,
@@ -198,8 +180,6 @@ local VALUES = {
         specialist = 0.75,
         single_purpose = 1.00
     },
-
-    -- Throughput tier values
     throughput_tier = {
         minimal = 0.00,
         standard = 0.25,
@@ -207,8 +187,6 @@ local VALUES = {
         enterprise = 0.75,
         hyperscale = 1.00
     },
-
-    -- Latency class values (LOWER = FASTER)
     latency_class = {
         realtime = 0.00,
         interactive = 0.25,
@@ -216,8 +194,6 @@ local VALUES = {
         patient = 0.75,
         batch = 1.00
     },
-
-    -- Reliability tier values
     reliability_tier = {
         best_effort = 0.00,
         standard = 0.25,
@@ -225,8 +201,6 @@ local VALUES = {
         critical = 0.75,
         ultra = 1.00
     },
-
-    -- Pipeline stage values
     pipeline_stage = {
         source = 0.00,
         ingest = 0.20,
@@ -235,8 +209,6 @@ local VALUES = {
         deliver = 0.80,
         sink = 1.00
     },
-
-    -- Execution priority values
     execution_priority = {
         background = 0.00,
         low = 0.25,
@@ -244,44 +216,6 @@ local VALUES = {
         high = 0.75,
         critical = 1.00
     },
-
-    -- Current load values
-    current_load = {
-        idle = 0.00,
-        light = 0.25,
-        moderate = 0.50,
-        heavy = 0.75,
-        saturated = 1.00
-    },
-
-    -- Health status values (Layer 7) - Dynamic
-    health_status = {
-        dead = 0.00,
-        degraded = 0.33,
-        healthy = 0.67,
-        unknown = 1.00
-    },
-
-    -- Lifecycle state values (Layer 7) - Dynamic
-    lifecycle_state = {
-        registering = 0.00,
-        active = 0.25,
-        draining = 0.50,
-        stopped = 0.75,
-        failed = 1.00
-    },
-
-    -- Service tier values (Layer 8)
-    service_tier = {
-        undefined = 0.00,
-        tool = 0.10,
-        service = 0.30,
-        pipeline = 0.50,
-        infrastructure = 0.70,
-        orchestrator = 0.90
-    },
-
-    -- Environment values (Layer 8)
     environment = {
         global = 0.00,
         testing = 0.25,
@@ -289,9 +223,41 @@ local VALUES = {
         acceptance = 0.75,
         production = 1.00
     },
-
-    -- Implementation language values (Layer 8)
+    current_load = {
+        unknown = 0.00,
+        idle = 0.20,
+        light = 0.40,
+        moderate = 0.60,
+        heavy = 0.80,
+        saturated = 1.00
+    },
+    health_status = {
+        unknown = 0.00,
+        dead = 0.33,
+        degraded = 0.67,
+        healthy = 1.00
+    },
+    lifecycle_state = {
+        registering = 0.00,
+        active = 0.25,
+        draining = 0.50,
+        stopped = 0.75,
+        failed = 1.00
+    },
+    native_format = {
+        undefined = 0.00,
+        plaintext = 0.10,
+        json = 0.20,
+        xml = 0.30,
+        yaml = 0.40,
+        msgpack = 0.50,
+        protobuf = 0.60,
+        cbor = 0.70,
+        resp3 = 0.80,
+        custom_binary = 0.90
+    },
     implementation_language = {
+        undefined = 0.00,
         rust = 0.15,
         php = 0.30,
         lua = 0.45,
@@ -300,89 +266,48 @@ local VALUES = {
         javascript = 0.75,
         bash = 0.90
     },
-
-    -- Network zone values (Layer 9)
-    network_zone = {
-        localhost = 0.00,
-        vpn = 0.25,
-        internal = 0.50,
-        dmz = 0.75,
-        public = 1.00
-    },
-
-    -- Data persistence values (Layer 9)
     data_persistence = {
         stateless = 0.00,
         ephemeral = 0.33,
         persistent = 0.67,
         replicated = 1.00
     },
-
-    -- Update channel values (Layer 9)
-    update_channel = {
-        stable = 0.00,
-        beta = 0.33,
-        canary = 0.67,
-        pinned = 1.00
-    },
-
-    -- Visual position values (Layer 10) - user-set, continuous 0.0-1.0
-    visual_position = {
-        left = 0.00,
-        center = 0.50,
-        right = 1.00
-    },
-
-    -- Deployment model values (Layer 11) - Storage-only
-    deployment_model = {
-        bare_metal = 0.00,
-        container = 0.33,
-        serverless = 0.67,
-        embedded = 1.00
-    },
-
-    -- Registration order values (Layer 11) - auto-computed, normalized
-    registration_order = {
-        first = 0.00,
-        early = 0.25,
-        middle = 0.50,
-        late = 0.75,
-        recent = 1.00
+    service_tier = {
+        tool = 0.10,
+        service = 0.30,
+        pipeline = 0.50,
+        infrastructure = 0.70,
+        orchestrator = 0.90
     }
 }
 
--- Query types for each dimension
+-- Query types for each dimension, verbatim from the schema. The AXIS-ROLES
+-- engine maps these to roles (equality->category, range->at_least/at_most/near,
+-- proximity->category, informational->refused in a query).
 local QUERY_TYPES = {
     protocol = "equality",
-    native_format = "informational",
     api_version = "equality",
-    contract_stability = "minimum",
-    clearance_required = "maximum",
+    contract_stability = "range",
+    clearance_required = "range",
     auth_method = "equality",
-    data_sensitivity = "informational",
-    service_scope = "range",
-    domain_primary = "equality",
-    domain_secondary = "equality",
+    data_sensitivity = "range",
+    service_scope = "equality",
+    domain_primary = "proximity",
+    domain_secondary = "proximity",
     specialization = "range",
-    throughput_tier = "minimum",
-    latency_class = "maximum",
-    reliability_tier = "minimum",
-    pipeline_stage = "range",
-    execution_priority = "minimum",
-    current_load = "maximum",
-    health_status = "minimum",
-    lifecycle_state = "equality",
-    service_tier = "range",
+    throughput_tier = "range",
+    latency_class = "range",
+    reliability_tier = "range",
+    pipeline_stage = "equality",
+    execution_priority = "range",
     environment = "equality",
-    implementation_language = "equality",
-    network_zone = "equality",
-    data_persistence = "equality",
-    update_channel = "equality",
-    user_x = "range",
-    user_y = "range",
-    user_z = "range",
-    deployment_model = "informational",
-    registration_order = "range"
+    current_load = "range",
+    health_status = "equality",
+    lifecycle_state = "equality",
+    native_format = "informational",
+    implementation_language = "informational",
+    data_persistence = "informational",
+    service_tier = "informational"
 }
 
 -- ============================================================================
@@ -469,67 +394,6 @@ server.register_function{
 
 -- Register service format info in topology metadata
 -- Called when a service registers its format capabilities
-
--- Batch update load values for multiple services
--- Called from health stream processor for efficiency
-server.register_function{
-    function_name = 'GNODE_TOPOLOGY_BATCH_UPDATE_LOAD',
-    callback = function(keys, args)
-        if #keys < 1 then
-            return server.error_reply("Missing topology key")
-        end
-        if #args < 1 then
-            return server.error_reply("Missing updates JSON")
-        end
-
-        local topology_key = keys[1]
-        local updates_json = args[1]
-
-        local updates, err = parse_data(updates_json)
-        if not updates then
-            return server.error_reply("Invalid updates JSON: " .. (err or "parse error"))
-        end
-
-        local topology, top_err = get_topology(topology_key)
-        if not topology then
-            return server.error_reply(top_err)
-        end
-
-        local services = topology.services or {}
-        local updated_count = 0
-        local not_found = {}
-
-        for service_id, load_value in pairs(updates) do
-            local service = services[service_id]
-            if service then
-                -- Clamp load to [0, 1]
-                load_value = math.max(0, math.min(1, tonumber(load_value) or 0))
-
-                if not service.point then
-                    service.point = {}
-                end
-                while #service.point < TOTAL_DIMENSIONS do
-                    table.insert(service.point, 0)
-                end
-                service.point[DIMENSIONS.current_load + 1] = load_value
-                updated_count = updated_count + 1
-            else
-                table.insert(not_found, service_id)
-            end
-        end
-
-        -- Re-encode and store
-        local updated_topology = safe_json_encode(topology)
-        server.call('SET', topology_key, updated_topology)
-
-        return safe_json_encode({
-            status = "ok",
-            updated = updated_count,
-            not_found = not_found
-        })
-    end,
-    description = 'Batch updates load values for multiple services'
-}
 
 -- Get the dimension schema for developers
 -- Returns the full schema with dimension names, indices, and valid values

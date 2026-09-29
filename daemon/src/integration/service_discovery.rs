@@ -591,8 +591,9 @@ mod tests {
             entity_json: "{}".into(),
             bucket_key: "0".into(),
             z_score: 0,
-            ro_index: 29,
-            width: 30,
+            ro_index: -1,
+            width: 23,
+            sampler_axes: "16,17".into(),
             site: site.map(String::from),
         }
     }

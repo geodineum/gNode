@@ -16,10 +16,27 @@ pub fn build_unified_stream_key(site_id: &str, environment: &str) -> String {
     format!("{{{}}}:gnode:unified:{}", site_id, environment)
 }
 
-/// Build a health stream key for a site/environment
-/// Canonical pattern: {site_id}:gnode:health:{environment}
-pub fn build_health_stream_key(site_id: &str, environment: &str) -> String {
-    format!("{{{}}}:gnode:health:{}", site_id, environment)
+/// Build a health stream key for a site.
+///
+/// Canonical pattern: `{site_id}:gnode:health` — no environment suffix, because
+/// this is the key `gnode_site.lua` creates and REPORTS through stream
+/// discovery, which is what every publisher subscribes to in practice. Three
+/// other shapes existed in the tree (`:health:{environment}` here,
+/// `:health:{node_id}` in the consumer's fallback, and the PHP writer's copy);
+/// all three named streams nothing wrote, while 115 real records sat in the
+/// Lua-named one.
+///
+/// Unsuffixed is also the right shape: a health record is about one site's
+/// service, and that service's entity carries its own environment on the
+/// `environment` axis. A site whose lanes differ by DTAP is separate sites.
+pub fn build_health_stream_key(site_id: &str) -> String {
+    format!("{{{}}}:gnode:health", site_id)
+}
+
+/// The site a `{site}:...` stream key belongs to, for locating that site's
+/// service topology from a stream the discovery loop handed us.
+pub fn site_of_stream_key(stream_key: &str) -> Option<&str> {
+    stream_key.strip_prefix('{')?.split('}').next()
 }
 
 /// Build a broadcast stream key for a site (environment-independent)
@@ -555,4 +572,29 @@ pub fn load_config(config_path: Option<&PathBuf>, args: &GNodeArgs) -> Result<GN
 
     debug!("Final unified stream configuration: {:?}", config);
     Ok(config)
+}
+#[cfg(test)]
+mod stream_key_tests {
+    use super::*;
+
+    #[test]
+    fn the_health_key_is_the_one_the_lua_creates_and_reports() {
+        // gnode_site.lua provisions and reports `{site}:gnode:health`, which is
+        // where every real publisher writes. Three other shapes named streams
+        // nothing wrote to; this is the check that keeps them from coming back.
+        assert_eq!(build_health_stream_key("nierto_com"), "{nierto_com}:gnode:health");
+        assert!(!build_health_stream_key("nierto_com").contains("production"));
+    }
+
+    #[test]
+    fn a_health_stream_names_the_site_whose_topology_to_write() {
+        // The discovery loop hands the processor a stream key and nothing else;
+        // the derived load has to land in that site's own topology.
+        assert_eq!(site_of_stream_key("{nierto_com}:gnode:health"), Some("nierto_com"));
+        assert_eq!(site_of_stream_key("{geodine}:gnode:unified:production"), Some("geodine"));
+        // A key written without the hash tag (they exist live) names no site
+        // rather than the wrong one.
+        assert_eq!(site_of_stream_key("geodine:gnode:health"), None);
+        assert_eq!(site_of_stream_key(""), None);
+    }
 }
