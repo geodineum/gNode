@@ -13,7 +13,9 @@
 #
 # Tools register ONCE globally into {ecosystem}:gnode:services. A service
 # registers its own single entity into {site}:gnode:services from the profile's
-# 30-dim defaults (gMath computes the vector; Lua stores).
+# declared defaults (gMath computes the vector; Lua stores). The profile sets
+# only declared axes: the derived ones belong to the daemon's sampler, and a
+# re-registration preserves whatever it last measured.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
