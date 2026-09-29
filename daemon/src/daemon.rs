@@ -258,7 +258,7 @@ impl GNodeDaemon {
     pub fn new_with_config(redis_url: &str, dimensions: usize, topology_namespace: String, environment: String, node_id: String, node_type: String, stream_prefix: String, debug: bool, debug_level: &str, is_master: bool, stream_config: crate::config::GNodeSettings) -> Result<Self> {
         let node_type_enum = NodeType::from(node_type.as_str());
         info!("Initializing gNode daemon with Redis URL: {}, dimensions: {}, topology_namespace: {} → {{{}}}:gnode:topology, environment: {}, node_id: {}, node_type: {}, is_master: {}, stream_prefix: {}, debug_level: {}",
-            redis_url, dimensions, topology_namespace, topology_namespace, environment, node_id, node_type_enum, is_master, stream_prefix, debug_level);
+            crate::config::redact_url(redis_url), dimensions, topology_namespace, topology_namespace, environment, node_id, node_type_enum, is_master, stream_prefix, debug_level);
         info!("  Stream discovery: DYNAMIC (sites discovered from topology)");
 
         let client = Client::open(redis_url).map_err(GeometricError::Redis)?;

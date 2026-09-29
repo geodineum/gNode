@@ -604,7 +604,9 @@ fn main() -> Result<()> {
 
     // Log configuration
     info!("Starting gNode service with configuration:");
-    info!("  Redis URL: {}", redis_url.replace(&redis_auth, "***"));
+    // One redactor, and one that does not depend on holding a copy of the
+    // secret to find it.
+    info!("  Redis URL: {}", gnode::config::redact_url(&redis_url));
     info!("  Topology Namespace: {} → {{{}}}:gnode:topology", cli.topology_namespace, cli.topology_namespace);
     info!("  Environment: {}", cli.environment);
     info!("  Daemon Name: {}", display_name);

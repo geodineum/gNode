@@ -33,6 +33,23 @@ pub fn build_health_stream_key(site_id: &str) -> String {
     format!("{{{}}}:gnode:health", site_id)
 }
 
+/// A connection URL with its password replaced by `***`, for logging.
+///
+/// Parses the credential out rather than searching for a known secret: the
+/// call site that searched (`redis_url.replace(&redis_auth, "***")`) redacted
+/// nothing whenever its copy of the password was empty or differently escaped,
+/// and the call site that did not redact at all wrote the daemon's ValKey
+/// password into the journal at INFO on every start.
+pub fn redact_url(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else { return url.to_string() };
+    let Some((authority, tail)) = rest.split_once('@') else { return url.to_string() };
+    // Only an authority of the form user:password carries a secret.
+    match authority.split_once(':') {
+        Some((user, _)) => format!("{}://{}:***@{}", scheme, user, tail),
+        None => url.to_string(),
+    }
+}
+
 /// The site a `{site}:...` stream key belongs to, for locating that site's
 /// service topology from a stream the discovery loop handed us.
 pub fn site_of_stream_key(stream_key: &str) -> Option<&str> {
@@ -576,6 +593,24 @@ pub fn load_config(config_path: Option<&PathBuf>, args: &GNodeArgs) -> Result<GN
 #[cfg(test)]
 mod stream_key_tests {
     use super::*;
+
+    #[test]
+    fn a_logged_url_never_carries_its_password() {
+        assert_eq!(redact_url("redis://gnode_daemon:s3cr3t@10.66.0.1:47445"),
+                   "redis://gnode_daemon:***@10.66.0.1:47445");
+        // A password with an @ or a : in it still redacts: the split is on the
+        // LAST authority separator, and everything between user: and @ goes.
+        assert_eq!(redact_url("redis://u:p:a@ss@host:1"), "redis://u:***@ss@host:1");
+        // Nothing to redact, nothing changed.
+        assert_eq!(redact_url("redis://127.0.0.1:47445"), "redis://127.0.0.1:47445");
+        assert_eq!(redact_url("redis://user@host:1"), "redis://user@host:1");
+        assert_eq!(redact_url("not a url"), "not a url");
+        assert_eq!(redact_url(""), "");
+        // The property that matters: the secret is never in the output.
+        for url in ["redis://gnode_daemon:s3cr3t@h:1", "rediss://u:s3cr3t@h:1/0"] {
+            assert!(!redact_url(url).contains("s3cr3t"), "leaked: {}", redact_url(url));
+        }
+    }
 
     #[test]
     fn the_health_key_is_the_one_the_lua_creates_and_reports() {
