@@ -1423,6 +1423,28 @@ impl GNodeDaemon {
                     info!("Single-threaded mode: broadcast reader will run with reduced frequency in main loop");
                 }
 
+                // The load sampler, in the mode production runs. The WorkerRegistry
+                // above lives inside `if self.single_threaded`, so a worker
+                // registered there alone is dead code on both nodes: aesir and squad
+                // both log "Single-threaded mode: false".
+                if !self.single_threaded
+                    && crate::worker::SamplerMode::from_env() != crate::worker::SamplerMode::Off {
+                    let sd = Arc::clone(&self.stream_discovery);
+                    let ns = self.topology_namespace.clone();
+                    let node = self.node_id.clone();
+                    let mode = crate::worker::SamplerMode::from_env();
+                    std::thread::spawn(move || {
+                        use crate::worker::DaemonWorker;
+                        let mut worker = crate::worker::LoadSamplerWorker::new(sd, ns, node);
+                        info!("Load sampler worker thread started (mode: {:?})", mode);
+                        while !is_shutdown_requested() {
+                            worker.tick();
+                            std::thread::sleep(Duration::from_secs(1));
+                        }
+                        info!("Load sampler worker thread stopped");
+                    });
+                }
+
                 if !self.single_threaded {
                     let topology_namespace_bc = self.topology_namespace.clone();
                     let stream_prefix_bc = self.stream_prefix.clone();

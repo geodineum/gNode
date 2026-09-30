@@ -839,13 +839,27 @@ fn stop_daemon(redis_url: &str, environment: &str, stream_prefix: &str) -> Resul
     let mut conn = client.get_connection()
         .map_err(GeometricError::Redis)?;
 
-    // Check if daemon is running by querying PID keys (search all sites in environment)
-    // Pattern: {*}:gnode:{environment}:daemon:pid:* or gnode:daemon:pid:{environment}:*
+    // Only THIS node's daemon. The pid keys are shared — every node in the
+    // constellation writes one — and `kill` resolves a PID in the LOCAL namespace,
+    // so scanning them all meant running `kill <squad's pid>` here. It failed
+    // harmlessly ("No such process") only because that number happened not to
+    // exist locally; on a collision this would have killed an unrelated process,
+    // as root.
+    let this_node = gnode::integration::heartbeat::short_hostname();
     let pattern = format!("{}:daemon:pid:{}:*", stream_prefix, environment);
-    let pid_keys: Vec<String> = scan_keys(&mut conn, &pattern)?;
+    let all_keys: Vec<String> = scan_keys(&mut conn, &pattern)?;
+    let (pid_keys, elsewhere): (Vec<String>, Vec<String>) = all_keys
+        .into_iter()
+        .partition(|k| k.rsplit(':').next() == Some(this_node.as_str()));
+
+    for key in &elsewhere {
+        let owner = key.rsplit(':').next().unwrap_or("another node");
+        info!("Leaving {} alone: its daemon runs on {}, and a PID is only meaningful \
+               on the host that owns it", key, owner);
+    }
 
     if pid_keys.is_empty() {
-        info!("No running daemons found");
+        info!("No running daemon found for this node ({})", this_node);
         return Ok(());
     }
 
