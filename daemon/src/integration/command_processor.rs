@@ -1055,6 +1055,36 @@ pub fn process_commands(
 /// - Metric: command_batch_processing_time_ms - Time taken to process the batch
 /// - Metric: command_batch_success_count - Number of successfully processed commands
 #[allow(clippy::too_many_arguments)]
+/// Whether the sampler wants observations at all, read once: an env lookup per
+/// command would be a syscall on the hot path for a value that cannot change.
+static OBSERVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Publish one observation of this node's own command handling.
+///
+/// Best-effort and bounded: a capped stream, one XADD, and a failure is not the
+/// command's problem. Only the Ordered lane is covered — the concurrent lane
+/// spawns its own dispatch, and instrumenting it is a separate change.
+fn publish_node_observation(conn: &mut Connection, command: &str, elapsed_ms: u64, ok: bool) {
+    let observe = *OBSERVE.get_or_init(|| {
+        !matches!(std::env::var("GNODE_SAMPLER").unwrap_or_default().to_ascii_lowercase().as_str(), "off")
+    });
+    if !observe {
+        return;
+    }
+    let ns = std::env::var("GNODE_TOPOLOGY_NAMESPACE").unwrap_or_else(|_| "geodineum".to_string());
+    let node = crate::daemon::GNodeDaemon::node_id_for_lease();
+    let _: Result<String, redis::RedisError> = redis::cmd("XADD")
+        .arg(crate::config::build_health_stream_key(&ns))
+        .arg("MAXLEN").arg("~").arg(2000).arg("*")
+        .arg("t").arg("rq")
+        .arg("si").arg(&node)
+        .arg("cmd").arg(command)
+        .arg("lat").arg(elapsed_ms)
+        .arg("ok").arg(if ok { 1 } else { 0 })
+        .arg("ts").arg(crate::utils::current_timestamp_ms())
+        .query(conn);
+}
+
 pub fn process_command_batch(
     conn: &mut Connection,
     topology: &Arc<RwLock<GeometricTopology>>,
@@ -1392,6 +1422,7 @@ pub fn process_command_batch(
 
             // Synchronous (Ordered lane, or Concurrent fallback) dispatch.
             let handler_opt = registry.get_handler(&command.command);
+            let started = std::time::Instant::now();
             let result = match handler_opt {
                 Some(handler) => {
                     if debug_level >= LogLevel::Info {
@@ -1403,6 +1434,13 @@ pub fn process_command_batch(
                     unknown_command_error(&command.command)
                 }
             };
+            // The daemon executing a command IS the provider for that work, so the
+            // observation names this NODE, and its load lands on the node entity's
+            // aggregate_load — which is what "route to the least busy node" asks.
+            // Relay observations cover service entities; this covers the traffic
+            // this estate actually has, which is commands the daemon runs itself.
+            publish_node_observation(conn, &command.command, started.elapsed().as_millis() as u64,
+                                     result.status != "error");
             
             // Convert result to response
             let response = result.to_response(&command.id);

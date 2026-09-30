@@ -23,9 +23,17 @@
 
 use std::collections::HashMap;
 
-/// One completed request, as the relay or a publisher saw it.
+/// Which topology the provider lives in. The daemon executing a command IS the
+/// provider for that work, and a daemon's load belongs to its NODE entity — which
+/// is also what "route to the least busy node" asks about, and what the first
+/// consumer queries. A relayed request's provider is a service entity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Tier { Service, Node }
+
+/// One completed request, as the relay, the command processor or a publisher saw it.
 #[derive(Debug, Clone)]
 pub struct Observation {
+    pub tier: Tier,
     pub site: String,
     pub entity: String,
     pub command: String,
@@ -37,6 +45,7 @@ pub struct Observation {
 /// A coordinate the sampler wants written, and why.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DerivedWrite {
+    pub tier: Tier,
     pub site: String,
     pub entity: String,
     pub index: usize,
@@ -180,11 +189,13 @@ pub fn coordinate(rho: f64) -> f64 {
     (pd * 10_000.0).round() / 10_000.0
 }
 
+type RingKey = (Tier, String, String, String);   // (tier, site, entity, command)
+
 pub struct Sampler {
     pub cfg: SamplerConfig,
-    rings: HashMap<(String, String, String), Ring>, // (site, entity, command)
-    baselines: HashMap<(String, String, String), f64>,
-    bands: HashMap<(String, String), Band>,         // (site, entity)
+    rings: HashMap<RingKey, Ring>,
+    baselines: HashMap<RingKey, f64>,
+    bands: HashMap<(Tier, String, String), Band>,
 }
 
 impl Sampler {
@@ -193,21 +204,21 @@ impl Sampler {
     }
 
     pub fn observe(&mut self, o: Observation) {
-        let ring = self.rings.entry((o.site, o.entity, o.command)).or_default();
+        let ring = self.rings.entry((o.tier, o.site, o.entity, o.command)).or_default();
         ring.push(o.ts_ms, o.elapsed_ms, self.cfg.ring);
     }
 
     /// Seed a baseline read back from ValKey, so a restart does not relearn from zero.
-    pub fn seed_baseline(&mut self, site: &str, entity: &str, command: &str, p50: f64) {
+    pub fn seed_baseline(&mut self, tier: Tier, site: &str, entity: &str, command: &str, p50: f64) {
         if p50 > 0.0 {
-            self.baselines.insert((site.into(), entity.into(), command.into()), p50);
+            self.baselines.insert((tier, site.into(), entity.into(), command.into()), p50);
         }
     }
 
     /// Every baseline, for persisting.
-    pub fn baselines(&self) -> Vec<(String, String, String, f64)> {
+    pub fn baselines(&self) -> Vec<(Tier, String, String, String, f64)> {
         self.baselines.iter()
-            .map(|((s, e, c), v)| (s.clone(), e.clone(), c.clone(), *v))
+            .map(|((t, s, e, c), v)| (*t, s.clone(), e.clone(), c.clone(), *v))
             .collect()
     }
 
@@ -215,10 +226,9 @@ impl Sampler {
     /// coordinates worth writing.
     pub fn tick(&mut self, now_ms: u64) -> Vec<DerivedWrite> {
         let window_ms = self.cfg.window_secs * 1000;
-        // (site, entity) → weighted ρ
-        let mut per_entity: HashMap<(String, String), (f64, usize)> = HashMap::new();
+        let mut per_entity: HashMap<(Tier, String, String), (f64, usize)> = HashMap::new();
 
-        let keys: Vec<(String, String, String)> = self.rings.keys().cloned().collect();
+        let keys: Vec<RingKey> = self.rings.keys().cloned().collect();
         for key in keys {
             let Some((p50, n)) = self.rings[&key].p50(now_ms, window_ms) else { continue };
             if n < self.cfg.min_samples {
@@ -242,20 +252,20 @@ impl Sampler {
                 }
             };
             if let Some(rho) = rho {
-                let slot = per_entity.entry((key.0.clone(), key.1.clone())).or_insert((0.0, 0));
+                let slot = per_entity.entry((key.0, key.1.clone(), key.2.clone())).or_insert((0.0, 0));
                 slot.0 += rho * n as f64;
                 slot.1 += n;
             }
         }
 
         let mut writes = Vec::new();
-        for ((site, entity), (weighted, n)) in per_entity {
+        for ((tier, site, entity), (weighted, n)) in per_entity {
             if n == 0 {
                 continue;
             }
             let pd = coordinate(weighted / n as f64);
             let (band_idx, band_name) = landmark(pd);
-            let band = self.bands.entry((site.clone(), entity.clone())).or_default();
+            let band = self.bands.entry((tier, site.clone(), entity.clone())).or_default();
 
             let reason = match band.written {
                 // Never written: say what we now know.
@@ -296,8 +306,12 @@ impl Sampler {
                 band.pending_ticks = 0;
                 band.last_write_ms = now_ms;
                 writes.push(DerivedWrite {
+                    tier,
                     site,
                     entity,
+                    // Service tier: current_load. Node tier: aggregate_load. Both sit
+                    // at the same index by construction — the first derived axis
+                    // above each schema's hashed cut — and a test pins that.
                     index: crate::integration::handlers::types::SERVICE_SAMPLER_AXES[0],
                     pd,
                     zs: (pd * 1_000_000.0) as i64,
@@ -314,8 +328,8 @@ mod tests {
     use super::*;
 
     fn obs(site: &str, entity: &str, cmd: &str, ms: u64, ts: u64) -> Observation {
-        Observation { site: site.into(), entity: entity.into(), command: cmd.into(),
-                      elapsed_ms: ms, ok: true, ts_ms: ts }
+        Observation { tier: Tier::Service, site: site.into(), entity: entity.into(),
+                      command: cmd.into(), elapsed_ms: ms, ok: true, ts_ms: ts }
     }
 
     fn feed(s: &mut Sampler, n: usize, ms: u64, ts: u64) {
@@ -371,31 +385,31 @@ mod tests {
     fn sustained_overload_does_not_teach_the_baseline() {
         // The guard that separates a signal from a thermometer in the sun.
         let mut s = Sampler::new(SamplerConfig::default());
-        s.seed_baseline("st", "svc", "get", 100.0);
+        s.seed_baseline(Tier::Service, "st", "svc", "get", 100.0);
         for tick in 1..=20u64 {
             let now = tick * 15_000;
             feed(&mut s, 10, 400, now);          // 4x its own baseline, forever
             s.tick(now);
         }
-        let b = s.baselines()[0].3;
+        let b = s.baselines()[0].4;
         assert!(b < 110.0, "baseline drifted to {b} under sustained load");
 
         // Below the guard it DOES learn, so a genuinely faster provider is tracked.
         let mut s2 = Sampler::new(SamplerConfig::default());
-        s2.seed_baseline("st", "svc", "get", 100.0);
+        s2.seed_baseline(Tier::Service, "st", "svc", "get", 100.0);
         for tick in 1..=40u64 {
             let now = tick * 15_000;
             feed(&mut s2, 10, 120, now);         // 1.2x: within the guard
             s2.tick(now);
         }
-        assert!(s2.baselines()[0].3 > 110.0, "baseline should follow a real shift");
+        assert!(s2.baselines()[0].4 > 110.0, "baseline should follow a real shift");
     }
 
     #[test]
     fn rising_load_is_reported_at_once_and_recovery_only_after_confirmation() {
         let cfg = SamplerConfig { down_ticks: 2, ..SamplerConfig::default() };
         let mut s = Sampler::new(cfg);
-        s.seed_baseline("st", "svc", "get", 100.0);
+        s.seed_baseline(Tier::Service, "st", "svc", "get", 100.0);
 
         feed(&mut s, 10, 400, 15_000);
         let w = s.tick(15_000);
@@ -432,7 +446,7 @@ mod tests {
     fn an_unchanged_value_is_refreshed_before_the_ranker_abstains() {
         let cfg = SamplerConfig { horizon_secs: 180, ..SamplerConfig::default() };
         let mut s = Sampler::new(cfg);
-        s.seed_baseline("st", "svc", "get", 100.0);
+        s.seed_baseline(Tier::Service, "st", "svc", "get", 100.0);
         feed(&mut s, 10, 400, 15_000);
         assert_eq!(s.tick(15_000).len(), 1);
 
@@ -456,8 +470,8 @@ mod tests {
         // Geodine's `infer` runs for minutes and its `ping` for milliseconds. One
         // ceiling for both would call the provider saturated for doing its job.
         let mut s = Sampler::new(SamplerConfig::default());
-        s.seed_baseline("st", "geodine", "infer", 292_000.0);
-        s.seed_baseline("st", "geodine", "ping", 5.0);
+        s.seed_baseline(Tier::Service, "st", "geodine", "infer", 292_000.0);
+        s.seed_baseline(Tier::Service, "st", "geodine", "ping", 5.0);
         for _ in 0..10 { s.observe(obs("st", "geodine", "infer", 292_000, 15_000)); }
         for _ in 0..10 { s.observe(obs("st", "geodine", "ping", 5, 15_000)); }
         let w = s.tick(15_000);
@@ -468,7 +482,7 @@ mod tests {
     #[test]
     fn a_stale_sample_leaves_the_window() {
         let mut s = Sampler::new(SamplerConfig::default());
-        s.seed_baseline("st", "svc", "get", 100.0);
+        s.seed_baseline(Tier::Service, "st", "svc", "get", 100.0);
         feed(&mut s, 10, 400, 1_000);
         // Two minutes later those samples no longer describe the present.
         assert!(s.tick(121_000).is_empty());
@@ -477,8 +491,8 @@ mod tests {
     #[test]
     fn commands_weight_by_how_much_they_were_observed() {
         let mut s = Sampler::new(SamplerConfig::default());
-        s.seed_baseline("st", "svc", "hot", 100.0);
-        s.seed_baseline("st", "svc", "rare", 100.0);
+        s.seed_baseline(Tier::Service, "st", "svc", "hot", 100.0);
+        s.seed_baseline(Tier::Service, "st", "svc", "rare", 100.0);
         for _ in 0..90 { s.observe(obs("st", "svc", "hot", 100, 15_000)); }   // ρ 0
         for _ in 0..10 { s.observe(obs("st", "svc", "rare", 1000, 15_000)); } // ρ 0.9
         let w = s.tick(15_000);

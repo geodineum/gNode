@@ -346,9 +346,27 @@ impl LoadSamplerWorker {
     }
 
     fn health_streams(&self) -> Vec<String> {
-        self.stream_discovery.read()
+        let mut streams: Vec<String> = self.stream_discovery.read()
             .map(|d| d.get_health_streams().into_iter().map(|s| s.key).collect())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        // Discovery lists registered SITES. The daemons' own observations land in
+        // the namespace's stream, because that is where their entities live, and
+        // the namespace is not a site.
+        let ns = crate::config::build_health_stream_key(&self.topology_namespace);
+        if !streams.contains(&ns) {
+            streams.push(ns);
+        }
+        streams
+    }
+
+    /// Which topology an observation on this stream belongs to. The namespace's
+    /// stream carries node observations; a site's carries its services'.
+    fn tier_for(&self, site: &str) -> crate::integration::sampler::Tier {
+        if site == self.topology_namespace {
+            crate::integration::sampler::Tier::Node
+        } else {
+            crate::integration::sampler::Tier::Service
+        }
     }
 
     /// Drain the observations waiting in one site's health stream.
@@ -380,6 +398,7 @@ impl LoadSamplerWorker {
                 let Some(lat) = field("lat").and_then(|v| v.parse::<f64>().ok()) else { continue };
                 if !lat.is_finite() || lat < 0.0 { continue }
                 self.sampler.observe(Observation {
+                    tier: self.tier_for(&site),
                     site: site.clone(),
                     entity,
                     command: field("cmd").unwrap_or_else(|| "unknown".into()),
@@ -408,9 +427,10 @@ impl LoadSamplerWorker {
             let stored: redis::RedisResult<std::collections::HashMap<String, String>> =
                 redis::cmd("HGETALL").arg(self.baseline_key(&site)).query(conn);
             if let Ok(map) = stored {
+                let tier = self.tier_for(&site);
                 for (field, value) in map {
                     if let (Some((entity, command)), Ok(p50)) = (field.split_once('|'), value.parse::<f64>()) {
-                        self.sampler.seed_baseline(&site, entity, command, p50);
+                        self.sampler.seed_baseline(tier, &site, entity, command, p50);
                     }
                 }
             }
@@ -420,7 +440,7 @@ impl LoadSamplerWorker {
 
     fn save_baselines(&self, conn: &mut redis::Connection) {
         let mut per_site: std::collections::HashMap<String, Vec<(String, String)>> = std::collections::HashMap::new();
-        for (site, entity, command, p50) in self.sampler.baselines() {
+        for (_tier, site, entity, command, p50) in self.sampler.baselines() {
             per_site.entry(site).or_default().push((format!("{}|{}", entity, command), format!("{:.3}", p50)));
         }
         for (site, fields) in per_site {
@@ -470,16 +490,22 @@ impl DaemonWorker for LoadSamplerWorker {
             if self.mode == SamplerMode::Shadow {
                 // Quiet by construction: a write only happens on a band change or a
                 // stamp refresh, so this is not a per-tick line.
-                info!("[load-sampler] shadow: {} in {} would read {:.4} ({})",
-                      w.entity, w.site, w.pd, w.reason);
+                info!("[load-sampler] shadow: {:?} {} in {} would read {:.4} ({})",
+                      w.tier, w.entity, w.site, w.pd, w.reason);
                 continue;
             }
             let updates = format!(r#"{{"{}":{{"pd":{:.4},"pr":"{}"}}}}"#,
                 w.index, w.pd,
                 crate::geometric_precision::FixedPoint::from_f64(w.pd).raw());
+            let topology_key = match w.tier {
+                crate::integration::sampler::Tier::Node =>
+                    format!("{{{}}}:gnode:constellation", self.topology_namespace),
+                crate::integration::sampler::Tier::Service =>
+                    crate::GeometricTopology::get_services_topology_key(&w.site),
+            };
             let result: redis::RedisResult<String> = redis::cmd("FCALL")
                 .arg("GNODE_TOPO_SET_DERIVED").arg(1)
-                .arg(crate::GeometricTopology::get_services_topology_key(&w.site))
+                .arg(&topology_key)
                 .arg(&w.entity).arg(&updates).arg(w.zs)
                 .arg(format!("{{{}}}:gnode:topology:services", self.topology_namespace))
                 .arg(crate::integration::processor::stream_utils::current_timestamp())
@@ -487,7 +513,8 @@ impl DaemonWorker for LoadSamplerWorker {
                 .arg(&self.node_id)
                 .query(&mut conn);
             match result {
-                Ok(_) => info!("[load-sampler] {} in {} → {:.4} ({})", w.entity, w.site, w.pd, w.reason),
+                Ok(_) => info!("[load-sampler] {:?} {} in {} → {:.4} ({})",
+                               w.tier, w.entity, w.site, w.pd, w.reason),
                 // A provider can be observed before it is registered; that is the
                 // publisher's business, not a reason to stop sampling.
                 Err(e) => debug!("[load-sampler] write for {} refused: {}", w.entity, e),

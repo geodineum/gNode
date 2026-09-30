@@ -7,7 +7,7 @@
 //!   valkey-server --port 6397 --save "" --daemonize yes
 //!   GNODE_TEST_VALKEY_URL=redis://127.0.0.1:6397 cargo test --test sampler_live -- --ignored
 
-use gnode::integration::sampler::{landmark, Observation, Sampler, SamplerConfig};
+use gnode::integration::sampler::{landmark, Observation, Sampler, SamplerConfig, Tier};
 use redis::streams::StreamReadReply;
 use serde_json::{json, Value};
 
@@ -65,6 +65,7 @@ fn drain(conn: &mut redis::Connection, sampler: &mut Sampler) -> usize {
                 .arg(health_key()).arg(GROUP).arg(&entry.id).query(conn);
             if entry.get::<String>("t").as_deref() != Some("rq") { continue }
             sampler.observe(Observation {
+                tier: Tier::Service,
                 site: SITE.into(),
                 entity: entry.get::<String>("si").unwrap(),
                 command: entry.get::<String>("cmd").unwrap_or_else(|| "unknown".into()),
@@ -140,6 +141,51 @@ fn observations_become_a_coordinate() {
         .query(&mut conn).unwrap();
     assert!((entity(&mut conn, "svc")["pd"][16].as_f64().unwrap() - w.pd).abs() < 1e-6,
             "the sampler owns this axis; registration must not overwrite it");
+}
+
+#[test]
+#[ignore]
+fn a_nodes_own_command_handling_lands_on_its_constellation_entity() {
+    // The traffic this estate actually has is commands the daemon RUNS, not
+    // relays. Their provider is the node, and a node's load is what "route to the
+    // least busy node" reads — the first consumer's own query.
+    let Some(mut conn) = connect() else { return };
+    let ns = "geodineum";
+    let topo = format!("{{{}}}:gnode:constellation", ns);
+
+    // A node entity at the constellation width, load unknown.
+    let mut pd = vec![0.5; 24];
+    pd[16] = 0.0;
+    let ent = json!({"pd": pd, "pr": vec!["9223372036854775808"; 24], "m": {"type": "node"}});
+    let bk: String = (0..16).map(|_| "0005".to_string()).collect();
+    let _: redis::RedisResult<i64> = redis::cmd("HSET").arg(format!("{}:meta", topo))
+        .arg("data").arg(json!({"tk": topo, "dm": 24}).to_string()).query(&mut conn);
+    let _: String = redis::cmd("FCALL").arg("GNODE_REGISTER_CAPABILITY_VECTOR").arg(1).arg(&topo)
+        .arg("aesir-solutions").arg(ent.to_string()).arg(&bk).arg(0).arg("").arg(-1).arg(64).arg(24).arg("16,17")
+        .query(&mut conn).unwrap();
+
+    let mut sampler = Sampler::new(SamplerConfig::default());
+    let t0: u64 = 1_800_000_000_000;
+    sampler.seed_baseline(Tier::Node, ns, "aesir-solutions", "cache_set", 2.0);
+    for _ in 0..10 {
+        sampler.observe(Observation { tier: Tier::Node, site: ns.into(),
+            entity: "aesir-solutions".into(), command: "cache_set".into(),
+            elapsed_ms: 8, ok: true, ts_ms: t0 });
+    }
+    let writes = sampler.tick(t0);
+    assert_eq!(writes.len(), 1);
+    assert_eq!(writes[0].tier, Tier::Node);
+    assert_eq!(landmark(writes[0].pd).1, "heavy", "4x its own baseline");
+
+    let w = &writes[0];
+    let updates = format!(r#"{{"16":{{"pd":{:.4},"pr":"{}"}}}}"#, w.pd, (w.pd * (2f64).powi(64)) as u128);
+    let _: String = redis::cmd("FCALL").arg("GNODE_TOPO_SET_DERIVED").arg(1).arg(&topo)
+        .arg("aesir-solutions").arg(&updates).arg(w.zs).arg("").arg(t0 / 1000).arg(16).arg("node-a")
+        .query(&mut conn).unwrap();
+    let raw: String = redis::cmd("HGET").arg(format!("{}:entities", topo)).arg("aesir-solutions").query(&mut conn).unwrap();
+    let stored: Value = serde_json::from_str(&raw).unwrap();
+    assert!((stored["pd"][16].as_f64().unwrap() - w.pd).abs() < 1e-6,
+            "aggregate_load must carry the measurement");
 }
 
 #[test]

@@ -436,6 +436,15 @@ mod tests {
             assert!(idx >= hashed, "measured axis {} is hashed into the bucket key", idx);
             assert!(idx < discovery, "measured axis {} cannot be ranked in a query", idx);
         }
+        // The sampler writes the SAME index in both tiers (current_load at the
+        // service tier, aggregate_load at the node tier). That is not a
+        // coincidence to rely on silently: it is the first derived axis above
+        // each schema's hashed cut, and the sampler hardcodes one index.
+        use crate::integration::handlers::types::SERVICE_SAMPLER_AXES;
+        assert_eq!(schema.dimensions["aggregate_load"].index, SERVICE_SAMPLER_AXES[0],
+            "the sampler writes index {} in both tiers; aggregate_load must sit there",
+            SERVICE_SAMPLER_AXES[0]);
+
         // Every axis the sampler owns must also declare an unknown code at 0.00,
         // or an unwritten coordinate asserts the first name in its enum.
         for (name, dim) in &schema.dimensions {
