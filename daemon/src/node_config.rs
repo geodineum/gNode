@@ -957,6 +957,34 @@ pub fn initialize_node_configs(
 /// Check if a node is already registered in ValKey
 ///
 /// Returns Ok(true) if node exists, Ok(false) if not, Err on failure
+/// Whether this node is REGISTERED AND ACTIVE — not merely present.
+///
+/// The distinction is the whole bug. The daemon deregisters itself on every clean
+/// shutdown, and deregistration deliberately keeps the config hash for history: it
+/// only flips `status` to `inactive` and drops the node from `gnode:nodes:registry`.
+/// Startup then asked "does a record exist?", found one, said "already registered,
+/// sending heartbeat" and stopped. So after its first restart a node stayed
+/// `inactive` and out of the registry forever — which is why `gnode:nodes:registry`
+/// is empty on a live two-node estate, every node config reads `inactive`, and
+/// anything that enumerates nodes (status, the dashboard, metric aggregation, the
+/// stale-node reaper) sees nothing at all.
+pub fn check_node_active(conn: &mut Connection, node_id: &str) -> Result<bool, String> {
+    if !check_node_exists(conn, node_id)? {
+        return Ok(false);
+    }
+    let status: Result<Option<String>, redis::RedisError> = redis::cmd("HGET")
+        .arg(format!("gnode:node:{}:config", node_id))
+        .arg("status")
+        .query(conn);
+    match status {
+        // An absent status field is an old record from before status was written;
+        // treat it as needing registration rather than trusting it.
+        Ok(Some(s)) => Ok(s == "active"),
+        Ok(None) => Ok(false),
+        Err(e) => Err(format!("Failed to read node status: {}", e)),
+    }
+}
+
 pub fn check_node_exists(
     conn: &mut Connection,
     node_id: &str,
@@ -1011,17 +1039,20 @@ pub fn register_node_with_idempotency(
     ip_address: &str,
     config: &NodeConfig,
 ) -> Result<bool, String> {
-    // Check if node already exists
-    let exists = check_node_exists(conn, node_id)?;
+    // ACTIVE, not merely present: a deregistered node keeps its config record, so
+    // "exists" was true for a node that had been removed from the registry.
+    let active = check_node_active(conn, node_id)?;
 
-    if exists {
-        // Node already registered - send heartbeat instead
+    if active {
+        // Already registered and active - send heartbeat instead
         info!("Node '{}' already registered, sending heartbeat", node_id);
         send_node_heartbeat(conn, node_id, 0.0, None, None, None, None)?;
         Ok(false)
     } else {
-        // Node not registered - perform full registration
-        info!("Node '{}' not found, performing registration", node_id);
+        // Missing, or present but deregistered. Registration is idempotent, so
+        // re-running it is how an inactive record becomes active again and rejoins
+        // gnode:nodes:registry.
+        info!("Node '{}' is not active, registering", node_id);
         register_node_instance(conn, node_id, node_type, site_id, hostname, ip_address, config)?;
         Ok(true)
     }

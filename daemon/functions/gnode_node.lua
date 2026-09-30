@@ -111,6 +111,11 @@ server.register_function{
             'version', config.metadata and config.metadata.version or '1.0.0'
         )
 
+        -- A re-registration is a node coming back. Leaving deregistered_at behind
+        -- makes an active record carry the timestamp of when it was last removed,
+        -- which reads as "this node left" to anything that looks at the field.
+        server.call('HDEL', config_key, 'deregistered_at')
+
         -- Store routing config if provided
         if config.routing then
             server.call('HSET', config_key, 'routing_mode', config.routing.mode or 'all')
