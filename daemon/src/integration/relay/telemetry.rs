@@ -37,6 +37,19 @@ struct PairCounters {
     commands: HashMap<String, u64>,
 }
 
+/// One relayed request as this node saw it, for the load sampler.
+///
+/// Kept per request rather than folded into the pair counters above, because a
+/// mean is not a distribution: the sampler needs a median over a window, and
+/// `total_ms / count` cannot give it one.
+struct Observation {
+    target: String,
+    command: String,
+    elapsed_ms: u64,
+    ok: bool,
+    ts_ms: i64,
+}
+
 /// Thread-local relay telemetry collector.
 /// Accumulates metrics in-memory and flushes to ValKey periodically.
 pub struct RelayTelemetry {
@@ -44,7 +57,16 @@ pub struct RelayTelemetry {
     pairs: HashMap<String, PairCounters>,
     /// Count of relay operations since last flush
     ops_since_flush: u64,
+    /// Per-request observations, published on flush. Capped: a burst must cost
+    /// bounded memory, and losing the tail of one window is not worth a
+    /// reallocation storm.
+    observations: Vec<Observation>,
+    dropped_observations: u64,
 }
+
+/// At one relay per observation and a 30s flush, this is minutes of the busiest
+/// traffic this estate has seen.
+const MAX_OBSERVATIONS: usize = 2048;
 
 impl Default for RelayTelemetry {
     fn default() -> Self {
@@ -57,6 +79,8 @@ impl RelayTelemetry {
         Self {
             pairs: HashMap::new(),
             ops_since_flush: 0,
+            observations: Vec::new(),
+            dropped_observations: 0,
         }
     }
 
@@ -93,15 +117,63 @@ impl RelayTelemetry {
             counters.translated += 1;
         }
         counters.total_ms += elapsed_ms;
-        *counters.commands.entry(metrics.command).or_insert(0) += 1;
+        *counters.commands.entry(metrics.command.clone()).or_insert(0) += 1;
+
+        if self.observations.len() < MAX_OBSERVATIONS {
+            self.observations.push(Observation {
+                target: metrics.target_site,
+                command: metrics.command,
+                elapsed_ms,
+                ok: success,
+                ts_ms: crate::utils::current_timestamp_ms(),
+            });
+        } else {
+            self.dropped_observations += 1;
+        }
 
         self.ops_since_flush += 1;
+    }
+
+    /// Publish this node's observations to each target's health stream.
+    ///
+    /// Every node publishes; only the lease holder aggregates. That is what keeps
+    /// the derived load independent of which node holds the lease — the workers'
+    /// consumer group splits messages between nodes, so a holder reading through
+    /// it would see a fraction of the traffic and write it as the truth.
+    fn publish_observations(&mut self, conn: &mut Connection, debug_mode: bool) {
+        if self.observations.is_empty() {
+            return;
+        }
+        let count = self.observations.len();
+        for o in self.observations.drain(..) {
+            let stream = crate::config::build_health_stream_key(&o.target);
+            let _: Result<String, redis::RedisError> = redis::cmd("XADD")
+                .arg(&stream).arg("MAXLEN").arg("~").arg(1000).arg("*")
+                .arg("t").arg("rq")
+                .arg("si").arg(&o.target)
+                .arg("cmd").arg(&o.command)
+                .arg("lat").arg(o.elapsed_ms)
+                .arg("ok").arg(if o.ok { 1 } else { 0 })
+                .arg("ts").arg(o.ts_ms)
+                .query(conn);
+        }
+        if self.dropped_observations > 0 {
+            warn!("Relay observations dropped since last flush: {} (cap {})",
+                  self.dropped_observations, MAX_OBSERVATIONS);
+            self.dropped_observations = 0;
+        }
+        if debug_mode {
+            debug!("Published {} relay observations", count);
+        }
     }
 
     /// Flush accumulated metrics to ValKey.
     /// Called periodically from the staleness check loop (every 30s).
     /// Uses HGET + merge + HSET per pair to avoid losing data from other workers.
     pub fn flush(&mut self, conn: &mut Connection, topology_namespace: &str, debug_mode: bool) {
+        // Observations first: they are the sampler's only input, and a flush that
+        // returns early on empty pair counters must not swallow them.
+        self.publish_observations(conn, debug_mode);
         if self.pairs.is_empty() {
             return;
         }

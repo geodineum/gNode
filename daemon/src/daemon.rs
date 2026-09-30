@@ -1973,6 +1973,18 @@ impl GNodeDaemon {
             registry.register(health_worker);
             info!("  ✓ Registered health cleanup worker");
 
+            // Register the load sampler. It self-gates on the writer lease and on
+            // GNODE_SAMPLER (off | shadow | write; shadow by default), so
+            // registering it is not the same as letting it write.
+            let sampler_worker = crate::worker::LoadSamplerWorker::new(
+                Arc::clone(&self.stream_discovery),
+                self.topology_namespace.clone(),
+                self.node_id.clone(),
+            );
+            let sampler_mode = crate::worker::SamplerMode::from_env();
+            registry.register(sampler_worker);
+            info!("  ✓ Registered load sampler worker (mode: {:?})", sampler_mode);
+
             // Register discovery refresh worker
             let discovery_worker = crate::worker::DiscoveryRefreshWorker::new(
                 Arc::clone(&self.stream_discovery),

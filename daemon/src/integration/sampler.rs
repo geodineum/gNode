@@ -1,0 +1,489 @@
+// The load sampler: what a provider's latency says about how busy it is.
+//
+// Derived from each provider's OWN baseline, per command, so a service whose `infer`
+// normally takes 292 seconds is not called saturated for being slow — only for being
+// slower than itself. That needs no calibrated ops/second ceiling, which would go
+// stale with every hardware and code change and could not see load this node did not
+// route.
+//
+// The reading is the queueing identity R = R0/(1-ρ) read backwards:
+//
+//     inflation I = p50(window) / baseline        ρ = 1 - 1/I
+//
+// I=1 → 0, I=2 → 0.5, I=4 → 0.75, I=10 → 0.9. Bounded, and it needs one constant
+// (the guard below) rather than a per-component measurement campaign.
+//
+// This module is pure: observations in, writes out, no I/O. The worker owns the
+// stream reads, the lease and the FCALL.
+//
+// SCOPE: dimension 16 (current_load) only. health_status stays `unknown` — deriving
+// it needs an entity→component mapping that does not exist yet (a web-profile entity
+// like `nierto_com` has no component heartbeat, while `gflow` does), and a health
+// value nobody can justify is worse than an honest unknown.
+
+use std::collections::HashMap;
+
+/// One completed request, as the relay or a publisher saw it.
+#[derive(Debug, Clone)]
+pub struct Observation {
+    pub site: String,
+    pub entity: String,
+    pub command: String,
+    pub elapsed_ms: u64,
+    pub ok: bool,
+    pub ts_ms: u64,
+}
+
+/// A coordinate the sampler wants written, and why.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DerivedWrite {
+    pub site: String,
+    pub entity: String,
+    pub index: usize,
+    pub pd: f64,
+    pub zs: i64,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SamplerConfig {
+    /// How often the worker ticks.
+    pub tick_secs: u64,
+    /// Samples older than this do not describe the present.
+    pub window_secs: u64,
+    /// Ring capacity per (entity, command).
+    pub ring: usize,
+    /// Below this many samples in the window, a p50 is noise, not a measurement.
+    pub min_samples: usize,
+    /// Baseline EWMA weight per tick.
+    pub alpha: f64,
+    /// The baseline only learns from ticks below this inflation. Without it, a
+    /// provider under sustained load teaches the baseline that its overload is
+    /// normal and the inflation returns to 1 — a thermometer in the sun.
+    pub baseline_guard: f64,
+    /// A stored value older than this is not data; the ranker abstains, so the
+    /// sampler refreshes the stamp at half of it.
+    pub horizon_secs: u64,
+    /// Report saturation fast, recovery slowly.
+    pub down_ticks: u32,
+}
+
+impl Default for SamplerConfig {
+    fn default() -> Self {
+        Self {
+            tick_secs: 15,
+            window_secs: 60,
+            ring: 64,
+            min_samples: 8,
+            alpha: 0.05,
+            baseline_guard: 1.5,
+            horizon_secs: 180,
+            down_ticks: 2,
+        }
+    }
+}
+
+impl SamplerConfig {
+    pub fn from_env() -> Self {
+        let num = |k: &str, d: f64| std::env::var(k).ok().and_then(|v| v.parse().ok()).unwrap_or(d);
+        let d = Self::default();
+        Self {
+            tick_secs: num("GNODE_SAMPLER_TICK_SECS", d.tick_secs as f64) as u64,
+            window_secs: num("GNODE_SAMPLER_WINDOW_SECS", d.window_secs as f64) as u64,
+            ring: num("GNODE_SAMPLER_RING", d.ring as f64) as usize,
+            min_samples: num("GNODE_SAMPLER_MIN_SAMPLES", d.min_samples as f64) as usize,
+            alpha: num("GNODE_SAMPLER_ALPHA", d.alpha),
+            baseline_guard: num("GNODE_SAMPLER_BASELINE_GUARD", d.baseline_guard),
+            horizon_secs: num("GNODE_SAMPLER_HORIZON_SECS", d.horizon_secs as f64) as u64,
+            down_ticks: num("GNODE_SAMPLER_DOWN_TICKS", d.down_ticks as f64) as u32,
+        }
+    }
+}
+
+/// What the axis is allowed to say. 0.00 is `unknown` and never a measurement, so a
+/// measured idle provider (0.20) is distinguishable from one nobody has measured.
+pub const LOAD_LANDMARKS: [(f64, &str); 6] = [
+    (0.00, "unknown"), (0.20, "idle"), (0.40, "light"),
+    (0.60, "moderate"), (0.80, "heavy"), (1.00, "saturated"),
+];
+
+/// The band a coordinate sits in: the highest landmark at or below it.
+pub fn landmark(pd: f64) -> (usize, &'static str) {
+    let mut best = (0usize, LOAD_LANDMARKS[0].1);
+    for (i, (v, name)) in LOAD_LANDMARKS.iter().enumerate() {
+        if pd + 1e-9 >= *v {
+            best = (i, name);
+        }
+    }
+    best
+}
+
+#[derive(Debug, Default, Clone)]
+struct Ring {
+    samples: Vec<(u64, u64)>, // (ts_ms, elapsed_ms)
+}
+
+impl Ring {
+    fn push(&mut self, ts_ms: u64, ms: u64, cap: usize) {
+        self.samples.push((ts_ms, ms));
+        if self.samples.len() > cap {
+            let drop = self.samples.len() - cap;
+            self.samples.drain(0..drop);
+        }
+    }
+
+    /// The median of the samples inside the window, and how many there were.
+    fn p50(&self, now_ms: u64, window_ms: u64) -> Option<(f64, usize)> {
+        let mut inside: Vec<u64> = self.samples.iter()
+            .filter(|(ts, _)| now_ms.saturating_sub(*ts) <= window_ms)
+            .map(|(_, ms)| *ms)
+            .collect();
+        if inside.is_empty() {
+            return None;
+        }
+        inside.sort_unstable();
+        let n = inside.len();
+        let mid = if n % 2 == 1 {
+            inside[n / 2] as f64
+        } else {
+            (inside[n / 2 - 1] + inside[n / 2]) as f64 / 2.0
+        };
+        Some((mid, n))
+    }
+}
+
+#[derive(Debug, Default, Clone)]
+struct Band {
+    written: Option<usize>,
+    pending: Option<usize>,
+    pending_ticks: u32,
+    last_write_ms: u64,
+}
+
+/// Utilisation from inflation, via R = R0/(1-ρ). `None` when there is nothing to
+/// compare against.
+pub fn utilisation(p50: f64, baseline: f64) -> Option<f64> {
+    if baseline <= 0.0 || p50 <= 0.0 {
+        return None;
+    }
+    let inflation = p50 / baseline;
+    if !inflation.is_finite() {
+        return None;
+    }
+    Some((1.0 - 1.0 / inflation).clamp(0.0, 0.98))
+}
+
+/// The coordinate for a utilisation: the measured band starts at `idle`, because
+/// 0.00 means unknown.
+pub fn coordinate(rho: f64) -> f64 {
+    let pd = 0.20 + 0.80 * rho.clamp(0.0, 1.0);
+    (pd * 10_000.0).round() / 10_000.0
+}
+
+pub struct Sampler {
+    pub cfg: SamplerConfig,
+    rings: HashMap<(String, String, String), Ring>, // (site, entity, command)
+    baselines: HashMap<(String, String, String), f64>,
+    bands: HashMap<(String, String), Band>,         // (site, entity)
+}
+
+impl Sampler {
+    pub fn new(cfg: SamplerConfig) -> Self {
+        Self { cfg, rings: HashMap::new(), baselines: HashMap::new(), bands: HashMap::new() }
+    }
+
+    pub fn observe(&mut self, o: Observation) {
+        let ring = self.rings.entry((o.site, o.entity, o.command)).or_default();
+        ring.push(o.ts_ms, o.elapsed_ms, self.cfg.ring);
+    }
+
+    /// Seed a baseline read back from ValKey, so a restart does not relearn from zero.
+    pub fn seed_baseline(&mut self, site: &str, entity: &str, command: &str, p50: f64) {
+        if p50 > 0.0 {
+            self.baselines.insert((site.into(), entity.into(), command.into()), p50);
+        }
+    }
+
+    /// Every baseline, for persisting.
+    pub fn baselines(&self) -> Vec<(String, String, String, f64)> {
+        self.baselines.iter()
+            .map(|((s, e, c), v)| (s.clone(), e.clone(), c.clone(), *v))
+            .collect()
+    }
+
+    /// One pass: update baselines, compute each entity's load, and return only the
+    /// coordinates worth writing.
+    pub fn tick(&mut self, now_ms: u64) -> Vec<DerivedWrite> {
+        let window_ms = self.cfg.window_secs * 1000;
+        // (site, entity) → weighted ρ
+        let mut per_entity: HashMap<(String, String), (f64, usize)> = HashMap::new();
+
+        let keys: Vec<(String, String, String)> = self.rings.keys().cloned().collect();
+        for key in keys {
+            let Some((p50, n)) = self.rings[&key].p50(now_ms, window_ms) else { continue };
+            if n < self.cfg.min_samples {
+                continue;
+            }
+            let baseline = self.baselines.get(&key).copied();
+            let rho = match baseline {
+                None => {
+                    // Bootstrap: the first full window IS the baseline, and says
+                    // nothing about load yet.
+                    self.baselines.insert(key.clone(), p50);
+                    continue;
+                }
+                Some(b) => {
+                    let rho = utilisation(p50, b);
+                    if p50 / b < self.cfg.baseline_guard {
+                        let updated = (1.0 - self.cfg.alpha) * b + self.cfg.alpha * p50;
+                        self.baselines.insert(key.clone(), updated);
+                    }
+                    rho
+                }
+            };
+            if let Some(rho) = rho {
+                let slot = per_entity.entry((key.0.clone(), key.1.clone())).or_insert((0.0, 0));
+                slot.0 += rho * n as f64;
+                slot.1 += n;
+            }
+        }
+
+        let mut writes = Vec::new();
+        for ((site, entity), (weighted, n)) in per_entity {
+            if n == 0 {
+                continue;
+            }
+            let pd = coordinate(weighted / n as f64);
+            let (band_idx, band_name) = landmark(pd);
+            let band = self.bands.entry((site.clone(), entity.clone())).or_default();
+
+            let reason = match band.written {
+                // Never written: say what we now know.
+                None => Some(format!("first measurement, {}", band_name)),
+                Some(written) if band_idx > written => {
+                    // Up immediately: a provider getting busy is news now.
+                    Some(format!("rose to {}", band_name))
+                }
+                Some(written) if band_idx < written => {
+                    // Down slowly: one quiet window is not a recovery.
+                    if band.pending == Some(band_idx) {
+                        band.pending_ticks += 1;
+                    } else {
+                        band.pending = Some(band_idx);
+                        band.pending_ticks = 1;
+                    }
+                    if band.pending_ticks >= self.cfg.down_ticks {
+                        Some(format!("settled to {}", band_name))
+                    } else {
+                        None
+                    }
+                }
+                Some(_) => {
+                    // Unchanged: refresh the stamp before the ranker starts
+                    // abstaining on it.
+                    let age = now_ms.saturating_sub(band.last_write_ms);
+                    if age >= self.cfg.horizon_secs * 1000 / 2 {
+                        Some(format!("stamp refresh, still {}", band_name))
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            if let Some(reason) = reason {
+                band.written = Some(band_idx);
+                band.pending = None;
+                band.pending_ticks = 0;
+                band.last_write_ms = now_ms;
+                writes.push(DerivedWrite {
+                    site,
+                    entity,
+                    index: crate::integration::handlers::types::SERVICE_SAMPLER_AXES[0],
+                    pd,
+                    zs: (pd * 1_000_000.0) as i64,
+                    reason,
+                });
+            }
+        }
+        writes
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn obs(site: &str, entity: &str, cmd: &str, ms: u64, ts: u64) -> Observation {
+        Observation { site: site.into(), entity: entity.into(), command: cmd.into(),
+                      elapsed_ms: ms, ok: true, ts_ms: ts }
+    }
+
+    fn feed(s: &mut Sampler, n: usize, ms: u64, ts: u64) {
+        for _ in 0..n { s.observe(obs("st", "svc", "get", ms, ts)); }
+    }
+
+    #[test]
+    fn utilisation_follows_the_queueing_identity() {
+        assert_eq!(utilisation(100.0, 100.0), Some(0.0));
+        assert_eq!(utilisation(200.0, 100.0), Some(0.5));
+        assert_eq!(utilisation(400.0, 100.0), Some(0.75));
+        assert_eq!(utilisation(1000.0, 100.0), Some(0.9));
+        // Faster than its own baseline is not negative load.
+        assert_eq!(utilisation(50.0, 100.0), Some(0.0));
+        // Never exactly 1: saturation is an asymptote, not a reading.
+        assert_eq!(utilisation(1e9, 100.0), Some(0.98));
+        assert_eq!(utilisation(100.0, 0.0), None);
+    }
+
+    #[test]
+    fn the_measured_band_starts_above_unknown() {
+        // The whole point of the recode: a measured idle provider must not look
+        // like one nobody measured.
+        assert_eq!(coordinate(0.0), 0.20);
+        assert_eq!(landmark(coordinate(0.0)).1, "idle");
+        assert_eq!(landmark(0.00).1, "unknown");
+        assert_eq!(coordinate(1.0), 1.00);
+        // The ladder, stated once: ρ is utilisation, and 4x latency inflation
+        // (ρ 0.75) is what "heavy" means.
+        assert_eq!(landmark(coordinate(0.25)).1, "light");     // 0.40, I=1.33
+        assert_eq!(landmark(coordinate(0.50)).1, "moderate");  // 0.60, I=2
+        assert_eq!(landmark(coordinate(0.75)).1, "heavy");     // 0.80, I=4
+        assert_eq!(landmark(coordinate(0.90)).1, "heavy");     // 0.92, I=10
+    }
+
+    #[test]
+    fn a_first_window_is_the_baseline_and_not_a_load_reading() {
+        let mut s = Sampler::new(SamplerConfig::default());
+        feed(&mut s, 10, 100, 1_000);
+        assert!(s.tick(1_000).is_empty(), "bootstrapping says nothing about load");
+        assert_eq!(s.baselines().len(), 1);
+    }
+
+    #[test]
+    fn too_few_samples_is_not_a_measurement() {
+        let mut s = Sampler::new(SamplerConfig::default());
+        feed(&mut s, 3, 100, 1_000);
+        assert!(s.tick(1_000).is_empty());
+        assert!(s.baselines().is_empty(), "and it does not become a baseline either");
+    }
+
+    #[test]
+    fn sustained_overload_does_not_teach_the_baseline() {
+        // The guard that separates a signal from a thermometer in the sun.
+        let mut s = Sampler::new(SamplerConfig::default());
+        s.seed_baseline("st", "svc", "get", 100.0);
+        for tick in 1..=20u64 {
+            let now = tick * 15_000;
+            feed(&mut s, 10, 400, now);          // 4x its own baseline, forever
+            s.tick(now);
+        }
+        let b = s.baselines()[0].3;
+        assert!(b < 110.0, "baseline drifted to {b} under sustained load");
+
+        // Below the guard it DOES learn, so a genuinely faster provider is tracked.
+        let mut s2 = Sampler::new(SamplerConfig::default());
+        s2.seed_baseline("st", "svc", "get", 100.0);
+        for tick in 1..=40u64 {
+            let now = tick * 15_000;
+            feed(&mut s2, 10, 120, now);         // 1.2x: within the guard
+            s2.tick(now);
+        }
+        assert!(s2.baselines()[0].3 > 110.0, "baseline should follow a real shift");
+    }
+
+    #[test]
+    fn rising_load_is_reported_at_once_and_recovery_only_after_confirmation() {
+        let cfg = SamplerConfig { down_ticks: 2, ..SamplerConfig::default() };
+        let mut s = Sampler::new(cfg);
+        s.seed_baseline("st", "svc", "get", 100.0);
+
+        feed(&mut s, 10, 400, 15_000);
+        let w = s.tick(15_000);
+        assert_eq!(w.len(), 1);
+        assert_eq!(landmark(w[0].pd).1, "heavy", "4x inflation is heavy");
+        assert!(w[0].reason.contains("first measurement"));
+
+        // Still heavy: no write, and no stamp refresh yet either.
+        feed(&mut s, 10, 400, 30_000);
+        assert!(s.tick(30_000).is_empty());
+
+        // Recovery is slow by construction, and in two stages: the slow samples
+        // must first age out of the 60s window, and only THEN does a lower band
+        // have to survive `down_ticks` before it is written. A quiet provider is
+        // therefore reported recovered roughly a window-plus-two-ticks later —
+        // deliberately, because one quiet window is not a recovery.
+        let mut settled_at = None;
+        for tick in 3..=12u64 {
+            let now = tick * 15_000;
+            feed(&mut s, 10, 100, now);
+            for w in s.tick(now) {
+                if w.reason.contains("settled") && settled_at.is_none() {
+                    settled_at = Some((now, landmark(w.pd).1));
+                }
+            }
+        }
+        let (when, band) = settled_at.expect("a provider that went quiet must be reported recovered");
+        assert_eq!(band, "idle");
+        assert!(when >= 60_000 && when <= 135_000,
+                "recovery should take about a window plus a confirmation, took {}ms", when);
+    }
+
+    #[test]
+    fn an_unchanged_value_is_refreshed_before_the_ranker_abstains() {
+        let cfg = SamplerConfig { horizon_secs: 180, ..SamplerConfig::default() };
+        let mut s = Sampler::new(cfg);
+        s.seed_baseline("st", "svc", "get", 100.0);
+        feed(&mut s, 10, 400, 15_000);
+        assert_eq!(s.tick(15_000).len(), 1);
+
+        // Half the horizon later, the same value is written again so its stamp
+        // stays inside the horizon.
+        for t in [30_000u64, 45_000, 60_000, 75_000, 90_000] {
+            feed(&mut s, 10, 400, t);
+            let w = s.tick(t);
+            if t < 105_000 && !w.is_empty() {
+                assert!(w[0].reason.contains("stamp refresh"), "{:?}", w[0].reason);
+            }
+        }
+        feed(&mut s, 10, 400, 106_000);
+        let w = s.tick(106_000);
+        assert_eq!(w.len(), 1);
+        assert!(w[0].reason.contains("stamp refresh"));
+    }
+
+    #[test]
+    fn a_slow_command_is_judged_against_itself_not_against_a_fast_one() {
+        // Geodine's `infer` runs for minutes and its `ping` for milliseconds. One
+        // ceiling for both would call the provider saturated for doing its job.
+        let mut s = Sampler::new(SamplerConfig::default());
+        s.seed_baseline("st", "geodine", "infer", 292_000.0);
+        s.seed_baseline("st", "geodine", "ping", 5.0);
+        for _ in 0..10 { s.observe(obs("st", "geodine", "infer", 292_000, 15_000)); }
+        for _ in 0..10 { s.observe(obs("st", "geodine", "ping", 5, 15_000)); }
+        let w = s.tick(15_000);
+        assert_eq!(w.len(), 1);
+        assert_eq!(landmark(w[0].pd).1, "idle", "at its own baseline, it is idle");
+    }
+
+    #[test]
+    fn a_stale_sample_leaves_the_window() {
+        let mut s = Sampler::new(SamplerConfig::default());
+        s.seed_baseline("st", "svc", "get", 100.0);
+        feed(&mut s, 10, 400, 1_000);
+        // Two minutes later those samples no longer describe the present.
+        assert!(s.tick(121_000).is_empty());
+    }
+
+    #[test]
+    fn commands_weight_by_how_much_they_were_observed() {
+        let mut s = Sampler::new(SamplerConfig::default());
+        s.seed_baseline("st", "svc", "hot", 100.0);
+        s.seed_baseline("st", "svc", "rare", 100.0);
+        for _ in 0..90 { s.observe(obs("st", "svc", "hot", 100, 15_000)); }   // ρ 0
+        for _ in 0..10 { s.observe(obs("st", "svc", "rare", 1000, 15_000)); } // ρ 0.9
+        let w = s.tick(15_000);
+        assert_eq!(w.len(), 1);
+        // 64-deep rings cap each command, so the weighting is by observed count.
+        assert!(w[0].pd < 0.60, "one rare slow command must not dominate: {}", w[0].pd);
+    }
+}

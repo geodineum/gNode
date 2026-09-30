@@ -287,6 +287,221 @@ impl DaemonWorker for HealthCleanupWorker {
     }
 }
 
+/// Load sampler worker: pools observations, derives dimension 16, writes it.
+///
+/// Reads every site's health stream through its OWN consumer group
+/// (`gnode-sampler`), not the workers' group. That is what makes the derivation
+/// independent of which node holds the lease: the workers' group splits messages
+/// between nodes, so a holder reading through it would aggregate a fraction of the
+/// traffic and write it as the truth. A separate group gets every observation.
+///
+/// Only the lease holder reads and writes. Every node PUBLISHES observations (see
+/// relay telemetry), so the input is pooled while the axis has one writer.
+pub struct LoadSamplerWorker {
+    sampler: crate::integration::sampler::Sampler,
+    stream_discovery: Arc<std::sync::RwLock<crate::integration::stream_discovery::StreamDiscoveryManager>>,
+    topology_namespace: String,
+    node_id: String,
+    mode: SamplerMode,
+    last_tick: Instant,
+    tick_interval: Duration,
+    /// Baselines are reloaded when the lease is taken, so a new holder does not
+    /// relearn every provider's normal from scratch.
+    seeded: bool,
+}
+
+/// What the sampler is allowed to do. `Shadow` computes and logs without writing —
+/// the 48h gate before the axis carries weight.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SamplerMode { Off, Shadow, Write }
+
+impl SamplerMode {
+    pub fn from_env() -> Self {
+        match std::env::var("GNODE_SAMPLER").unwrap_or_default().to_ascii_lowercase().as_str() {
+            "write" | "on" => SamplerMode::Write,
+            "off" => SamplerMode::Off,
+            _ => SamplerMode::Shadow,
+        }
+    }
+}
+
+impl LoadSamplerWorker {
+    pub fn new(
+        stream_discovery: Arc<std::sync::RwLock<crate::integration::stream_discovery::StreamDiscoveryManager>>,
+        topology_namespace: String,
+        node_id: String,
+    ) -> Self {
+        let cfg = crate::integration::sampler::SamplerConfig::from_env();
+        let tick_interval = Duration::from_secs(cfg.tick_secs);
+        Self {
+            sampler: crate::integration::sampler::Sampler::new(cfg),
+            stream_discovery,
+            topology_namespace,
+            node_id,
+            mode: SamplerMode::from_env(),
+            last_tick: Instant::now(),
+            tick_interval,
+            seeded: false,
+        }
+    }
+
+    fn health_streams(&self) -> Vec<String> {
+        self.stream_discovery.read()
+            .map(|d| d.get_health_streams().into_iter().map(|s| s.key).collect())
+            .unwrap_or_default()
+    }
+
+    /// Drain the observations waiting in one site's health stream.
+    fn read_observations(&mut self, conn: &mut redis::Connection, stream: &str) -> usize {
+        use crate::integration::sampler::Observation;
+        let Some(site) = crate::config::site_of_stream_key(stream).map(|s| s.to_string()) else { return 0 };
+
+        // The group is ours alone; MKSTREAM so a site with no traffic yet is not an error.
+        let _: redis::RedisResult<String> = redis::cmd("XGROUP").arg("CREATE").arg(stream)
+            .arg(SAMPLER_GROUP).arg("0").arg("MKSTREAM").query(conn);
+
+        let reply: redis::RedisResult<redis::streams::StreamReadReply> = redis::cmd("XREADGROUP")
+            .arg("GROUP").arg(SAMPLER_GROUP).arg(&self.node_id)
+            .arg("COUNT").arg(500).arg("STREAMS").arg(stream).arg(">")
+            .query(conn);
+        let Ok(reply) = reply else { return 0 };
+
+        let mut ids = Vec::new();
+        let mut taken = 0usize;
+        for key in reply.keys {
+            for entry in key.ids {
+                ids.push(entry.id.clone());
+                let field = |k: &str| entry.get::<String>(k);
+                // `t=rq` carries an observed latency; anything else on this stream
+                // is not ours to interpret, and is acknowledged so it cannot pile
+                // up in our group the way 114 records did in the workers'.
+                if field("t").as_deref() != Some("rq") { continue; }
+                let Some(entity) = field("si").filter(|s| !s.is_empty()) else { continue };
+                let Some(lat) = field("lat").and_then(|v| v.parse::<f64>().ok()) else { continue };
+                if !lat.is_finite() || lat < 0.0 { continue }
+                self.sampler.observe(Observation {
+                    site: site.clone(),
+                    entity,
+                    command: field("cmd").unwrap_or_else(|| "unknown".into()),
+                    elapsed_ms: lat as u64,
+                    ok: field("ok").map(|v| v != "0").unwrap_or(true),
+                    ts_ms: field("ts").and_then(|v| v.parse().ok())
+                        .unwrap_or_else(|| crate::utils::current_timestamp_ms().max(0) as u64),
+                });
+                taken += 1;
+            }
+        }
+        if !ids.is_empty() {
+            let mut ack = redis::cmd("XACK");
+            ack.arg(stream).arg(SAMPLER_GROUP);
+            for id in &ids { ack.arg(id); }
+            let _: redis::RedisResult<i64> = ack.query(conn);
+        }
+        taken
+    }
+
+    fn baseline_key(&self, site: &str) -> String { format!("{{{}}}:gnode:baseline", site) }
+
+    fn seed_baselines(&mut self, conn: &mut redis::Connection) {
+        for stream in self.health_streams() {
+            let Some(site) = crate::config::site_of_stream_key(&stream).map(|s| s.to_string()) else { continue };
+            let stored: redis::RedisResult<std::collections::HashMap<String, String>> =
+                redis::cmd("HGETALL").arg(self.baseline_key(&site)).query(conn);
+            if let Ok(map) = stored {
+                for (field, value) in map {
+                    if let (Some((entity, command)), Ok(p50)) = (field.split_once('|'), value.parse::<f64>()) {
+                        self.sampler.seed_baseline(&site, entity, command, p50);
+                    }
+                }
+            }
+        }
+        self.seeded = true;
+    }
+
+    fn save_baselines(&self, conn: &mut redis::Connection) {
+        let mut per_site: std::collections::HashMap<String, Vec<(String, String)>> = std::collections::HashMap::new();
+        for (site, entity, command, p50) in self.sampler.baselines() {
+            per_site.entry(site).or_default().push((format!("{}|{}", entity, command), format!("{:.3}", p50)));
+        }
+        for (site, fields) in per_site {
+            let mut cmd = redis::cmd("HSET");
+            cmd.arg(self.baseline_key(&site));
+            for (f, v) in fields { cmd.arg(f).arg(v); }
+            let _: redis::RedisResult<i64> = cmd.query(conn);
+        }
+    }
+}
+
+/// The sampler's own consumer group, separate from the workers' by design.
+const SAMPLER_GROUP: &str = "gnode-sampler";
+
+impl DaemonWorker for LoadSamplerWorker {
+    fn name(&self) -> &str { "load-sampler" }
+
+    fn tick(&mut self) -> TickResult {
+        if self.mode == SamplerMode::Off || self.last_tick.elapsed() < self.tick_interval {
+            return TickResult::Idle;
+        }
+        self.last_tick = Instant::now();
+
+        let Ok(mut conn) = crate::integration::connection_manager::get_connection() else {
+            return TickResult::Error;
+        };
+        // One writer of the axis. A node that does not hold the lease does not even
+        // read: the group's position would then advance on a node that cannot write.
+        if !crate::integration::lease::hold_writer_lease(&mut conn, &self.node_id) {
+            return TickResult::Idle;
+        }
+        if !self.seeded {
+            self.seed_baselines(&mut conn);
+        }
+
+        let mut observed = 0usize;
+        for stream in self.health_streams() {
+            observed += self.read_observations(&mut conn, &stream);
+        }
+
+        let writes = self.sampler.tick(crate::utils::current_timestamp_ms().max(0) as u64);
+        if writes.is_empty() {
+            return if observed > 0 { TickResult::Busy } else { TickResult::Idle };
+        }
+
+        for w in &writes {
+            if self.mode == SamplerMode::Shadow {
+                // Quiet by construction: a write only happens on a band change or a
+                // stamp refresh, so this is not a per-tick line.
+                info!("[load-sampler] shadow: {} in {} would read {:.4} ({})",
+                      w.entity, w.site, w.pd, w.reason);
+                continue;
+            }
+            let updates = format!(r#"{{"{}":{{"pd":{:.4},"pr":"{}"}}}}"#,
+                w.index, w.pd,
+                crate::geometric_precision::FixedPoint::from_f64(w.pd).raw());
+            let result: redis::RedisResult<String> = redis::cmd("FCALL")
+                .arg("GNODE_TOPO_SET_DERIVED").arg(1)
+                .arg(crate::GeometricTopology::get_services_topology_key(&w.site))
+                .arg(&w.entity).arg(&updates).arg(w.zs)
+                .arg(format!("{{{}}}:gnode:topology:services", self.topology_namespace))
+                .arg(crate::integration::processor::stream_utils::current_timestamp())
+                .arg(crate::integration::handlers::types::HASHED_DIMENSIONS)
+                .arg(&self.node_id)
+                .query(&mut conn);
+            match result {
+                Ok(_) => info!("[load-sampler] {} in {} → {:.4} ({})", w.entity, w.site, w.pd, w.reason),
+                // A provider can be observed before it is registered; that is the
+                // publisher's business, not a reason to stop sampling.
+                Err(e) => debug!("[load-sampler] write for {} refused: {}", w.entity, e),
+            }
+        }
+        self.save_baselines(&mut conn);
+        TickResult::Busy
+    }
+
+    fn config(&self) -> WorkerConfig {
+        WorkerConfig { idle_interval: Duration::from_secs(1), ..Default::default() }
+    }
+}
+
 /// Stream discovery refresh worker
 pub struct DiscoveryRefreshWorker {
     stream_discovery: Arc<std::sync::RwLock<crate::integration::stream_discovery::StreamDiscoveryManager>>,
