@@ -235,6 +235,10 @@ static FORMAT_PROCESSOR_STORAGE: std::sync::OnceLock<Arc<crate::integration::pro
 // Module-level static for load metrics manager storage
 static LOAD_METRICS_MANAGER_STORAGE: std::sync::OnceLock<Arc<crate::integration::load_metrics::LoadMetricsManager>> = std::sync::OnceLock::new();
 
+/// This node's id, for the code paths that need it without holding a daemon handle
+/// — the writer lease, which a stream worker has to ask about on every batch.
+static NODE_ID_STORAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
 // Module-level static for shared topology storage
 // This allows the topology loaded from ValKey to be accessed statically by command handlers
 static TOPOLOGY_STORAGE: std::sync::OnceLock<Arc<RwLock<crate::GeometricTopology>>> = std::sync::OnceLock::new();
@@ -257,6 +261,7 @@ impl GNodeDaemon {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_config(redis_url: &str, dimensions: usize, topology_namespace: String, environment: String, node_id: String, node_type: String, stream_prefix: String, debug: bool, debug_level: &str, is_master: bool, stream_config: crate::config::GNodeSettings) -> Result<Self> {
         let node_type_enum = NodeType::from(node_type.as_str());
+        GNodeDaemon::set_node_id_for_lease(&node_id);
         info!("Initializing gNode daemon with Redis URL: {}, dimensions: {}, topology_namespace: {} → {{{}}}:gnode:topology, environment: {}, node_id: {}, node_type: {}, is_master: {}, stream_prefix: {}, debug_level: {}",
             crate::config::redact_url(redis_url), dimensions, topology_namespace, topology_namespace, environment, node_id, node_type_enum, is_master, stream_prefix, debug_level);
         info!("  Stream discovery: DYNAMIC (sites discovered from topology)");
@@ -491,6 +496,19 @@ impl GNodeDaemon {
                 None
             }
         }
+    }
+
+    /// This node's id for lease decisions. Falls back to the short hostname, which is
+    /// what the node id is derived from anyway, so an unset store cannot make two
+    /// nodes look like one.
+    pub fn node_id_for_lease() -> String {
+        NODE_ID_STORAGE.get().cloned()
+            .unwrap_or_else(crate::integration::heartbeat::short_hostname)
+    }
+
+    /// Publish this node's id for the static accessor. First call wins.
+    pub fn set_node_id_for_lease(node_id: &str) {
+        let _ = NODE_ID_STORAGE.set(node_id.to_string());
     }
 
     /// Get load metrics manager reference for static access
@@ -812,7 +830,16 @@ impl GNodeDaemon {
         //
         // Best-effort. A client that cannot read it falls back to its built-in
         // default and says so; losing the lookup must never stop the daemon.
-        if self.is_master {
+        // Whoever holds the shared-writer lease publishes, NOT whoever is called
+        // "master": `is_master` is derived from the daemon's NAME, both live daemons
+        // are named `default`, so this block never ran and the published schema sat
+        // at 30 dimensions while the store moved to 23. Clients prefer the published
+        // copy over their own built-in table, so a stale one is worse than none.
+        let publisher = match self.client.get_connection() {
+            Ok(mut conn) => crate::integration::lease::hold_writer_lease(&mut conn, &self.node_id),
+            Err(e) => { warn!("Cannot reach ValKey to take the writer lease: {}", e); false }
+        };
+        if publisher {
             match crate::tool_registration::find_schema_path(None) {
                 Some(service_path) => {
                     // Every tier, not just the one this daemon matches against.
@@ -2007,6 +2034,28 @@ impl GNodeDaemon {
                         .arg(&pid_key)
                         .arg(120) // Refresh TTL to 2 minutes
                         .query(&mut conn);
+                }
+
+                // Renew the shared-writer lease on the same tick. Renewing far more
+                // often than the TTL is the point: a holder that dies is replaced
+                // within the TTL, and a holder that lives never loses the lease to a
+                // slow tick.
+                if let Ok(mut conn) = crate::integration::connection_manager::get_connection() {
+                    crate::integration::lease::hold_writer_lease(&mut conn, &self.node_id);
+                }
+
+                // Keep the legacy node health hash honest. Its `last_heartbeat` was
+                // written ONCE, by the registration path at startup, while
+                // gnode_node.lua marks any node quiet for 60s as `stale` and a
+                // cleanup path treats stale nodes as removable — so both live nodes
+                // read as stale within a minute of booting and were candidates for
+                // garbage collection. The unified heartbeat below is the source of
+                // truth; this keeps the hash from contradicting it.
+                if let Ok(mut conn) = crate::integration::connection_manager::get_connection() {
+                    if let Err(e) = crate::node_config::send_node_heartbeat(
+                        &mut conn, &self.node_id, 0.0, None, None, None, None) {
+                        debug!("Node health refresh failed: {}", e);
+                    }
                 }
 
                 // Refresh the unified component heartbeat with a fresh ts so the

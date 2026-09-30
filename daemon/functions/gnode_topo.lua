@@ -640,6 +640,12 @@ server.register_function{
         -- args[4] = snapshot_key (OPTIONAL) — keeps the (B) projection current.
         -- args[5] = ts (OPTIONAL) — the measurement's time, stored as m.ds.
         -- args[6] = hashed_width (OPTIONAL) — an index below this is refused.
+        -- args[7] = node_id (OPTIONAL) — the writer. When a shared-writer lease
+        --           exists, only its holder may write a derived axis: two nodes
+        --           observing the same provider differently would otherwise take
+        --           turns overwriting the measurement, and the value would flap
+        --           with whichever tick landed last. No lease = nobody claims
+        --           ownership, so the write is allowed.
 
         if #keys < 1 then
             return server.error_reply("Missing topology_key")
@@ -651,6 +657,12 @@ server.register_function{
         local topology_key = keys[1]
         local entity_id = args[1]
         local hashed_width = tonumber(args[6])
+
+        local lease = server.call('GET', 'gnode:cluster:writer')
+        if lease and lease ~= false and args[7] and args[7] ~= lease then
+            return server.error_reply(string.format(
+                "Derived writes belong to the lease holder (%s); %s does not hold it", lease, args[7]))
+        end
 
         local updates, parse_err = safe_json_decode(args[2])
         if not updates then

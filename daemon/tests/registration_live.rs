@@ -48,6 +48,15 @@ fn set_derived(conn: &mut redis::Connection, site: &str, id: &str, updates: &Val
         .query(conn)
 }
 
+fn set_derived_as(conn: &mut redis::Connection, site: &str, id: &str, updates: &Value, z: i64, node: &str)
+    -> redis::RedisResult<String> {
+    redis::cmd("FCALL")
+        .arg("GNODE_TOPO_SET_DERIVED").arg(1)
+        .arg(format!("{{{site}}}:gnode:services"))
+        .arg(id).arg(updates.to_string()).arg(z).arg(SNAPSHOT).arg(1790000000).arg(16).arg(node)
+        .query(conn)
+}
+
 fn entity(conn: &mut redis::Connection, site: &str, id: &str) -> Value {
     let raw: Option<String> = redis::cmd("HGET").arg(format!("{{{site}}}:gnode:services:entities")).arg(id).query(conn).unwrap();
     raw.map(|r| serde_json::from_str(&r).unwrap()).unwrap_or(Value::Null)
@@ -121,6 +130,20 @@ fn registration_invariants() {
     assert_eq!(after["zs"], json!(600_000), "nor the ordering computed from it");
     assert_eq!(after["m"]["ds"], json!(1790000000i64));
     assert_eq!(after["pd"][15], json!(0.5), "a declared axis still comes from the caller");
+
+    // Derived axes have one writer. A lease decides which node that is, enforced
+    // inside the primitive rather than by convention: `is_master` is derived from the
+    // daemon's NAME and is false on every live node, so a guard on it writes nowhere.
+    let _: redis::RedisResult<()> = redis::cmd("SET").arg("gnode:cluster:writer").arg("node-a").query(&mut conn);
+    let refused = set_derived_as(&mut conn, "site_a", "site_a", &json!({"16": {"pd": 0.4}}), 400_000, "node-b");
+    assert!(refused.unwrap_err().to_string().contains("does not hold it"));
+    assert_eq!(entity(&mut conn, "site_a", "site_a")["pd"][16], json!(0.6), "a refused write changes nothing");
+    set_derived_as(&mut conn, "site_a", "site_a", &json!({"16": {"pd": 0.4}}), 400_000, "node-a").unwrap();
+    assert_eq!(entity(&mut conn, "site_a", "site_a")["pd"][16], json!(0.4), "the holder writes");
+    let _: redis::RedisResult<()> = redis::cmd("DEL").arg("gnode:cluster:writer").query(&mut conn);
+    // No lease means nobody claims ownership, so a single-node estate still works.
+    set_derived_as(&mut conn, "site_a", "site_a", &json!({"16": {"pd": 0.6}}), 600_000, "node-b").unwrap();
+    assert_eq!(entity(&mut conn, "site_a", "site_a")["pd"][16], json!(0.6));
 
     // A hashed axis cannot be written as derived: those coordinates ARE the key.
     let hashed = set_derived(&mut conn, "site_a", "site_a", &json!({"5": {"pd": 0.9}}), 0);

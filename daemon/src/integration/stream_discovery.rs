@@ -79,12 +79,26 @@ struct AllStreamsResponse {
     streams: DaemonStreamCategories,
     total_streams: u32,
     site_count: u32,
+    /// Per site: its active environment and which of its streams were found. The Lua
+    /// has always returned this; nothing read it, which is why a months-old warning
+    /// could never say WHICH site was short.
+    #[serde(default)]
+    sites: HashMap<String, SiteStreams>,
     #[serde(default)]
     expected_per_site: u32,
     #[serde(default)]
     expected_shared: u32,
     #[serde(default)]
     expected_total: u32,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct SiteStreams {
+    #[serde(default)]
+    #[allow(dead_code)]
+    active_environment: String,
+    #[serde(default)]
+    streams: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -587,13 +601,24 @@ impl StreamDiscoveryManager {
         // were the whole expectation, hiding the shared-stream term and
         // making the mismatch look like broken arithmetic.
         if response.expected_total > 0 && all_discovered.len() != response.expected_total as usize {
+            // Name the sites that are short. This warned once a minute on both nodes
+            // for months while saying only the arithmetic, so nobody could tell that
+            // the whole shortfall was one site: `_gtest`, a golden-test fixture left
+            // in gCore's registry since March with no streams, no topology and no
+            // environment. The count was right; the estate was inconsistent.
+            let short: Vec<String> = response.sites.iter()
+                .filter(|(_, info)| info.streams.len() < response.expected_per_site as usize)
+                .map(|(site, info)| format!("{} has {}", site,
+                    if info.streams.is_empty() { "neither".to_string() } else { info.streams.join("+") }))
+                .collect();
             warn!(
-                "Stream count mismatch: discovered {} but expected {} ({} sites × {} per-site + {} shared)",
+                "Stream count mismatch: discovered {} but expected {} ({} sites × {} per-site + {} shared){}",
                 all_discovered.len(),
                 response.expected_total,
                 response.site_count,
                 response.expected_per_site,
-                response.expected_shared
+                response.expected_shared,
+                if short.is_empty() { String::new() } else { format!("; short: {}", short.join(", ")) }
             );
         }
 

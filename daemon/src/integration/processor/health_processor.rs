@@ -208,7 +208,12 @@ pub fn process_health_updates_with_topology(
     // The measured band starts at `idle` (0.20), not at 0.00: code 0.00 on a
     // derived axis means UNKNOWN, so a measured idle service must not be
     // indistinguishable from one nothing has ever measured.
-    if let Some(topo_key) = topology_key {
+    // Derived axes have ONE writer. Without this, two daemons reporting different
+    // observations of the same provider would take turns overwriting dimension 16
+    // and the value would flap with whichever tick landed last.
+    let node_id = crate::daemon::GNodeDaemon::node_id_for_lease();
+    let owns_writes = crate::integration::lease::hold_writer_lease(conn, &node_id);
+    if let Some(topo_key) = topology_key.filter(|_| owns_writes) {
         for (service_id, load_factor) in &load_updates {
             let measured = 0.20 + 0.80 * load_factor.clamp(0.0, 1.0);
             let raw = crate::geometric_precision::FixedPoint::from_f64(measured).raw();
@@ -227,6 +232,7 @@ pub fn process_health_updates_with_topology(
                 .arg(crate::daemon::GNodeDaemon::topology_snapshot_key())
                 .arg(crate::integration::processor::stream_utils::current_timestamp())
                 .arg(crate::integration::handlers::types::HASHED_DIMENSIONS)
+                .arg(&node_id)   // args[7]: refused unless this node holds the lease
                 .query(conn);
 
             match result {
