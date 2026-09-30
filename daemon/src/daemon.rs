@@ -2016,8 +2016,9 @@ impl GNodeDaemon {
             // Reconciliation cadence, independent of the service-discovery scan.
             let mut _last_reconcile: Option<std::time::Instant> = None;
             while !is_shutdown_requested() {
-                // Sleep in 1-second intervals to check shutdown flag (vs 1 hour)
-                for _ in 0..60 {
+                // Sleep in 1-second intervals to check shutdown flag (vs 1 hour).
+                // The count IS the lease renew interval: the two must not drift.
+                for _ in 0..crate::integration::lease::RENEW_INTERVAL_SECS {
                     if is_shutdown_requested() { break; }
                     thread::sleep(Duration::from_secs(1));
                 }

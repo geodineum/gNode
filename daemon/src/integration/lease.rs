@@ -21,9 +21,20 @@ use redis::Connection;
 /// The one lease. Its holder owns shared-topology writes.
 pub const WRITER_LEASE_KEY: &str = "gnode:cluster:writer";
 
-/// Long enough to survive a slow tick, short enough that a dead holder is replaced
-/// within a minute. The renew cadence must be well under this.
-pub const LEASE_TTL_SECS: usize = 45;
+/// How often the holder renews. The daemon's main loop uses this for its sleep, so
+/// the two cannot drift apart.
+pub const RENEW_INTERVAL_SECS: usize = 60;
+
+/// The lease must outlive several renew intervals. Set to 45s against a 60s renew,
+/// it expired 15 seconds before every renewal: the journal read "Took the
+/// shared-writer lease" once a minute — taking, not renewing — and for a quarter of
+/// every minute the lease was free for the other node to grab. A TTL shorter than
+/// the renew interval is not a lease, it is a lottery.
+///
+/// Three intervals of slack: a holder survives two missed ticks, and a dead holder
+/// is replaced within three minutes. That is the right trade for "who publishes the
+/// schema and writes the derived axes" — nobody is waiting on it interactively.
+pub const LEASE_TTL_SECS: usize = RENEW_INTERVAL_SECS * 3;
 
 /// Take the lease, or renew it if this node already holds it.
 ///
@@ -36,6 +47,8 @@ pub fn hold_writer_lease(conn: &mut Connection, node_id: &str) -> bool {
         .arg(WRITER_LEASE_KEY).arg(node_id).arg("NX").arg("EX").arg(LEASE_TTL_SECS)
         .query(conn);
     if matches!(taken, Ok(Some(_))) {
+        // Taking is news; renewing is not. If this line appears on every tick, the
+        // TTL is shorter than the renew interval.
         info!("Took the shared-writer lease ({} for {}s)", WRITER_LEASE_KEY, LEASE_TTL_SECS);
         return true;
     }
@@ -47,7 +60,9 @@ pub fn hold_writer_lease(conn: &mut Connection, node_id: &str) -> bool {
             let renewed: redis::RedisResult<Option<String>> = redis::cmd("SET")
                 .arg(WRITER_LEASE_KEY).arg(node_id).arg("XX").arg("EX").arg(LEASE_TTL_SECS)
                 .query(conn);
-            matches!(renewed, Ok(Some(_)))
+            let ok = matches!(renewed, Ok(Some(_)));
+            debug!("Renewed the shared-writer lease: {}", ok);
+            ok
         }
         Some(holder) => {
             debug!("Shared-writer lease is held by {}; not writing shared state", holder);
@@ -74,6 +89,16 @@ pub fn release_writer_lease(conn: &mut Connection, node_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_lease_outlives_its_renew_interval() {
+        // The bug this pins: a 45s TTL renewed every 60s is unheld for 15s of every
+        // minute, so the holder re-TAKES rather than renews and the other node can
+        // win the gap.
+        assert!(LEASE_TTL_SECS >= RENEW_INTERVAL_SECS * 3,
+            "TTL {}s must cover at least three {}s renew intervals",
+            LEASE_TTL_SECS, RENEW_INTERVAL_SECS);
+    }
 
     /// The semantics that matter are about a SECOND node, so they need a real
     /// server: `GNODE_TEST_VALKEY_URL=redis://127.0.0.1:6397 cargo test -- --ignored`.
