@@ -169,6 +169,29 @@ struct Band {
     last_write_ms: u64,
 }
 
+/// When an observation happened, in ms, from the `ts` field and the stream entry id.
+///
+/// Three things go wrong without this. Publishers disagree about units — Geodine
+/// writes `ts=1775515335.4866`, seconds with a fraction, while the contract and the
+/// daemon's own publisher write milliseconds. A parser that wants `u64` rejects the
+/// first and, falling back to "now", turns a record from March into a measurement of
+/// the present: that is how three baselines were learned from six-month-old data.
+/// And a record with no usable `ts` at all still has a true time — the stream entry
+/// id, whose first component is the append time in ms.
+pub fn observed_at_ms(ts_field: Option<&str>, entry_id: &str) -> u64 {
+    let from_entry = || entry_id.split('-').next()
+        .and_then(|ms| ms.parse::<u64>().ok())
+        .unwrap_or(0);
+    match ts_field.and_then(|v| v.trim().parse::<f64>().ok()) {
+        Some(v) if v.is_finite() && v > 0.0 => {
+            // Anything below ~1973 in ms is seconds: no observation predates the
+            // epoch by three years, and none of this estate is from 1973.
+            if v < 100_000_000_000.0 { (v * 1000.0) as u64 } else { v as u64 }
+        }
+        _ => from_entry(),
+    }
+}
+
 /// Utilisation from inflation, via R = R0/(1-ρ). `None` when there is nothing to
 /// compare against.
 pub fn utilisation(p50: f64, baseline: f64) -> Option<f64> {
@@ -204,8 +227,19 @@ impl Sampler {
     }
 
     pub fn observe(&mut self, o: Observation) {
+        // A sub-millisecond command would otherwise get a baseline of ZERO, and a
+        // zero baseline can never produce a reading — `ping` learned exactly that.
+        // One millisecond is the measurement floor, not a real duration.
+        let elapsed = o.elapsed_ms.max(1);
         let ring = self.rings.entry((o.tier, o.site, o.entity, o.command)).or_default();
-        ring.push(o.ts_ms, o.elapsed_ms, self.cfg.ring);
+        ring.push(o.ts_ms, elapsed, self.cfg.ring);
+    }
+
+    /// Whether an observation is recent enough to describe the present. The ring's
+    /// window would ignore it anyway; refusing it at the door keeps a backlog
+    /// replay from being mistaken for live traffic.
+    pub fn is_current(&self, ts_ms: u64, now_ms: u64) -> bool {
+        now_ms.saturating_sub(ts_ms) <= self.cfg.window_secs * 1000
     }
 
     /// Seed a baseline read back from ValKey, so a restart does not relearn from zero.
@@ -334,6 +368,38 @@ mod tests {
 
     fn feed(s: &mut Sampler, n: usize, ms: u64, ts: u64) {
         for _ in 0..n { s.observe(obs("st", "svc", "get", ms, ts)); }
+    }
+
+    #[test]
+    fn a_timestamp_is_read_in_whatever_unit_the_publisher_used() {
+        // Geodine's actual record, seconds with a fraction.
+        assert_eq!(observed_at_ms(Some("1775515335.4866"), "1-0"), 1_775_515_335_486);
+        // The daemon's own publisher, already milliseconds.
+        assert_eq!(observed_at_ms(Some("1775515335486"), "1-0"), 1_775_515_335_486);
+        // No usable ts: the entry id IS the append time, never "now".
+        assert_eq!(observed_at_ms(None, "1775515335486-7"), 1_775_515_335_486);
+        assert_eq!(observed_at_ms(Some("not a number"), "1775515335486-0"), 1_775_515_335_486);
+        assert_eq!(observed_at_ms(Some("0"), "1775515335486-0"), 1_775_515_335_486);
+        assert_eq!(observed_at_ms(None, "garbage"), 0, "and an unreadable id is not now either");
+    }
+
+    #[test]
+    fn a_submillisecond_command_still_gets_a_usable_baseline() {
+        // `ping` was learned as a baseline of 0.000 ms, and a zero baseline can
+        // never produce a reading, so that command could never contribute.
+        let mut s = Sampler::new(SamplerConfig::default());
+        for _ in 0..10 { s.observe(obs("st", "svc", "ping", 0, 15_000)); }
+        s.tick(15_000);
+        assert_eq!(s.baselines().len(), 1);
+        assert!(s.baselines()[0].4 >= 1.0, "baseline was {}", s.baselines()[0].4);
+    }
+
+    #[test]
+    fn an_ancient_observation_is_not_a_measurement_of_now() {
+        let s = Sampler::new(SamplerConfig::default());
+        let now = 1_800_000_000_000u64;
+        assert!(s.is_current(now - 30_000, now));
+        assert!(!s.is_current(now - 600_000, now), "six months of backlog is not live traffic");
     }
 
     #[test]

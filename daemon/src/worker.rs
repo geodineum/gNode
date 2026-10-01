@@ -397,6 +397,14 @@ impl LoadSamplerWorker {
                 let Some(entity) = field("si").filter(|s| !s.is_empty()) else { continue };
                 let Some(lat) = field("lat").and_then(|v| v.parse::<f64>().ok()) else { continue };
                 if !lat.is_finite() || lat < 0.0 { continue }
+                let ts_ms = crate::integration::sampler::observed_at_ms(
+                    field("ts").as_deref(), &entry.id);
+                let now_ms = crate::utils::current_timestamp_ms().max(0) as u64;
+                if !self.sampler.is_current(ts_ms, now_ms) {
+                    // Acknowledged above, deliberately not observed: a stream's
+                    // backlog is history, not the present.
+                    continue;
+                }
                 self.sampler.observe(Observation {
                     tier: self.tier_for(&site),
                     site: site.clone(),
@@ -404,8 +412,7 @@ impl LoadSamplerWorker {
                     command: field("cmd").unwrap_or_else(|| "unknown".into()),
                     elapsed_ms: lat as u64,
                     ok: field("ok").map(|v| v != "0").unwrap_or(true),
-                    ts_ms: field("ts").and_then(|v| v.parse().ok())
-                        .unwrap_or_else(|| crate::utils::current_timestamp_ms().max(0) as u64),
+                    ts_ms,
                 });
                 taken += 1;
             }

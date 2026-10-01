@@ -91,11 +91,19 @@ case "$sub" in
         vc SMEMBERS gnode:sites:registry
         ;;
     load)
+        # The namespace is not a site, and the node entities (whose aggregate_load is
+        # what "route to the least busy node" reads) live in its constellation
+        # topology. Both are listed.
+        NAMESPACE="${GNODE_TOPOLOGY_NAMESPACE:-geodineum}"
+        topo_key() {
+            if [[ "$1" == "$NAMESPACE" ]]; then printf '{%s}:gnode:constellation' "$1"
+            else printf '{%s}:gnode:services' "$1"; fi
+        }
         # Read the derived load axis and the baselines it was measured against.
         # A human has to be able to check these numbers before anything ranks on
         # them, which is why this exists before the engine does.
         printf 'writer lease: %s (ttl %s)\n\n' \
-            "$(vc --no-raw GET gnode:cluster:writer | tr -d '"')" "$(vc TTL gnode:cluster:writer)"
+            "$(vc --raw GET gnode:cluster:writer)" "$(vc --raw TTL gnode:cluster:writer)"
         printf '%-22s %-26s %-10s %8s  %s\n' SITE ENTITY BAND COORD 'MEASURED'
         while IFS= read -r site; do
             [[ -n "$site" ]] || continue
@@ -118,18 +126,18 @@ ds = (e.get("m") or {}).get("ds")
 age = "never" if not ds else "%ds ago" % (int(time.time()) - int(ds))
 print("%-22s %-26s %-10s %8.4f  %s" % (site, eid, band, v, age))
 ' "$site" "$eid"
-            done < <(vc --no-raw HKEYS "$(topo_key "$site"):entities" | tr -d '"')
-        done < <(vc --no-raw SMEMBERS gnode:sites:registry | tr -d '"' | sort)
+            done < <(vc --raw HKEYS "$(topo_key "$site"):entities")
+        done < <(printf '%s\n' "$NAMESPACE" && vc --raw SMEMBERS gnode:sites:registry | sort)
         echo
         echo "Baselines (p50 ms the inflation is measured against):"
         while IFS= read -r site; do
             [[ -n "$site" ]] || continue
             [[ $# -ge 1 && "$site" != "$1" ]] && continue
-            n=$(vc HLEN "{$site}:gnode:baseline")
+            n=$(vc --raw HLEN "{$site}:gnode:baseline")
             [[ "$n" == "0" || -z "$n" ]] && continue
             printf '  %s\n' "$site"
-            vc --no-raw HGETALL "{$site}:gnode:baseline" | tr -d '"' | paste - - | sed 's/^/    /'
-        done < <(vc --no-raw SMEMBERS gnode:sites:registry | tr -d '"' | sort)
+            vc --raw HGETALL "{$site}:gnode:baseline" | paste - - | sed 's/^/    /'
+        done < <(printf '%s\n' "$NAMESPACE" && vc --raw SMEMBERS gnode:sites:registry | sort)
         ;;
     register)
         # geodineum topology register {tool | service <site> [profile]}
