@@ -60,6 +60,10 @@ pub struct SamplerConfig {
     pub tick_secs: u64,
     /// Samples older than this do not describe the present.
     pub window_secs: u64,
+    /// The window the baseline learns from. Long on purpose: a baseline is what
+    /// this command costs when nothing is in its way, and an estate whose busiest
+    /// site serves ten commands an hour has no such thing inside a minute.
+    pub baseline_window_secs: u64,
     /// Ring capacity per (entity, command).
     pub ring: usize,
     /// Below this many samples in the window, a p50 is noise, not a measurement.
@@ -82,7 +86,8 @@ impl Default for SamplerConfig {
         Self {
             tick_secs: 15,
             window_secs: 60,
-            ring: 64,
+            baseline_window_secs: 3600,
+            ring: 256,
             min_samples: 8,
             alpha: 0.05,
             baseline_guard: 1.5,
@@ -99,6 +104,8 @@ impl SamplerConfig {
         Self {
             tick_secs: num("GNODE_SAMPLER_TICK_SECS", d.tick_secs as f64) as u64,
             window_secs: num("GNODE_SAMPLER_WINDOW_SECS", d.window_secs as f64) as u64,
+            baseline_window_secs: num("GNODE_SAMPLER_BASELINE_WINDOW_SECS",
+                                      d.baseline_window_secs as f64) as u64,
             ring: num("GNODE_SAMPLER_RING", d.ring as f64) as usize,
             min_samples: num("GNODE_SAMPLER_MIN_SAMPLES", d.min_samples as f64) as usize,
             alpha: num("GNODE_SAMPLER_ALPHA", d.alpha),
@@ -262,30 +269,52 @@ impl Sampler {
         let window_ms = self.cfg.window_secs * 1000;
         let mut per_entity: HashMap<(Tier, String, String), (f64, usize)> = HashMap::new();
 
+        let baseline_window_ms = self.cfg.baseline_window_secs * 1000;
         let keys: Vec<RingKey> = self.rings.keys().cloned().collect();
         for key in keys {
+            // The baseline learns first, from the long window, and needs no quorum.
+            // Gating it on min_samples cost this estate the whole axis: at ten
+            // commands an hour no minute ever held eight samples, so no baseline
+            // ever formed — and the first burst to arrive would have been adopted
+            // as normal, leaving a flooded provider reading idle.
+            let mut bootstrapped = false;
+            if let Some((slow, _)) = self.rings[&key].p50(now_ms, baseline_window_ms) {
+                let slow = slow.max(1.0);
+                match self.baselines.get(&key).copied() {
+                    None => {
+                        self.baselines.insert(key.clone(), slow);
+                        bootstrapped = true;
+                    }
+                    Some(b) if slow < b => {
+                        // A cheaper normal is proof the floor was never that high.
+                        self.baselines.insert(key.clone(), slow);
+                    }
+                    Some(b) => {
+                        // Upward is the dangerous direction — under sustained load
+                        // it teaches the baseline that the overload is normal and
+                        // the inflation returns to 1, a thermometer in the sun. So
+                        // it is slow and the guard bounds it.
+                        if slow / b < self.cfg.baseline_guard {
+                            let updated = (1.0 - self.cfg.alpha) * b + self.cfg.alpha * slow;
+                            self.baselines.insert(key.clone(), updated);
+                        }
+                    }
+                }
+            }
+
+            // The load reading needs the quorum: below it a p50 is noise. And a
+            // baseline born this tick has nothing to be compared against yet —
+            // against itself every provider reads idle, which would publish a
+            // measurement of nothing.
+            if bootstrapped {
+                continue;
+            }
             let Some((p50, n)) = self.rings[&key].p50(now_ms, window_ms) else { continue };
             if n < self.cfg.min_samples {
                 continue;
             }
-            let baseline = self.baselines.get(&key).copied();
-            let rho = match baseline {
-                None => {
-                    // Bootstrap: the first full window IS the baseline, and says
-                    // nothing about load yet.
-                    self.baselines.insert(key.clone(), p50);
-                    continue;
-                }
-                Some(b) => {
-                    let rho = utilisation(p50, b);
-                    if p50 / b < self.cfg.baseline_guard {
-                        let updated = (1.0 - self.cfg.alpha) * b + self.cfg.alpha * p50;
-                        self.baselines.insert(key.clone(), updated);
-                    }
-                    rho
-                }
-            };
-            if let Some(rho) = rho {
+            let Some(b) = self.baselines.get(&key).copied() else { continue };
+            if let Some(rho) = utilisation(p50, b) {
                 let slot = per_entity.entry((key.0, key.1.clone(), key.2.clone())).or_insert((0.0, 0));
                 slot.0 += rho * n as f64;
                 slot.1 += n;
@@ -355,6 +384,44 @@ impl Sampler {
         }
         writes
     }
+}
+
+/// Whether the sampler wants observations at all, read once: an env lookup per
+/// command would be a syscall on the hot path for a value that cannot change.
+static OBSERVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+pub fn observations_enabled() -> bool {
+    *OBSERVE.get_or_init(|| {
+        !matches!(
+            std::env::var("GNODE_SAMPLER").unwrap_or_default().to_ascii_lowercase().as_str(),
+            "off"
+        )
+    })
+}
+
+/// The XADD that records one observation of this node's own command handling, or
+/// `None` when the sampler is off.
+///
+/// Both lanes publish through this one builder. The lane a command took must not be
+/// observable in the measurement, and that only stays true if neither lane owns a
+/// copy of the wire format — the Ordered lane had the only copy, so every
+/// concurrent command this estate actually serves went unmeasured.
+pub fn node_observation_cmd(command: &str, elapsed_ms: u64, ok: bool) -> Option<redis::Cmd> {
+    if !observations_enabled() {
+        return None;
+    }
+    let ns = std::env::var("GNODE_TOPOLOGY_NAMESPACE").unwrap_or_else(|_| "geodineum".to_string());
+    let node = crate::daemon::GNodeDaemon::node_id_for_lease();
+    let mut cmd = redis::cmd("XADD");
+    cmd.arg(crate::config::build_health_stream_key(&ns))
+        .arg("MAXLEN").arg("~").arg(2000).arg("*")
+        .arg("t").arg("rq")
+        .arg("si").arg(node)
+        .arg("cmd").arg(command)
+        .arg("lat").arg(elapsed_ms)
+        .arg("ok").arg(if ok { 1 } else { 0 })
+        .arg("ts").arg(crate::utils::current_timestamp_ms());
+    Some(cmd)
 }
 
 #[cfg(test)]
@@ -444,7 +511,37 @@ mod tests {
         let mut s = Sampler::new(SamplerConfig::default());
         feed(&mut s, 3, 100, 1_000);
         assert!(s.tick(1_000).is_empty());
-        assert!(s.baselines().is_empty(), "and it does not become a baseline either");
+    }
+
+    #[test]
+    fn a_sparse_provider_still_learns_a_baseline() {
+        // The whole axis depended on this. The quorum used to gate the baseline as
+        // well as the reading, and this estate's busiest site serves ten commands
+        // an hour — so no minute ever held eight samples, no baseline ever formed,
+        // and the first burst to arrive would have been adopted as normal.
+        let mut s = Sampler::new(SamplerConfig::default());
+        s.observe(obs("st", "svc", "get", 100, 1_000));
+        s.tick(1_000);
+        assert_eq!(s.baselines().len(), 1, "one honest sample is a better floor than none");
+        assert_eq!(s.baselines()[0].4, 100.0);
+
+        // And the floor is then there when the burst does arrive.
+        feed(&mut s, 10, 400, 20_000);
+        let w = s.tick(20_000);
+        assert_eq!(w.len(), 1);
+        assert_eq!(landmark(w[0].pd).1, "heavy", "4x its own normal, measured from one prior sample");
+    }
+
+    #[test]
+    fn a_cheaper_normal_lowers_the_baseline_at_once() {
+        // A baseline learned while something else was in the way is too high, and
+        // every reading taken against it understates the load. Downward is safe to
+        // take immediately: nothing can make a command cheaper than it is.
+        let mut s = Sampler::new(SamplerConfig::default());
+        s.seed_baseline(Tier::Service, "st", "svc", "get", 400.0);
+        feed(&mut s, 10, 100, 15_000);
+        s.tick(15_000);
+        assert_eq!(s.baselines()[0].4, 100.0);
     }
 
     #[test]
@@ -563,7 +660,7 @@ mod tests {
         for _ in 0..10 { s.observe(obs("st", "svc", "rare", 1000, 15_000)); } // ρ 0.9
         let w = s.tick(15_000);
         assert_eq!(w.len(), 1);
-        // 64-deep rings cap each command, so the weighting is by observed count.
+        // The ring caps each command, so the weighting is by observed count.
         assert!(w[0].pd < 0.60, "one rare slow command must not dominate: {}", w[0].pd);
     }
 }

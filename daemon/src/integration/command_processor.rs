@@ -1055,34 +1055,15 @@ pub fn process_commands(
 /// - Metric: command_batch_processing_time_ms - Time taken to process the batch
 /// - Metric: command_batch_success_count - Number of successfully processed commands
 #[allow(clippy::too_many_arguments)]
-/// Whether the sampler wants observations at all, read once: an env lookup per
-/// command would be a syscall on the hot path for a value that cannot change.
-static OBSERVE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-
 /// Publish one observation of this node's own command handling.
 ///
 /// Best-effort and bounded: a capped stream, one XADD, and a failure is not the
-/// command's problem. Only the Ordered lane is covered — the concurrent lane
-/// spawns its own dispatch, and instrumenting it is a separate change.
+/// command's problem. The wire format lives in the sampler, which the concurrent
+/// lane publishes through too.
 fn publish_node_observation(conn: &mut Connection, command: &str, elapsed_ms: u64, ok: bool) {
-    let observe = *OBSERVE.get_or_init(|| {
-        !matches!(std::env::var("GNODE_SAMPLER").unwrap_or_default().to_ascii_lowercase().as_str(), "off")
-    });
-    if !observe {
-        return;
+    if let Some(cmd) = crate::integration::sampler::node_observation_cmd(command, elapsed_ms, ok) {
+        let _: Result<String, redis::RedisError> = cmd.query(conn);
     }
-    let ns = std::env::var("GNODE_TOPOLOGY_NAMESPACE").unwrap_or_else(|_| "geodineum".to_string());
-    let node = crate::daemon::GNodeDaemon::node_id_for_lease();
-    let _: Result<String, redis::RedisError> = redis::cmd("XADD")
-        .arg(crate::config::build_health_stream_key(&ns))
-        .arg("MAXLEN").arg("~").arg(2000).arg("*")
-        .arg("t").arg("rq")
-        .arg("si").arg(&node)
-        .arg("cmd").arg(command)
-        .arg("lat").arg(elapsed_ms)
-        .arg("ok").arg(if ok { 1 } else { 0 })
-        .arg("ts").arg(crate::utils::current_timestamp_ms())
-        .query(conn);
 }
 
 pub fn process_command_batch(

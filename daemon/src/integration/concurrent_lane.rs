@@ -158,6 +158,7 @@ pub async fn dispatch(
 
     let registry = crate::integration::command_handler::get_command_registry();
 
+    let started = std::time::Instant::now();
     let result = match registry.get_async_handler(&command.command) {
         Some(handler) => {
             if debug_mode {
@@ -178,6 +179,19 @@ pub async fn dispatch(
             return;
         }
     };
+
+    // The work this estate actually serves arrives on this lane — every
+    // template_fragment quimba_cafe renders — so a sampler fed only by the Ordered
+    // lane measured nothing and the load axis stayed `unknown` for a node that was
+    // serving. Same builder as the Ordered lane, so the lane stays invisible in the
+    // measurement.
+    if let Some(obs) = crate::integration::sampler::node_observation_cmd(
+        &command.command,
+        started.elapsed().as_millis() as u64,
+        result.status != "error",
+    ) {
+        let _: redis::RedisResult<String> = obs.query_async(&mut conn).await;
+    }
 
     let response = result.to_response(&command.id);
 
