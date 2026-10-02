@@ -308,6 +308,9 @@ pub struct LoadSamplerWorker {
     /// Baselines are reloaded when the lease is taken, so a new holder does not
     /// relearn every provider's normal from scratch.
     seeded: bool,
+    /// Baselines outlive the process only if they are written when nothing else
+    /// is happening, which in a sparse estate is almost every tick.
+    last_saved: Instant,
 }
 
 /// What the sampler is allowed to do. `Shadow` computes and logs without writing —
@@ -342,6 +345,7 @@ impl LoadSamplerWorker {
             last_tick: Instant::now(),
             tick_interval,
             seeded: false,
+            last_saved: Instant::now(),
         }
     }
 
@@ -489,6 +493,16 @@ impl DaemonWorker for LoadSamplerWorker {
         }
 
         let writes = self.sampler.tick(crate::utils::current_timestamp_ms().max(0) as u64);
+
+        // Before the early return, not after it. A quiet provider produces no band
+        // write for days, and persisting only alongside one meant every baseline
+        // learned in a quiet week died with the process — so the burst it was
+        // learned for still arrived at a sampler with nothing to compare against.
+        if observed > 0 && self.last_saved.elapsed() >= Duration::from_secs(60) {
+            self.save_baselines(&mut conn);
+            self.last_saved = Instant::now();
+        }
+
         if writes.is_empty() {
             return if observed > 0 { TickResult::Busy } else { TickResult::Idle };
         }
@@ -528,6 +542,7 @@ impl DaemonWorker for LoadSamplerWorker {
             }
         }
         self.save_baselines(&mut conn);
+        self.last_saved = Instant::now();
         TickResult::Busy
     }
 

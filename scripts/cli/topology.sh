@@ -1,5 +1,5 @@
 #!/bin/bash
-# geodineum topology — inspect the live 30-dim service topology.
+# geodineum topology — inspect the live service topology.
 #
 #   sudo geodineum topology                  list topologies + entity counts
 #   sudo geodineum topology all              dump EVERY registered service in every topology
