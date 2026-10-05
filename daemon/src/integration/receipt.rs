@@ -350,7 +350,7 @@ pub fn default_signer_path() -> std::path::PathBuf {
 
 /// The shared registry of node receipt pubkeys. Placed in the topology
 /// namespace's gnode bus — a PUBLIC key, safe in the commons, resolvable by any
-/// verifier (GeoV, gFlow, dashboard). Field = signer_id (the fingerprint a
+/// verifier (gFlow, dashboard). Field = signer_id (the fingerprint a
 /// receipt carries); value = `<alg>:<pubkey_hex>`.
 pub fn pubkey_registry_key(topology_ns: &str) -> String {
     format!("{{{}}}:gnode:receipt_pubkeys", topology_ns)
