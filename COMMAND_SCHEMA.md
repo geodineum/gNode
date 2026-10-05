@@ -436,7 +436,7 @@ Stateless topology persistence. Daemon computes Q64.64 bucket keys and z_scores;
 
 ### gnode_topology — 4 functions
 
-Dimension-schema introspection and batch load updates for the active tier schema (default service tier = 30D). The dimension count is whatever the loaded schema declares. Semantic discovery, replacement finding, and custom-topology queries are **native daemon commands** (see `discover`, `custom_topology_discover` in Part 1), not Lua functions.
+Dimension-schema introspection and batch load updates for the active tier schema (default service tier = 23D: 16 hashed, 19 discovery, 23 total). The dimension count is whatever the loaded schema declares. Semantic discovery, replacement finding, and custom-topology queries are **native daemon commands** (see `discover`, `custom_topology_discover` in Part 1), not Lua functions.
 
 | Function | Keys | Args | Returns | Description |
 |----------|------|------|---------|-------------|

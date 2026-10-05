@@ -1,6 +1,8 @@
 # Geodineum 4-Tier Topology Architecture
 
-> **Status**: Active as of 2026-04-15. All schemas frozen for Chapter 1.
+> **Status**: service tier at schema v4.0 (23D). Header counts corrected
+> 2026-10-05 — the zone detail below was already v4.0 while the summary still
+> read 30D.
 
 ## Overview
 
@@ -9,7 +11,7 @@ Geodineum uses geometric service discovery across 4 topology tiers. Each tier ha
 ```
 Galaxy (20D)        — federation of Geodineum Constellations
   └── Constellation (20D) — nodes within a WireGuard VPN cluster
-        └── Service (30D)     — services within a site (per-site)
+        └── Service (23D)     — services within a site (per-site)
               └── Tool (16D)      — base ecosystem components (global)
 ```
 
@@ -17,7 +19,7 @@ Galaxy (20D)        — federation of Geodineum Constellations
 
 | Tier | Dims | Discovery | Storage | Keyspace | Schema |
 |------|------|-----------|---------|----------|--------|
-| Service | 30 | 25 | 5 | `{service_id}:gnode:services:*` | `service_schema.yaml` |
+| Service | 23 | 19 (16 hashed) | 4 | `{service_id}:gnode:services:*` | `service_schema.yaml` |
 | Tool | 16 | 12 | 4 | `{ecosystem}:gnode:services:*` | `tool_schema.yaml` |
 | Constellation | 20 | 16 | 4 | `constellation:{cid}:topology:*` | `constellation_schema.yaml` |
 | Galaxy | 20 | 16 | 4 | `galaxy:topology:*` | `galaxy_schema.yaml` |
@@ -33,9 +35,9 @@ Each topology stores data in distributed keys (NOT a single JSON blob):
 {service_id}:gnode:services:voxel:{bk}  — SET: entity IDs per spatial bucket
 ```
 
-## Service Tier — 30D
+## Service Tier — 23D
 
-The production topology for per-site service discovery. 25 discovery dimensions used for spatial hash bucket keys, 5 storage-only for visualization and metadata.
+The production topology for per-site service discovery. 16 declared dimensions are hashed into the spatial bucket key; 16-18 are derived by the daemon and ranked but never hashed, so a measurement that moves never rewrites voxel membership; 19-22 are storage-only and refused in a query.
 
 **Zones** (an axis's index IS its zone; both cuts are prefix truncations —
 `hashed_dimensions` 16, `discovery_dimensions` 19, `total_dimensions` 23):
@@ -144,7 +146,7 @@ gnode-daemon --redis-user gnode_daemon register-tools --tier tool --dry-run
 
 | File | Purpose |
 |------|---------|
-| `daemon/config/service_schema.yaml` | Service tier 30D dimension definitions |
+| `daemon/config/service_schema.yaml` | Service tier 23D dimension definitions |
 | `daemon/config/tool_schema.yaml` | Tool tier 16D dimension definitions |
 | `daemon/config/constellation_schema.yaml` | Constellation tier 20D (planned) |
 | `daemon/config/galaxy_schema.yaml` | Galaxy tier 20D (future) |
@@ -152,6 +154,6 @@ gnode-daemon --redis-user gnode_daemon register-tools --tier tool --dry-run
 | `daemon/config/evolution_schema.yaml` | Lifecycle label configuration |
 | `daemon/config/dtap_schema.yaml` | DTAP prefix→environment mapping |
 | ~~`daemon/config/capability_schema.yaml`~~ | **REMOVED** — was the legacy 23D schema, replaced by `service_schema.yaml` pre-launch |
-| `daemon/functions/gnode_topology.lua` | 30D dimension tables + translation |
+| `daemon/functions/gnode_topology.lua` | Dimension tables + translation |
 | `daemon/functions/gnode_topo.lua` | Topology CRUD + evolution labels |
 | `daemon/src/tool_registration.rs` | Registration pipeline + pyramid layout |
