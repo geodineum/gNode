@@ -1055,13 +1055,18 @@ pub fn process_commands(
 /// - Metric: command_batch_processing_time_ms - Time taken to process the batch
 /// - Metric: command_batch_success_count - Number of successfully processed commands
 #[allow(clippy::too_many_arguments)]
-/// Publish one observation of this node's own command handling.
+/// Publish both observations of one command: the node that served it, and the
+/// service it was served for.
 ///
-/// Best-effort and bounded: a capped stream, one XADD, and a failure is not the
-/// command's problem. The wire format lives in the sampler, which the concurrent
-/// lane publishes through too.
-fn publish_node_observation(conn: &mut Connection, command: &str, elapsed_ms: u64, ok: bool) {
-    if let Some(cmd) = crate::integration::sampler::node_observation_cmd(command, elapsed_ms, ok) {
+/// Best-effort and bounded: capped streams, one XADD each, and a failure is not
+/// the command's problem. The wire format lives in the sampler, which the
+/// concurrent lane publishes through too.
+fn publish_observations(conn: &mut Connection, site_id: &str, command: &str, elapsed_ms: u64, ok: bool) {
+    let both = [
+        crate::integration::sampler::node_observation_cmd(command, elapsed_ms, ok),
+        crate::integration::sampler::service_observation_cmd(site_id, command, elapsed_ms, ok),
+    ];
+    for cmd in both.into_iter().flatten() {
         let _: Result<String, redis::RedisError> = cmd.query(conn);
     }
 }
@@ -1415,13 +1420,12 @@ pub fn process_command_batch(
                     unknown_command_error(&command.command)
                 }
             };
-            // The daemon executing a command IS the provider for that work, so the
-            // observation names this NODE, and its load lands on the node entity's
-            // aggregate_load — which is what "route to the least busy node" asks.
-            // Relay observations cover service entities; this covers the traffic
-            // this estate actually has, which is commands the daemon runs itself.
-            publish_node_observation(conn, &command.command, started.elapsed().as_millis() as u64,
-                                     result.status != "error");
+            // One elapsed, two entities: the NODE that served the work and the
+            // SERVICE it was served for. Timing them apart would make the same
+            // work disagree with itself by the cost of the first XADD.
+            let elapsed_ms = started.elapsed().as_millis() as u64;
+            publish_observations(conn, site_id, &command.command, elapsed_ms,
+                                 result.status != "error");
             
             // Convert result to response
             let response = result.to_response(&command.id);

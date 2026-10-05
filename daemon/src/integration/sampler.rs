@@ -399,29 +399,65 @@ pub fn observations_enabled() -> bool {
     })
 }
 
-/// The XADD that records one observation of this node's own command handling, or
-/// `None` when the sampler is off.
-///
-/// Both lanes publish through this one builder. The lane a command took must not be
-/// observable in the measurement, and that only stays true if neither lane owns a
-/// copy of the wire format — the Ordered lane had the only copy, so every
-/// concurrent command this estate actually serves went unmeasured.
-pub fn node_observation_cmd(command: &str, elapsed_ms: u64, ok: bool) -> Option<redis::Cmd> {
-    if !observations_enabled() {
-        return None;
-    }
-    let ns = std::env::var("GNODE_TOPOLOGY_NAMESPACE").unwrap_or_else(|_| "geodineum".to_string());
-    let node = crate::daemon::GNodeDaemon::node_id_for_lease();
+/// The topology namespace, read once for the same reason `observations_enabled`
+/// is: an env lookup per command is a syscall on the hot path for a value that
+/// cannot change.
+static NAMESPACE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+pub fn topology_namespace() -> &'static str {
+    NAMESPACE.get_or_init(|| {
+        std::env::var("GNODE_TOPOLOGY_NAMESPACE").unwrap_or_else(|_| "geodineum".to_string())
+    })
+}
+
+/// The one XADD both tiers publish through. `stream_site` names the topology the
+/// stream belongs to; `entity` is the id the work is credited to WITHIN that
+/// topology. Keeping it in one builder is why the tiers cannot drift in the wire
+/// format — the lane split already taught that lesson once.
+fn observation_cmd(stream_site: &str, entity: &str, command: &str, elapsed_ms: u64, ok: bool) -> redis::Cmd {
     let mut cmd = redis::cmd("XADD");
-    cmd.arg(crate::config::build_health_stream_key(&ns))
+    cmd.arg(crate::config::build_health_stream_key(stream_site))
         .arg("MAXLEN").arg("~").arg(2000).arg("*")
         .arg("t").arg("rq")
-        .arg("si").arg(node)
+        .arg("si").arg(entity)
         .arg("cmd").arg(command)
         .arg("lat").arg(elapsed_ms)
         .arg("ok").arg(if ok { 1 } else { 0 })
         .arg("ts").arg(crate::utils::current_timestamp_ms());
-    Some(cmd)
+    cmd
+}
+
+/// One observation of this node's own command handling, or `None` when the
+/// sampler is off. Credited to the node, on the namespace's stream.
+pub fn node_observation_cmd(command: &str, elapsed_ms: u64, ok: bool) -> Option<redis::Cmd> {
+    if !observations_enabled() {
+        return None;
+    }
+    let node = crate::daemon::GNodeDaemon::node_id_for_lease();
+    Some(observation_cmd(topology_namespace(), &node, command, elapsed_ms, ok))
+}
+
+/// The same observation credited to the SERVICE the work was done for, rather
+/// than the node that served it.
+///
+/// A site's health stream carries its services' observations
+/// (`worker::tier_for`) and a site's own profile entity is registered under the
+/// site id (`tool_registration::derive_profile_entity`), so the stream and the
+/// entity come from one value — exactly as the node's both come from the
+/// namespace.
+///
+/// `None` rather than an XADD when the requester is not a measurable service: an
+/// empty id names no entity, and the namespace is not a site, so crediting it
+/// would file a service observation on the node's own stream where `tier_for`
+/// would read it back as a second, wrongly-named node.
+pub fn service_observation_cmd(service_id: &str, command: &str, elapsed_ms: u64, ok: bool) -> Option<redis::Cmd> {
+    if !observations_enabled() {
+        return None;
+    }
+    if service_id.is_empty() || service_id == topology_namespace() {
+        return None;
+    }
+    Some(observation_cmd(service_id, service_id, command, elapsed_ms, ok))
 }
 
 #[cfg(test)]
@@ -435,6 +471,45 @@ mod tests {
 
     fn feed(s: &mut Sampler, n: usize, ms: u64, ts: u64) {
         for _ in 0..n { s.observe(obs("st", "svc", "get", ms, ts)); }
+    }
+
+    fn packed(cmd: redis::Cmd) -> String {
+        String::from_utf8_lossy(&cmd.get_packed_command()).to_string()
+    }
+
+    #[test]
+    fn a_service_observation_names_the_site_as_both_stream_and_entity() {
+        // A site's health stream is the one discovery lists, and the site's own
+        // profile entity is registered under the site id, so an observation that
+        // takes both from one value lands on an entity that exists.
+        let wire = packed(service_observation_cmd("quimba_cafe", "template_fragment", 7, true).unwrap());
+        assert!(wire.contains("{quimba_cafe}:gnode:health"), "{wire}");
+        assert!(wire.contains("quimba_cafe"), "{wire}");
+        assert!(wire.contains("template_fragment"), "{wire}");
+    }
+
+    #[test]
+    fn the_namespace_is_not_a_service_and_an_unnamed_requester_is_not_either() {
+        // Crediting the namespace would file a service observation on the node's
+        // own stream, where tier_for would read it back as a second, wrongly
+        // named node. An empty id names no entity at all.
+        assert!(service_observation_cmd(topology_namespace(), "get", 1, true).is_none());
+        assert!(service_observation_cmd("", "get", 1, true).is_none());
+    }
+
+    #[test]
+    fn both_tiers_publish_the_same_wire_shape() {
+        // One builder, so a consumer parsing t=rq cannot need to know which tier
+        // produced the entry.
+        let svc = packed(service_observation_cmd("st", "get", 3, false).unwrap());
+        let node = packed(node_observation_cmd("get", 3, false).unwrap());
+        for field in ["XADD", "MAXLEN", "t", "rq", "si", "cmd", "lat", "ok", "ts"] {
+            assert!(svc.contains(field), "service entry missing {field}: {svc}");
+            assert!(node.contains(field), "node entry missing {field}: {node}");
+        }
+        // ok=false is carried as 0 by both.
+        assert!(svc.contains("\r\n0\r\n"), "{svc}");
+        assert!(node.contains("\r\n0\r\n"), "{node}");
     }
 
     #[test]
