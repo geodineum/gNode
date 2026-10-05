@@ -119,7 +119,7 @@ Typically invoked via: geodineum constellation <action>
 
 Actions:
   --init-master             Initialize this server as constellation master
-  --add-peer <name> <pubkey> <endpoint>
+  --add-peer <name> <pubkey> <endpoint>   endpoint "-" = roaming (admin laptop)
                             Add a worker node to the VPN
   --remove-peer <name>      Remove a worker node
   --show-config             Show WireGuard config for a new worker to use
@@ -403,6 +403,15 @@ add_peer() {
     local pubkey="$2"
     local endpoint="$3"
 
+    # A roaming peer (an admin laptop) has no stable endpoint: WireGuard learns
+    # its address from the first authenticated packet it sends. PersistentKeepalive
+    # stays on the line either way — the re-enrollment sed below ends its range on
+    # it, so a peer block without it would swallow the next peer's.
+    local roaming=false
+    case "$endpoint" in
+        ""|-|roaming) roaming=true; endpoint="roaming" ;;
+    esac
+
     # Idempotent re-enrollment (SB-8.84): a re-added peer KEEPS its IP, its
     # old [Peer] block is stripped instead of accumulating, and a rotated key
     # evicts the stale runtime peer. Without this, every re-run burned a new
@@ -429,7 +438,11 @@ add_peer() {
     echo ""
     echo -e "${BOLD}Adding Peer: ${name}${NC}"
     echo "  Public key: ${pubkey}"
-    echo "  Endpoint:   ${endpoint}"
+    if [[ "$roaming" == "true" ]]; then
+        echo "  Endpoint:   roaming — learned from this peer's first packet"
+    else
+        echo "  Endpoint:   ${endpoint}"
+    fi
     echo "  VPN IP:     ${peer_ip}/32"
     echo ""
 
@@ -438,15 +451,12 @@ add_peer() {
         return
     fi
 
-    cat >> "$WG_CONF" << PEEREOF
-
-# Peer: ${name} (added $(date -Iseconds))
-[Peer]
-PublicKey = ${pubkey}
-AllowedIPs = ${peer_ip}/32
-Endpoint = ${endpoint}
-PersistentKeepalive = 25
-PEEREOF
+    {
+        printf '\n# Peer: %s (added %s)\n[Peer]\n' "$name" "$(date -Iseconds)"
+        printf 'PublicKey = %s\nAllowedIPs = %s/32\n' "$pubkey" "$peer_ip"
+        [[ "$roaming" == "true" ]] || printf 'Endpoint = %s\n' "$endpoint"
+        printf 'PersistentKeepalive = 25\n'
+    } >> "$WG_CONF"
 
     cat > "${PEERS_DIR}/${name}.conf" << INFOEOF
 name=${name}
@@ -457,7 +467,10 @@ added=$(date -Iseconds)
 INFOEOF
 
     # Hot-reload WireGuard (no restart needed)
-    wg set "$WG_INTERFACE" peer "$pubkey" allowed-ips "${peer_ip}/32" endpoint "$endpoint" persistent-keepalive 25 2>/dev/null \
+    local wg_args=(set "$WG_INTERFACE" peer "$pubkey" allowed-ips "${peer_ip}/32")
+    [[ "$roaming" == "true" ]] || wg_args+=(endpoint "$endpoint")
+    wg_args+=(persistent-keepalive 25)
+    wg "${wg_args[@]}" 2>/dev/null \
         && log_success "Peer added and activated (hot-reload)" \
         || { systemctl restart "wg-quick@${WG_INTERFACE}" 2>/dev/null; log_success "Peer added (restarted interface)"; }
 
