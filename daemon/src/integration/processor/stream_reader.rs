@@ -42,7 +42,7 @@ pub type MultiStreamBatch = (
     Vec<(String, HashMap<String, String>)>,
     Vec<String>,
     Vec<String>,
-    Vec<HashMap<String, String>>,
+    Vec<(String, HashMap<String, String>)>,
 );
 
 /// Stream reader for unified streams
@@ -868,7 +868,7 @@ fn process_multi_stream_response(
                                         if debug_mode {
                                             debug!("Collected relayed service reply from {}: {}", stream_name, msg_id);
                                         }
-                                        relay_replies.push(fields);
+                                        relay_replies.push((msg_id.clone(), fields));
                                         continue;
                                     }
 

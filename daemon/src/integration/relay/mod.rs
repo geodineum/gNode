@@ -10,6 +10,7 @@ pub mod translator;
 pub mod policy;
 pub mod telemetry;
 pub mod reply;
+pub mod roundtrip;
 
 pub use router::{RelayDecision, resolve_relay_target};
 pub use translator::{TranslationResult, translate_for_relay, detect_format, convert_format};

@@ -183,16 +183,13 @@ pub async fn dispatch(
     // The work this estate actually serves arrives on this lane — every
     // template_fragment quimba_cafe renders — so a sampler fed only by the Ordered
     // lane measured nothing and the load axis stayed `unknown` for a node that was
-    // serving. Same builders as the Ordered lane, so the lane stays invisible in
-    // the measurement, and one elapsed so the two entities cannot disagree about
-    // the same work.
-    let elapsed_ms = started.elapsed().as_millis() as u64;
-    let ok = result.status != "error";
-    let both = [
-        crate::integration::sampler::node_observation_cmd(&command.command, elapsed_ms, ok),
-        crate::integration::sampler::service_observation_cmd(&site_id, &command.command, elapsed_ms, ok),
-    ];
-    for obs in both.into_iter().flatten() {
+    // serving. Same builder as the Ordered lane, so the lane stays invisible in the
+    // measurement.
+    if let Some(obs) = crate::integration::sampler::node_observation_cmd(
+        &command.command,
+        started.elapsed().as_millis() as u64,
+        result.status != "error",
+    ) {
         let _: redis::RedisResult<String> = obs.query_async(&mut conn).await;
     }
 

@@ -70,7 +70,8 @@ pub fn resolve_relay_target(
     // --- Mode 2: Explicit stream key (contains ":gnode:") ---
     if relay_target.contains(":gnode:") {
         // Treat as a direct stream key — extract site_id from the key
-        if let Some(site_id) = relay_target.split(":gnode:").next() {
+        let tagged = relay_target.split(":gnode:").next();
+        if let Some(site_id) = tagged.map(|t| crate::config::site_of_stream_key(t).unwrap_or(t)) {
             if site_id == current_site_id {
                 return RelayDecision::Local;
             }

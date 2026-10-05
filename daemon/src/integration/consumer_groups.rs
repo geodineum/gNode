@@ -969,8 +969,11 @@ pub fn create_unified_stream_worker(
                             // Idempotent (SET), so the other consumer group
                             // doing the same is a duplicate key write, not a
                             // duplicate delivery.
-                            for reply in &relay_replies {
+                            for (entry_id, reply) in &relay_replies {
                                 crate::integration::relay::deliver_service_reply(&mut conn, reply, debug_mode);
+                                crate::integration::relay::roundtrip::note_arrival(
+                                    &mut conn, crate::daemon::GNodeDaemon::get_topology_namespace(),
+                                    &stream_key, entry_id, reply, debug_mode);
                             }
 
                             let mut total_processed = 0;
@@ -1550,8 +1553,11 @@ pub fn create_environment_stream_worker_dynamic(
                                 // This is the loop that sees EVERY discovered
                                 // site's stream, so it is where a service's
                                 // reply is most reliably caught on its way home.
-                                for reply in &relay_replies {
+                                for (entry_id, reply) in &relay_replies {
                                     crate::integration::relay::deliver_service_reply(&mut conn, reply, debug_mode);
+                                    crate::integration::relay::roundtrip::note_arrival(
+                                        &mut conn, crate::daemon::GNodeDaemon::get_topology_namespace(),
+                                        current_unified_stream, entry_id, reply, debug_mode);
                                 }
 
                                 let mut stream_processed = 0;
@@ -1591,7 +1597,7 @@ pub fn create_environment_stream_worker_dynamic(
                                     }
 
                                     // Extract site_id from current stream for relay resolution
-                                    let stream_site_id = current_unified_stream.split(":gnode:").next().unwrap_or(&site_id_owned);
+                                    let stream_site_id = crate::config::site_of_stream_key(current_unified_stream).unwrap_or(&site_id_owned);
 
                                     for (_msg_id, cmd) in &relay_commands {
                                         let relay_target = match cmd.relay_target.as_ref() {
@@ -1694,8 +1700,11 @@ pub fn create_environment_stream_worker_dynamic(
                                                     .arg("*")
                                                     .arg(&field_pairs)
                                                     .query::<String>(&mut conn) {
-                                                    Ok(_msg_id) => {
+                                                    Ok(forward_entry_id) => {
                                                         info!("Relayed '{}' -> {} on {}", cmd.command, target_entity_id, target_stream_key);
+                                                        crate::integration::relay::roundtrip::note_departure(
+                                                            &mut conn, ns, &forwarded.id, &forward_entry_id,
+                                                            target_site_id, target_entity_id, &cmd.command);
 
                                                         // Track for response forwarding
                                                         relay_tracker.track(crate::integration::relay::PendingRelay {
@@ -1798,7 +1807,7 @@ pub fn create_environment_stream_worker_dynamic(
                                 let mut local_commands_final: Vec<(String, crate::integration::processor::OptimizedCommand)> = local_commands;
                                 for (msg_id, cmd) in &relay_commands {
                                     if let Some(relay_target) = cmd.relay_target.as_ref() {
-                                        let stream_site_id = current_unified_stream.split(":gnode:").next().unwrap_or(&site_id_owned);
+                                        let stream_site_id = crate::config::site_of_stream_key(current_unified_stream).unwrap_or(&site_id_owned);
                                         let decision = crate::integration::relay::resolve_relay_target(
                                             &mut conn, relay_target, stream_site_id,
                                             current_unified_stream, shared_discovery.as_ref(), false,
