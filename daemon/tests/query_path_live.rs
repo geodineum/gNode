@@ -49,7 +49,7 @@ async fn query_path_end_to_end() {
     let topo = Arc::new(RwLock::new(GeometricTopology::new(TOTAL_DIMENSIONS)));
 
     for (id, caps) in [
-        ("mailer", json!({"protocol": 0.1, "domain_primary": 0.9, "environment": 1.0, "network_zone": 1.0})),
+        ("mailer", json!({"protocol": 0.1, "domain_primary": 0.9, "environment": 1.0, "service_tier": 1.0})),
         ("cache", json!({"protocol": 0.1, "domain_primary": 0.25})),
     ] {
         let register = command("registerService", json!({"id": id, "capabilities": caps}));
@@ -67,7 +67,7 @@ async fn query_path_end_to_end() {
     assert_eq!(from_async["results"][0]["distance"], 0.0);
 
     // geometric_discover_range: every operator on an axis must hold.
-    let range = command("geometric_discover_range", json!({"requirements": {"8": {"gt": 0.1, "lt": 0.5}}}));
+    let range = command("geometric_discover_range", json!({"requirements": {"7": {"gt": 0.1, "lt": 0.5}}}));
     let range_async = ok(geometric::handle_geometric_discover_range_async(&range, &mut conn, &topo, SITE, false).await);
     let range_sync = ok(geometric::handle_geometric_discover_range(&range, &mut sync_conn, &topo, SITE, false));
     assert_eq!(range_async["services"], json!(["cache"]));
@@ -82,7 +82,7 @@ async fn query_path_end_to_end() {
 
     // geometric_dimensions: canonical axes, aliases apart.
     let dims = ok(geometric::handle_geometric_dimensions(&command("geometric_dimensions", json!({})), &mut sync_conn, &topo, SITE, false));
-    assert_eq!(dims["dimension_index"]["network_zone"], 22);
+    assert_eq!(dims["dimension_index"]["service_tier"], 22);
     assert_eq!(dims["aliases"]["env"], "environment");
 
     // topo_*: create on the sync lane (Ordered dispatch), link on register, query, guarded delete.
