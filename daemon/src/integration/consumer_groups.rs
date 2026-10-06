@@ -1639,6 +1639,7 @@ pub fn create_environment_stream_worker_dynamic(
                                                             "gNode", "daemon", &cmd.source_site, &cmd.source_node,
                                                             &site_id_owned, debug_mode
                                                         );
+                                                        crate::integration::relay::reply::key_relay_verdict(&mut conn, cmd, &err_response, stream_site_id);
                                                         continue; // Skip this relay, process next command
                                                     }
                                                 }
@@ -1780,6 +1781,7 @@ pub fn create_environment_stream_worker_dynamic(
                                                     "gNode", "daemon", &cmd.source_site, &cmd.source_node,
                                                     &site_id_owned, debug_mode
                                                 );
+                                                crate::integration::relay::reply::key_relay_verdict(&mut conn, cmd, &err_response, stream_site_id);
                                             },
                                             crate::integration::relay::RelayDecision::Error(ref e) => {
                                                 error!("Relay resolution error for '{}': {}", relay_target, e);
@@ -1797,6 +1799,7 @@ pub fn create_environment_stream_worker_dynamic(
                                                     "gNode", "daemon", &cmd.source_site, &cmd.source_node,
                                                     &site_id_owned, debug_mode
                                                 );
+                                                crate::integration::relay::reply::key_relay_verdict(&mut conn, cmd, &err_response, stream_site_id);
                                             }
                                         }
                                     }

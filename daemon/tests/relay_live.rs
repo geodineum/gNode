@@ -12,6 +12,8 @@ use std::collections::HashMap;
 use gnode::config::build_health_stream_key;
 use gnode::integration::relay::policy::{check_relay_policy, set_relay_policy, PolicyDecision};
 use gnode::integration::relay::roundtrip;
+use gnode::integration::relay::reply::key_relay_verdict;
+use gnode::integration::processor::resp3_protocol::OptimizedCommand;
 use redis::streams::StreamRangeReply;
 
 const NS: &str = "geodineum";
@@ -103,6 +105,7 @@ fn a_round_trip_is_credited_to_the_target_exactly_once() {
     let obs = health(&mut conn, "gschedule");
     assert_eq!(obs.len(), 1);
     assert_eq!(obs[0]["t"], "rq");
+    assert_eq!(obs[0]["by"], "gnode", "the arbitrator names itself as the producer");
     assert_eq!(obs[0]["si"], "gschedule", "no entity named: the site is the provider");
     assert_eq!(obs[0]["cmd"], "ping");
     assert_eq!(obs[0]["ok"], "1");
@@ -152,4 +155,27 @@ fn a_reply_nobody_sent_for_measures_nothing() {
     assert!(!roundtrip::note_arrival(&mut conn, NS, &unified("gschedule"), &reply, &fields(&[("ri", "never-sent")]), false));
     assert!(health(&mut conn, "gschedule").is_empty());
     assert!(!roundtrip::note_arrival(&mut conn, NS, &unified("gschedule"), &reply, &fields(&[("t", "r")]), false), "no correlation id at all");
+}
+
+#[test]
+#[ignore]
+fn a_refused_relay_is_visible_on_the_key_the_caller_polls() {
+    let Some(mut conn) = connect() else { return };
+    let cmd = OptimizedCommand::from_resp3_fields("1-0".into(), fields(&[
+        ("t", "c"), ("c", "start_workflow"), ("id", "req-refused-1"), ("ss", "gflow"), ("_rt", "gschedule"), ("p", "{}"),
+    ])).unwrap();
+    let verdict = gnode::daemon::Response {
+        id: "req-refused-1".into(),
+        status: "error".into(),
+        result: None,
+        error: Some("Relay denied by policy: gflow -> gschedule".into()),
+        timestamp: 0.0,
+        batch_id: None,
+        sequence: None,
+    };
+    assert!(key_relay_verdict(&mut conn, &cmd, &verdict, "gflow"));
+    let body: Option<String> = redis::cmd("GET").arg("{gflow}:res:req-refused-1").query(&mut conn).unwrap();
+    let body: serde_json::Value = serde_json::from_str(&body.expect("the verdict is on the origin's res key")).unwrap();
+    assert_eq!(body["status"], "error");
+    assert!(body["error"].as_str().unwrap().contains("denied"), "the caller reads the refusal, not a timeout");
 }

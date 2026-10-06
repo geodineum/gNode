@@ -393,30 +393,20 @@ impl LoadSamplerWorker {
         for key in reply.keys {
             for entry in key.ids {
                 ids.push(entry.id.clone());
-                let field = |k: &str| entry.get::<String>(k);
-                // `t=rq` carries an observed latency; anything else on this stream
-                // is not ours to interpret, and is acknowledged so it cannot pile
-                // up in our group the way 114 records did in the workers'.
-                if field("t").as_deref() != Some("rq") { continue; }
-                let Some(entity) = field("si").filter(|s| !s.is_empty()) else { continue };
-                let Some(lat) = field("lat").and_then(|v| v.parse::<f64>().ok()) else { continue };
-                if !lat.is_finite() || lat < 0.0 { continue }
-                let ts_ms = crate::integration::sampler::observed_at_ms(
-                    field("ts").as_deref(), &entry.id);
+                let get = |k: &str| entry.get::<String>(k);
+                // Acknowledged either way: a stream's backlog is history, and a
+                // record that is not the arbitrator's measurement is telemetry.
+                let Some(r) = crate::integration::sampler::record_from_fields(&get, &entry.id) else { continue };
                 let now_ms = crate::utils::current_timestamp_ms().max(0) as u64;
-                if !self.sampler.is_current(ts_ms, now_ms) {
-                    // Acknowledged above, deliberately not observed: a stream's
-                    // backlog is history, not the present.
-                    continue;
-                }
+                if !self.sampler.is_current(r.ts_ms, now_ms) { continue; }
                 self.sampler.observe(Observation {
                     tier: self.tier_for(&site),
                     site: site.clone(),
-                    entity,
-                    command: field("cmd").unwrap_or_else(|| "unknown".into()),
-                    elapsed_ms: lat as u64,
-                    ok: field("ok").map(|v| v != "0").unwrap_or(true),
-                    ts_ms,
+                    entity: r.entity,
+                    command: r.command,
+                    elapsed_ms: r.elapsed_ms,
+                    ok: r.ok,
+                    ts_ms: r.ts_ms,
                 });
                 taken += 1;
             }

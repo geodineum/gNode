@@ -72,6 +72,43 @@ const RELAYED_REPLY_TTL_SECS: usize = 300;
 ///
 /// No `request_id` (a fire-and-forget command) leaves `.id` alone: a stream
 /// entry id is a poor correlation key but it is better than an empty one.
+/// A command on a stream the daemon reads that belongs to someone else: bound
+/// elsewhere (`_rt`, the relay forwards it) or already relayed here for the
+/// service that owns this stream (`_rr`). The daemon answers neither, whether or
+/// not it has a handler — its reply would be the first on the origin's res key,
+/// which the service's ACL cannot overwrite.
+pub fn addressed_to_another_party(cmd: &crate::integration::processor::resp3_protocol::OptimizedCommand) -> bool {
+    cmd.relay_target.is_some() || cmd.relay_reply_to.is_some()
+}
+
+/// A relay that goes nowhere (refused, no such target, resolution error) is
+/// still a reply the origin is polling for, on the same key a success would use.
+/// Without it a refusal reads as a timeout.
+pub fn key_relay_verdict(
+    conn: &mut Connection,
+    cmd: &crate::integration::processor::resp3_protocol::OptimizedCommand,
+    response: &crate::daemon::Response,
+    fallback_site: &str,
+) -> bool {
+    let command = cmd.to_command();
+    let Some(plan) = crate::integration::response_key::plan(&command, fallback_site, response) else {
+        return false;
+    };
+    match redis::cmd("SET")
+        .arg(&plan.key).arg(&plan.json).arg("EX").arg(plan.ttl_secs)
+        .query::<()>(conn)
+    {
+        Ok(()) => {
+            info!("Relay verdict keyed at {} (status={})", plan.key, response.status);
+            true
+        }
+        Err(e) => {
+            warn!("Failed to key relay verdict at {}: {e}", plan.key);
+            false
+        }
+    }
+}
+
 pub fn carry_correlation_id(forwarded: &mut crate::integration::processor::resp3_protocol::OptimizedCommand) {
     if let Some(rid) = forwarded.request_id.clone().filter(|s| !s.is_empty()) {
         forwarded.id = rid;
@@ -319,6 +356,30 @@ fn forward_to_origin_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn party(extra: &[(&str, &str)]) -> crate::integration::processor::resp3_protocol::OptimizedCommand {
+        let mut f: HashMap<String, String> = HashMap::new();
+        f.insert("t".into(), "c".into());
+        f.insert("c".into(), "ping".into());
+        f.insert("id".into(), "req-1".into());
+        for (k, v) in extra { f.insert((*k).into(), (*v).into()); }
+        crate::integration::processor::resp3_protocol::OptimizedCommand::from_resp3_fields("1-0".into(), f).unwrap()
+    }
+
+    #[test]
+    fn a_plain_command_is_ours() {
+        assert!(!addressed_to_another_party(&party(&[])));
+    }
+
+    #[test]
+    fn a_command_bound_elsewhere_is_not_ours_even_with_a_handler() {
+        assert!(addressed_to_another_party(&party(&[("_rt", "geodine")])));
+    }
+
+    #[test]
+    fn a_command_relayed_here_for_the_owning_service_is_not_ours() {
+        assert!(addressed_to_another_party(&party(&[("_rr", "{gflow}:gnode:unified:production")])));
+    }
 
     fn fields(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()

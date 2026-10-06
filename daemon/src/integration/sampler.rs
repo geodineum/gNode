@@ -199,6 +199,35 @@ pub fn observed_at_ms(ts_field: Option<&str>, entry_id: &str) -> u64 {
     }
 }
 
+/// What a health-stream record says, if it is a measurement at all.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Record {
+    pub entity: String,
+    pub command: String,
+    pub elapsed_ms: u64,
+    pub ok: bool,
+    pub ts_ms: u64,
+}
+
+/// One authority per axis: only a record the arbitrator wrote (`by=gnode`) is a
+/// measurement of load. A provider's own report starts its clock after the read
+/// and never sees the queue, so it cannot inflate; counted beside the round trip
+/// it halves the signal. It stays on the stream as telemetry, unread here.
+pub fn record_from_fields(get: &dyn Fn(&str) -> Option<String>, entry_id: &str) -> Option<Record> {
+    if get("t").as_deref() != Some("rq") { return None; }
+    if get("by").as_deref() != Some("gnode") { return None; }
+    let entity = get("si").filter(|s| !s.is_empty())?;
+    let lat = get("lat").and_then(|v| v.parse::<f64>().ok())?;
+    if !lat.is_finite() || lat < 0.0 { return None; }
+    Some(Record {
+        entity,
+        command: get("cmd").unwrap_or_else(|| "unknown".into()),
+        elapsed_ms: lat as u64,
+        ok: get("ok").map(|v| v != "0").unwrap_or(true),
+        ts_ms: observed_at_ms(get("ts").as_deref(), entry_id),
+    })
+}
+
 /// Utilisation from inflation, via R = R0/(1-ρ). `None` when there is nothing to
 /// compare against.
 pub fn utilisation(p50: f64, baseline: f64) -> Option<f64> {
@@ -416,6 +445,7 @@ pub fn node_observation_cmd(command: &str, elapsed_ms: u64, ok: bool) -> Option<
     cmd.arg(crate::config::build_health_stream_key(&ns))
         .arg("MAXLEN").arg("~").arg(2000).arg("*")
         .arg("t").arg("rq")
+        .arg("by").arg("gnode")
         .arg("si").arg(node)
         .arg("cmd").arg(command)
         .arg("lat").arg(elapsed_ms)
@@ -434,6 +464,7 @@ pub fn provider_observation_cmd(site: &str, entity: &str, command: &str,
     cmd.arg(crate::config::build_health_stream_key(site))
         .arg("MAXLEN").arg("~").arg(2000).arg("*")
         .arg("t").arg("rq")
+        .arg("by").arg("gnode")
         .arg("si").arg(entity)
         .arg("cmd").arg(command)
         .arg("lat").arg(elapsed_ms)
@@ -445,6 +476,35 @@ pub fn provider_observation_cmd(site: &str, entity: &str, command: &str,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rec(pairs: &[(&str, &str)]) -> Option<Record> {
+        let map: std::collections::HashMap<String, String> =
+            pairs.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect();
+        record_from_fields(&|k| map.get(k).cloned(), "1791296391232-0")
+    }
+
+    #[test]
+    fn the_arbitrators_record_is_a_measurement() {
+        let r = rec(&[("t","rq"),("by","gnode"),("si","geodine"),("cmd","ping"),("lat","10"),("ok","1"),("ts","1791296391037")]).unwrap();
+        assert_eq!(r.entity, "geodine");
+        assert_eq!(r.elapsed_ms, 10);
+        assert_eq!(r.ts_ms, 1791296391037);
+    }
+
+    #[test]
+    fn a_providers_own_report_is_telemetry_not_a_measurement() {
+        assert!(rec(&[("t","rq"),("by","self"),("si","geodine"),("cmd","ping"),("lat","0.2"),("ok","1"),("ts","1791296386.9335")]).is_none());
+    }
+
+    #[test]
+    fn a_record_that_names_no_producer_is_not_a_measurement() {
+        assert!(rec(&[("t","rq"),("si","geodine"),("cmd","ping"),("lat","1"),("ok","1"),("ts","1791296391037")]).is_none());
+    }
+
+    #[test]
+    fn a_load_update_is_not_an_rq_record() {
+        assert!(rec(&[("t","lu"),("by","gnode"),("si","geodine"),("lat","1")]).is_none());
+    }
 
     fn obs(site: &str, entity: &str, cmd: &str, ms: u64, ts: u64) -> Observation {
         Observation { tier: Tier::Service, site: site.into(), entity: entity.into(),

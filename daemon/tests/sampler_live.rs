@@ -46,7 +46,7 @@ fn topo_key() -> String { format!("{{{}}}:gnode:services", SITE) }
 /// What relay telemetry publishes on flush.
 fn publish(conn: &mut redis::Connection, entity: &str, command: &str, lat_ms: u64, ts: i64) {
     let _: String = redis::cmd("XADD").arg(health_key()).arg("MAXLEN").arg("~").arg(1000).arg("*")
-        .arg("t").arg("rq").arg("si").arg(entity).arg("cmd").arg(command)
+        .arg("t").arg("rq").arg("by").arg("gnode").arg("si").arg(entity).arg("cmd").arg(command)
         .arg("lat").arg(lat_ms).arg("ok").arg(1).arg("ts").arg(ts)
         .query(conn).unwrap();
 }
@@ -63,15 +63,16 @@ fn drain(conn: &mut redis::Connection, sampler: &mut Sampler) -> usize {
         for entry in key.ids {
             let _: redis::RedisResult<i64> = redis::cmd("XACK")
                 .arg(health_key()).arg(GROUP).arg(&entry.id).query(conn);
-            if entry.get::<String>("t").as_deref() != Some("rq") { continue }
+            let get = |k: &str| entry.get::<String>(k);
+            let Some(r) = gnode::integration::sampler::record_from_fields(&get, &entry.id) else { continue };
             sampler.observe(Observation {
                 tier: Tier::Service,
                 site: SITE.into(),
-                entity: entry.get::<String>("si").unwrap(),
-                command: entry.get::<String>("cmd").unwrap_or_else(|| "unknown".into()),
-                elapsed_ms: entry.get::<String>("lat").unwrap().parse().unwrap(),
-                ok: true,
-                ts_ms: entry.get::<String>("ts").unwrap().parse().unwrap(),
+                entity: r.entity,
+                command: r.command,
+                elapsed_ms: r.elapsed_ms,
+                ok: r.ok,
+                ts_ms: r.ts_ms,
             });
             taken += 1;
         }
