@@ -10,11 +10,10 @@
 //   stream.rs      - stream_info, stream_group_info, stream_consumer_info, stream_pending
 //   config.rs      - config_get, config_set, config_list
 //   diagnostic.rs  - debug_info, memory_stats, thread_status, connection_status, etc.
-//   geometric.rs   - geometric_discover, geometric_discover_range, geometric_store_topology, etc.
+//   geometric.rs   - geometric_discover, geometric_discover_range
 //   service.rs     - registerService, deregisterService, discover_with_endpoints
 //   introspection.rs - service_describe (entity introspection with tier/health)
-//   topology_custom.rs    - custom_topology_discover, distance, knn, similarity
-//   topology_unified.rs   - topo_create, topo_register, topo_add_edge, etc.
+//   one_topology.rs       - register_service/geometric_discover by name, topology_edge_*
 //
 // CMS extension (requires --features cms; handler sources live in the
 // companion repo gNode-CMS, discovered via GNODE_EXT_CMS_PATH or sibling
@@ -37,8 +36,6 @@ pub mod diagnostic;
 pub mod geometric;
 pub mod service;
 pub mod introspection;
-pub mod topology_custom;
-pub mod topology_unified;
 pub mod direct_channel;
 pub mod relay_ops;
 /// The registration and discovery commands on the one topology (SPEC §4, §13.3).

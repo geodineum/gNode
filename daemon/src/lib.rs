@@ -48,11 +48,9 @@ pub mod node_config;
 pub mod worker;
 
 // Custom topology module for user-defined topologies with Q64.64 precision
-pub mod custom_topology;
 
 // Relational topology module for 3D geometric relationship encoding
 // Transforms graph problems into spatial problems with O(1) operations
-pub mod relational_topology;
 
 // Unified configuration module - consolidates GNodeSettings, NodeConfig, RoutingConfig
 // Supports hot reload via SIGHUP for applicable settings

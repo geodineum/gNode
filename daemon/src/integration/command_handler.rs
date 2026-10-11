@@ -56,8 +56,6 @@ impl CommandHandlerRegistry {
         super::handlers::geometric::register(&mut handlers, &mut async_handlers, &mut desc_vec);
         super::handlers::service::register(&mut handlers, &mut async_handlers, &mut desc_vec);
         super::handlers::introspection::register(&mut handlers, &mut async_handlers, &mut desc_vec);
-        super::handlers::topology_custom::register(&mut handlers, &mut async_handlers, &mut desc_vec);
-        super::handlers::topology_unified::register(&mut handlers, &mut async_handlers, &mut desc_vec);
         super::handlers::direct_channel::register(&mut handlers, &mut async_handlers, &mut desc_vec);
         super::handlers::relay_ops::register(&mut handlers, &mut async_handlers, &mut desc_vec);
         super::handlers::one_topology::register_commands(&mut handlers, &mut async_handlers, &mut desc_vec);

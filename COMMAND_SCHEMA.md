@@ -2,8 +2,8 @@
 
 Definitive reference for all daemon commands and ValKey Lua functions.
 
-**Base daemon**: 65 commands, 24 Lua libraries (224 functions)
-**With CMS extension** (default companion; opt out with `GEODINEUM_SKIP_CMS=true`): 84 commands, 25 Lua libraries (234 functions)
+**Base daemon**: 44 commands, 24 Lua libraries (222 functions)
+**With CMS extension** (default companion; opt out with `GEODINEUM_SKIP_CMS=true`): 63 commands, 25 Lua libraries (232 functions)
 
 > Counting basis — *commands* = one canonical command per row in Part 1
 > (the uppercase / camelCase / short forms are aliases, not separate
@@ -133,14 +133,12 @@ to see exactly which lane each command takes.
 
 ### Current Ordered commands
 
-These 11 commands are the only ones in the base catalog that opt into
+These 9 commands are the only ones in the base catalog that opt into
 `Lane::Ordered`. Each declares a justification comment at its
 descriptor's call site.
 
 | Command | Why Ordered |
 |---|---|
-| `topo_create` | Subsequent `topo_register` / `topo_add_edge` calls reference it. |
-| `topo_delete` | Destructive — pending reads must observe post-delete state. |
 | `channel_open` | Creates a stream resource subsequent inter-service sends depend on. |
 | `channel_close` | Destructive cleanup — pending sends must observe closure. |
 | `relay_policy_set` | Routing-policy change — pending relay decisions must observe new policy. |
@@ -191,7 +189,7 @@ Source: `daemon/src/integration/handlers/system.rs`
 
 ---
 
-### Geometric (6 commands)
+### Geometric (2 commands)
 
 Source: `daemon/src/integration/handlers/geometric.rs`
 
@@ -199,35 +197,6 @@ Source: `daemon/src/integration/handlers/geometric.rs`
 |---------|---------|------------|---------|-------------|
 | `geometric_discover` | `discover`, `DISCOVER`, `geo_disc` | `{capabilities: {axis: value}, limit?: int = 10, threshold?: float = 0}` — discovery axes only, values in [0, 1] | `{total_matches, results: [{service_id, distance}], topology_key, lookup}` | Ranks the site's services by Q64.64 distance over the named axes only; unnamed axes do not count. Nearest first, equal distances by `service_id`; `threshold` > 0 drops farther services. `lookup` is `voxel` only when every discovery axis is named and the query's own cell is occupied — the cell's members, not a global nearest set — otherwise `scan`. Unknown, storage-only or out-of-range axes are errors |
 | `geometric_discover_range` | `GEOMETRIC_DISCOVER_RANGE` | `{requirements: {"<axis index>": {eq\|neq\|gt\|gte\|lt\|lte: float}}}` | `{services: [service_id], count}` | Services whose stored point satisfies every operator on every named axis; ids sorted. Non-index keys and unknown operators are errors |
-| `geometric_store_topology` | `GEOMETRIC_STORE_TOPOLOGY` | `{data?: any}` | `{stored: false, deprecated: true, note}` | Retired no-op; register services individually |
-| `geometric_load_sequence` | `GEOMETRIC_LOAD_SEQUENCE` | `{group?: string}` (accepted, not used) | `[service_id]` in Z order | The site topology's load sequence |
-| `geometric_distance` | `GEOMETRIC_DISTANCE` | `{point1: [float], point2: [float]}` | `{distance, dimensions}` | Q64.64 Euclidean distance between two points of equal width |
-| `geometric_dimensions` | `GEOMETRIC_DIMENSIONS` | `{}` | `{tier, total_dimensions, discovery_dimensions, dimension_index: {axis: index}, aliases: {alias: axis}}` | The service-tier axes discovery matches against, and the alternative names it accepts for them; naming an axis twice in one query is an error |
-
----
-
-### Topology (13 commands)
-
-Source: `daemon/src/integration/handlers/topology_unified.rs`
-
-3-D (x, y, z) topologies. Both lanes build the same Lua call; replies are that
-function's JSON. A 3-D topology never writes the shared service snapshot.
-
-| Command | Aliases | Parameters | Returns | Description |
-|---------|---------|------------|---------|-------------|
-| `topo_create` | `TOPO_CREATE` | `{name: string, topology_key?: string, constraint_type?: "none"\|"z_monotonic"\|"bidirectional"\|"custom", topology_type?: string, description?: string, axis_semantics?: object}` | `GNODE_TOPO_CREATE` reply | Create a named topology; key defaults to `{site_id}:<name>` |
-| `topo_register` | `TOPO_REGISTER` | `{topology_key: string, entity_id: string, x?: float = 0.5, y?: float = 0.5, z?: float = 0.5, metadata?: object, edges_to?: [string], edge_metadata?: object}` | `{ok, eid, bk, zs, upd}`, plus `edges: {added, skipped: [{to, reason}]}` when `edges_to` is given | Register or move an entity; links to `edges_to` targets that satisfy Z-monotonicity |
-| `topo_deregister` | `TOPO_DEREGISTER` | `{topology_key: string, entity_id: string}` | `{ok, eid}` | Remove an entity and its edges |
-| `topo_add_edge` | `TOPO_ADD_EDGE` | `{topology_key: string, from_id: string, to_id: string, edge_metadata?: object}` | `{ok, f, t}` | Add a directed edge between two existing entities, stamped with their Z delta |
-| `topo_discover` | `TOPO_DISCOVER` | `{topology_key: string, x?: float, y?: float, z?: float, bucket_key?: string, include_data?: bool}` | `{bk, cnt, eids[, ents]}` | Entities in the voxel cell at (x, y, z) or at `bucket_key` |
-| `topo_z_order` | `TOPO_Z_ORDER` | `{topology_key: string, limit?: int, offset?: int, descending?: bool}` | `{ord, off, cnt, eids}` | Entity ids sorted by Z (topological order) |
-| `topo_z_range` | `TOPO_Z_RANGE` | `{topology_key: string, z_min?: float, z_max?: float, include_data?: bool, limit?: int}` | `{zr, cnt, eids[, ents]}` | Entities whose Z lies in the range; an omitted bound is open |
-| `topo_chain` | `TOPO_CHAIN` | `{topology_key: string, entity_id: string, direction?: "outgoing"\|"incoming", max_depth?: int = 100}` | `{ch, bd, md}` | Traverse the edge graph from a starting entity |
-| `topo_stats` | `TOPO_STATS` | `{topology_key: string}` | `GNODE_TOPO_STATS` reply | Topology statistics |
-| `topo_list` | `TOPO_LIST` | `{topology_type?: string}` | `GNODE_TOPO_LIST` reply | List the site's topologies |
-| `topo_delete` | `TOPO_DELETE` | `{topology_key: string, confirm: "CONFIRM"}` | `{ok, deleted_keys}` | Delete a topology; refused without `confirm: "CONFIRM"` on either lane |
-| `topo_get_entity` | `TOPO_GET_ENTITY` | `{topology_key: string, entity_id: string}` | `GNODE_TOPO_GET_ENTITY` reply | A single entity with its stored data and edges |
-| `topo_validate_edge` | `TOPO_VALIDATE_EDGE` | `{topology_key: string, from_id: string, to_id: string}` | `{valid, reason, from_z, to_z, z_delta}` | Check an edge against Z-monotonicity without creating it |
 
 ---
 
@@ -264,27 +233,6 @@ Source: `daemon/src/integration/handlers/introspection.rs`
 |---------|---------|------------|---------|-------------|
 | `service_describe` | `SERVICE_DESCRIBE` | `{service_id: string}` | `{service_id, capabilities, metadata, health, tier}` | Detailed service introspection with health/tier info |
 | `constellation_status` | `CONSTELLATION_STATUS` | `{}` | `{constellation, ts, nodes, services, tools, components_live}` | Constellation at a glance: nodes with liveness + resources (from the daemon heartbeat), which components run where, registered service intents, tool count. Agent-facing twin of `geodineum status` (same JSON shape) |
-
----
-
-### Custom Topology (4 commands)
-
-Source: `daemon/src/integration/handlers/topology_custom.rs`
-
-| Command | Aliases | Parameters | Returns | Description |
-|---------|---------|------------|---------|-------------|
-A custom topology is one JSON document its owner writes with `SET <topology_key>`
-(typically in its own namespace); these commands read it with `GET` and no daemon
-command writes it. Format:
-`{dimensions: int, capability_dimensions: {name: index}, query_types?: {name: "equality"|"minimum"|"maximum"|"range"|"informational"}, values?: {name: {value_name: float}}, services: {id: {id, point: [float], metadata?}}, metadata?, schema_version?}`.
-It is unrelated to the 3-D `topo_*` model.
-
-| Command | Aliases | Parameters | Returns | Description |
-|---------|---------|------------|---------|-------------|
-| `custom_topology_discover` | `CUSTOM_TOPOLOGY_DISCOVER` | `{topology_key: string, requirements: {name: value \| {min} \| {max} \| {min, max}}, max_results?: int = 10, include_metadata?: bool = true}` | `{total_matches, results: [{id, score, distance, point, metadata?}], precision, cluster_safe}` | Filters, then ranks. A bare value is exact within 0.001 (also on a range axis), `{min, max}` is closed, one bound is one-sided; values may be names from `values`. Score adds the value on minimum axes and 1 − value on maximum axes; order is score, then distance from the origin, then id. Unknown dimensions or values are errors |
-| `custom_topology_distance` | `CUSTOM_TOPOLOGY_DISTANCE` | `{topology_key?: string, point1: [float], point2: [float]}` | `{distance, dimensions, precision, cluster_safe}` | Q64.64 distance between two points; reads no stored data |
-| `custom_topology_knn` | `CUSTOM_TOPOLOGY_KNN` | `{topology_key: string, query_point: [float], k?: int = 5}` | `{k, results: [{id, score, distance, point, metadata}], precision, cluster_safe}` | Nearest first, equal distances by id; the query must have the document's dimension count |
-| `custom_topology_similarity` | `CUSTOM_TOPOLOGY_SIMILARITY` | `{topology_key: string, entity_id_1: string, entity_id_2: string}` | `{entity_id_1, entity_id_2, distance, similarity, precision, cluster_safe}` | similarity = 1 / (1 + distance) |
 
 ---
 
@@ -420,7 +368,7 @@ All functions use `FCALL <function_name> <numkeys> [keys...] [args...]`. The `se
 
 ---
 
-### gnode_topo — 38 functions
+### gnode_topo — 37 functions
 
 Stateless topology persistence. Daemon computes Q64.64 bucket keys and z_scores; Lua stores entities/edges/indexes.
 
@@ -446,7 +394,6 @@ Stateless topology persistence. Daemon computes Q64.64 bucket keys and z_scores;
 | `GNODE_TOPO_DELETE` | site_id | topology_key, "CONFIRM" | `{ok, deleted_keys}` | Delete topology (safety flag required) |
 | `GNODE_TOPO_EXISTS` | topology_key | — | `{exists: bool}` | Check topology existence |
 | `GNODE_TOPO_UPDATE_META` | site_id | topology_key, updates_json | `{ok}` | Update topology metadata |
-| `GNODE_TOPO_CHECK_STALENESS` | topology_key | staleness_threshold_s, deregister_threshold_s, current_ts | `{stale_entities, deregistered_count}` | Find/deregister stale entities |
 | `GNODE_TOPO_FIND_ENTITY_SITE` | — | entity_id, site_ids_json | `{site_id, topology_key}` or null | Find which site contains an entity |
 
 ---
@@ -535,7 +482,7 @@ Stream operations, consumer groups, service provisioning/deprovisioning, DTAP en
 
 ---
 
-### gnode_site — 14 functions
+### gnode_site — 13 functions
 
 Site registration, rate limiting, circuit breaking, environment management, tenant grouping.
 
@@ -554,7 +501,6 @@ Site registration, rate limiting, circuit breaking, environment management, tena
 | `GNODE_SERVICE_GET_ENVIRONMENT` | — | site_id | `{environment}` | Get active DTAP environment |
 | `GNODE_SERVICE_GET_ALL_STREAMS` | — | namespace | `{unified, health, broadcast}` | Get all streams by type |
 | `GNODE_TENANT_LIST_SITES` | — | owner_id | `{owner, sites, count}` | List sites for a tenant |
-| `GNODE_TENANT_DISCOVER` | — | owner_id, capabilities_json, limit | `{owner, results, sites_queried}` | Cross-site discovery for tenant |
 
 ---
 

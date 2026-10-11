@@ -24,7 +24,7 @@
 | Broadcast stream | stream | `{site_id}:gnode:broadcast` — one-to-many, environment-independent | config.rs, integration/processor/broadcast_reader.rs |
 | Field-alias resolver | method | `utils::get_field(map, keys) -> String` — resolves canonical alias lists | utils.rs (alias lists) |
 | Inter-service routing | command | Commands carrying `_rt` (relay target) are routed to the target site's unified stream; `_rr` overrides the reply-to stream. Resolution: explicit stream key → `site_id` direct → entity lookup. A JSON capability query in `_rt` is parsed and REFUSED with an error: `router.rs::resolve_capability_query` is not wired to the live query path, so the arbitrator cannot yet pick a provider by position. The source of a relay is the hash tag of the stream the command was read from, never the `ss` field | README.md, integration/relay/router.rs |
-| Lane execution | method | `Lane::Concurrent` (async-spawned, no ordering) vs `Lane::Ordered` (synchronous inline). 11 Ordered commands: `topo_create`, `topo_delete`, `channel_open`, `channel_close`, `relay_policy_set`, `relay_policy_remove`, `config_set`, `topology_edge_add`, `topology_edge_remove`, `topology_edge_list`, `topology_edge_validate` | COMMAND_SCHEMA.md, integration/handlers/types.rs |
+| Lane execution | method | `Lane::Concurrent` (async-spawned, no ordering) vs `Lane::Ordered` (synchronous inline). 9 Ordered commands: `channel_open`, `channel_close`, `relay_policy_set`, `relay_policy_remove`, `config_set`, `topology_edge_add`, `topology_edge_remove`, `topology_edge_list`, `topology_edge_validate` | COMMAND_SCHEMA.md, integration/handlers/types.rs |
 | Batch wrapper | command | `c=batch`, `p='{"commands":[{"id":...,"c":...,"p":{}}]}'` — groups commands for atomic-ish processing | COMMAND_SCHEMA.md |
 | Topology schema tiers | data | 4 canonical tiers (service, tool, constellation, galaxy) plus user-defined custom topologies with arbitrary dimensions. **Counts are not quoted here** — read the published schema (`FCALL_RO GNODE_SCHEMA_GET <tier>`); a number copied into prose drifts from the YAML silently. Only 3 tiers accept registrations: galaxy publishes a schema and refuses registration by design | daemon/config/*_schema.yaml, daemon/src/tool_registration.rs |
 | Tool affordances | data | Tool-tier entities carry `metadata.affordances` — a list of `scheme:target` pointers saying how to ask that component what it can do: `describe:<component>` (machine-readable command schemas), `cli:<repo>/geodeploy.yaml` (the manifest declaring its commands; `geodineum --help` renders them), `doc:<repo>/<path>` (the floor). Returned verbatim by `service_describe` under `metadata` | daemon/src/tool_registration.rs, config/ecosystem_tools.yaml |
@@ -146,10 +146,6 @@ compute_handler::ComputeRequest
                            { command, parameters, requested_at, timeout_ms, site_id }
 compute_handler::ComputeResponse
                            { status, result, error, error_code, computed_at, compute_time_ms, request_id }
-custom_topology::CustomTopology
-                           { dimensions, capability_dimensions: name→index, query_types, values,
-                             services: id→{id, point, metadata}, metadata, schema_version }
-                           the JSON document custom_topology_* read with GET; its owner writes it with SET
 ```
 
 ---

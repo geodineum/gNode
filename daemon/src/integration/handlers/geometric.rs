@@ -6,7 +6,7 @@
 // names; both lanes share one compute and differ only in connection type.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::pin::Pin;
@@ -16,7 +16,6 @@ use redis::aio::MultiplexedConnection as AsyncConnection;
 use serde::Deserialize;
 use log::debug;
 use serde_json::{Value, json};
-use crate::custom_topology::fixed_distance;
 use crate::daemon::Command;
 use crate::geometric_precision::{FixedPoint, FixedVector};
 use crate::GeometricTopology;
@@ -24,7 +23,7 @@ use crate::GeometricTopology;
 use super::types::{
     CommandResult, CommandHandlerFn, AsyncCommandHandlerFn, CommandDescriptor,
     parse_parameters, get_service_dimensions, DISCOVERY_DIMENSIONS, HASHED_DIMENSIONS,
-    SERVICE_DIMENSION_ALIASES, TOTAL_DIMENSIONS, default_group, Lane,
+    TOTAL_DIMENSIONS, Lane,
 };
 
 /// Register all geometric command handlers
@@ -36,10 +35,6 @@ pub fn register(
     // Sync handlers
     handlers.insert("geometric_discover".to_string(), handle_geometric_discover as CommandHandlerFn);
     handlers.insert("geometric_discover_range".to_string(), handle_geometric_discover_range as CommandHandlerFn);
-    handlers.insert("geometric_store_topology".to_string(), handle_geometric_store_topology as CommandHandlerFn);
-    handlers.insert("geometric_load_sequence".to_string(), handle_geometric_load_sequence as CommandHandlerFn);
-    handlers.insert("geometric_distance".to_string(), handle_geometric_distance as CommandHandlerFn);
-    handlers.insert("geometric_dimensions".to_string(), handle_geometric_dimensions as CommandHandlerFn);
 
     // Async handlers - Phase 2 hot-path
     async_handlers.insert("discover".to_string(), handle_geometric_discover_async as AsyncCommandHandlerFn);
@@ -48,14 +43,6 @@ pub fn register(
     async_handlers.insert("geo_disc".to_string(), handle_geometric_discover_async as AsyncCommandHandlerFn);
 
     // Async handlers - Phase 5 complete coverage
-    async_handlers.insert("geometric_store_topology".to_string(), handle_geometric_store_topology_async as AsyncCommandHandlerFn);
-    async_handlers.insert("GEOMETRIC_STORE_TOPOLOGY".to_string(), handle_geometric_store_topology_async as AsyncCommandHandlerFn);
-    async_handlers.insert("geometric_load_sequence".to_string(), handle_geometric_load_sequence_async as AsyncCommandHandlerFn);
-    async_handlers.insert("GEOMETRIC_LOAD_SEQUENCE".to_string(), handle_geometric_load_sequence_async as AsyncCommandHandlerFn);
-    async_handlers.insert("geometric_distance".to_string(), handle_geometric_distance_async as AsyncCommandHandlerFn);
-    async_handlers.insert("GEOMETRIC_DISTANCE".to_string(), handle_geometric_distance_async as AsyncCommandHandlerFn);
-    async_handlers.insert("geometric_dimensions".to_string(), handle_geometric_dimensions_async as AsyncCommandHandlerFn);
-    async_handlers.insert("GEOMETRIC_DIMENSIONS".to_string(), handle_geometric_dimensions_async as AsyncCommandHandlerFn);
     async_handlers.insert("geometric_discover_range".to_string(), handle_geometric_discover_range_async as AsyncCommandHandlerFn);
     async_handlers.insert("GEOMETRIC_DISCOVER_RANGE".to_string(), handle_geometric_discover_range_async as AsyncCommandHandlerFn);
 
@@ -128,91 +115,9 @@ pub fn register(
         lane: Lane::Concurrent,
     });
 
-    descriptors.push(CommandDescriptor {
-        name: "geometric_store_topology",
-        category: "geometric",
-        description: "Retired: accepted and ignored; services register individually with register_service",
-        params_schema: json!({
-            "type": "object",
-            "properties": {
-                "data": {"description": "Ignored"}
-            }
-        }),
-        returns_schema: json!({
-            "type": "object",
-            "properties": {
-                "stored": {"type": "boolean", "description": "Always false"},
-                "deprecated": {"type": "boolean"},
-                "note": {"type": "string"}
-            }
-        }),
-        example: r#"{"cmd":"geometric_store_topology","params":{"data":{}}}"#,
-        async_capable: true,
-        lane: Lane::Concurrent,
-    });
 
-    descriptors.push(CommandDescriptor {
-        name: "geometric_load_sequence",
-        category: "geometric",
-        description: "Service ids of the site's topology in z-order (the load sequence)",
-        params_schema: json!({
-            "type": "object",
-            "properties": {
-                "group": {"type": "string", "default": "default", "description": "Accepted; the sequence covers the whole site topology"}
-            }
-        }),
-        returns_schema: json!({
-            "type": "array",
-            "items": {"type": "string"}
-        }),
-        example: r#"{"cmd":"geometric_load_sequence","params":{}}"#,
-        async_capable: true,
-        lane: Lane::Concurrent,
-    });
 
-    descriptors.push(CommandDescriptor {
-        name: "geometric_distance",
-        category: "geometric",
-        description: "Q64.64 Euclidean distance between two coordinate vectors",
-        params_schema: json!({
-            "type": "object",
-            "properties": {
-                "point1": {"type": "array", "items": {"type": "number"}, "description": "First point"},
-                "point2": {"type": "array", "items": {"type": "number"}, "description": "Second point, same width"}
-            },
-            "required": ["point1", "point2"]
-        }),
-        returns_schema: json!({
-            "type": "object",
-            "properties": {
-                "distance": {"type": "number"},
-                "dimensions": {"type": "integer"}
-            }
-        }),
-        example: r#"{"cmd":"geometric_distance","params":{"point1":[0.8,0.2],"point2":[0.3,0.2]}}"#,
-        async_capable: true,
-        lane: Lane::Concurrent,
-    });
 
-    descriptors.push(CommandDescriptor {
-        name: "geometric_dimensions",
-        category: "geometric",
-        description: "The service-tier axes discovery matches against, by name and index",
-        params_schema: json!({"type": "object", "properties": {}}),
-        returns_schema: json!({
-            "type": "object",
-            "properties": {
-                "tier": {"type": "string"},
-                "total_dimensions": {"type": "integer"},
-                "discovery_dimensions": {"type": "integer"},
-                "dimension_index": {"type": "object", "description": "Axis name → index"},
-                "aliases": {"type": "object", "description": "Alternative name → axis name"}
-            }
-        }),
-        example: r#"{"cmd":"geometric_dimensions","params":{}}"#,
-        async_capable: true,
-        lane: Lane::Concurrent,
-    });
 }
 
 // =========================================================================
@@ -241,31 +146,8 @@ struct GeometricDiscoverRangeParams {
     requirements: HashMap<String, HashMap<String, f64>>,
 }
 
-/// Parameters for the geometric_store_topology command (retired — kept for the
-/// deprecation-no-op parse so legacy callers still validate against the old shape).
-#[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(serde::Serialize, Default))]
-#[allow(dead_code)]
-struct GeometricStoreTopologyParams {
-    data: Value,
-}
 
-/// Parameters for the geometric_load_sequence command
-#[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(serde::Serialize, Default))]
-struct GeometricLoadSequenceParams {
-    #[serde(default = "default_group")]
-    #[allow(dead_code)]
-    group: String,
-}
 
-/// Parameters for the geometric_distance command
-#[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(serde::Serialize, Default))]
-struct GeometricDistanceParams {
-    point1: Vec<f64>,
-    point2: Vec<f64>,
-}
 
 // =========================================================================
 // Discovery compute (shared by both lanes)
@@ -439,58 +321,6 @@ fn range_reply(reply: &str, reqs: &HashMap<String, HashMap<String, f64>>) -> Com
     }
 }
 
-fn distance_reply(params: &GeometricDistanceParams) -> CommandResult {
-    if params.point1.len() != params.point2.len() {
-        return CommandResult::error(format!(
-            "Points must have the same dimensions: {} vs {}",
-            params.point1.len(), params.point2.len()
-        ));
-    }
-    if params.point1.iter().chain(&params.point2).any(|v| !v.is_finite()) {
-        return CommandResult::error("Coordinates must be finite numbers");
-    }
-    CommandResult::success(json!({
-        "distance": fixed_distance(&params.point1, &params.point2),
-        "dimensions": params.point1.len()
-    }))
-}
-
-fn dimensions_reply() -> CommandResult {
-    let aliases: BTreeMap<&str, &str> = SERVICE_DIMENSION_ALIASES.iter().copied().collect();
-    let index: BTreeMap<&str, usize> = get_service_dimensions()
-        .iter()
-        .filter(|(name, _)| !aliases.contains_key(name.as_str()))
-        .map(|(n, i)| (n.as_str(), *i))
-        .collect();
-    CommandResult::success(json!({
-        "tier": "service",
-        "total_dimensions": TOTAL_DIMENSIONS,
-        "discovery_dimensions": DISCOVERY_DIMENSIONS,
-        "dimension_index": index,
-        "aliases": aliases,
-    }))
-}
-
-/// Extract the ordered entity-id list from a GNODE_TOPO_Z_ORDER response (`{eids:[...]}`).
-fn z_order_eids(json: &str) -> Vec<String> {
-    serde_json::from_str::<Value>(json).ok()
-        .and_then(|v| v.get("eids").and_then(|e| e.as_array()).map(|a|
-            a.iter().filter_map(|x| x.as_str().map(String::from)).collect()))
-        .unwrap_or_default()
-}
-
-fn retired_store_reply() -> CommandResult {
-    // RETIRED (S6d): bulk in-memory topology store is incompatible with the
-    // stateless (C) model — services register individually via
-    // GNODE_REGISTER_CAPABILITY_VECTOR. Kept as a deprecation no-op so legacy
-    // callers get a clear signal instead of silently mutating dead in-mem state.
-    CommandResult::success(json!({
-        "stored": false,
-        "deprecated": true,
-        "note": "geometric_store_topology is retired; register services individually (stateless (C) topology)"
-    }))
-}
-
 // =========================================================================
 // Sync handlers
 // =========================================================================
@@ -570,80 +400,6 @@ pub fn handle_geometric_discover_range(
     }
 }
 
-/// Handle 'geometric_store_topology' command
-pub fn handle_geometric_store_topology(
-    command: &Command,
-    _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    _site_id: &str,
-    debug_mode: bool
-) -> CommandResult {
-    if debug_mode {
-        debug!("Handling geometric_store_topology command: {}", command.id);
-    }
-    let _ = parse_parameters::<GeometricStoreTopologyParams>(command);
-    retired_store_reply()
-}
-
-/// Handle 'geometric_load_sequence' command
-pub fn handle_geometric_load_sequence(
-    command: &Command,
-    conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    site_id: &str,
-    debug_mode: bool
-) -> CommandResult {
-    if debug_mode {
-        debug!("Handling geometric_load_sequence command: {}", command.id);
-    }
-
-    let _params = match parse_parameters::<GeometricLoadSequenceParams>(command) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(e),
-    };
-
-    // STATELESS: load sequence = z-ordered (C) entities via FCALL (was in-memory).
-    let topology_key = GeometricTopology::get_services_topology_key(site_id);
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_TOPO_Z_ORDER").arg(1).arg(&topology_key)
-        .query(conn);
-    match result {
-        Ok(json) => CommandResult::success(z_order_eids(&json)),
-        Err(e) => CommandResult::error(format!("Load sequence FCALL failed: {:?}", e)),
-    }
-}
-
-/// Handle 'geometric_distance' command
-pub fn handle_geometric_distance(
-    command: &Command,
-    _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    _site_id: &str,
-    debug_mode: bool
-) -> CommandResult {
-    if debug_mode {
-        debug!("Handling geometric_distance command: {}", command.id);
-    }
-    match parse_parameters::<GeometricDistanceParams>(command) {
-        Ok(params) => distance_reply(&params),
-        Err(e) => CommandResult::error(e),
-    }
-}
-
-/// Handle 'geometric_dimensions' command
-pub fn handle_geometric_dimensions(
-    command: &Command,
-    _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    _site_id: &str,
-    debug_mode: bool
-) -> CommandResult {
-    if debug_mode {
-        debug!("Handling geometric_dimensions command: {}", command.id);
-    }
-    dimensions_reply()
-}
-
 // =========================================================================
 // Async handlers
 // =========================================================================
@@ -696,81 +452,6 @@ pub fn handle_geometric_discover_async<'a>(
     })
 }
 
-pub fn handle_geometric_store_topology_async<'a>(
-    command: &'a Command,
-    _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    _site_id: &'a str,
-    debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
-        if debug_mode {
-            debug!("Handling async geometric_store_topology command: {} (retired)", command.id);
-        }
-        retired_store_reply()
-    })
-}
-
-/// Async version of handle_geometric_load_sequence
-pub fn handle_geometric_load_sequence_async<'a>(
-    command: &'a Command,
-    conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    site_id: &'a str,
-    debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
-        if debug_mode {
-            debug!("Handling async geometric_load_sequence command: {}", command.id);
-        }
-        // STATELESS: load sequence = z-ordered (C) entities via FCALL (was in-memory).
-        let topology_key = GeometricTopology::get_services_topology_key(site_id);
-        let result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_Z_ORDER").arg(1).arg(&topology_key)
-            .query_async(conn)
-            .await;
-        match result {
-            Ok(json) => CommandResult::success(z_order_eids(&json)),
-            Err(e) => CommandResult::error(format!("Load sequence FCALL failed: {:?}", e)),
-        }
-    })
-}
-
-/// Async version of handle_geometric_distance
-pub fn handle_geometric_distance_async<'a>(
-    command: &'a Command,
-    _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    _site_id: &'a str,
-    debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
-        if debug_mode {
-            debug!("Handling async geometric_distance command: {}", command.id);
-        }
-        match serde_json::from_value::<GeometricDistanceParams>(command.parameters.clone()) {
-            Ok(params) => distance_reply(&params),
-            Err(e) => CommandResult::error(format!("Invalid parameters: {}", e)),
-        }
-    })
-}
-
-/// Async version of handle_geometric_dimensions
-pub fn handle_geometric_dimensions_async<'a>(
-    command: &'a Command,
-    _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    _site_id: &'a str,
-    debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
-        if debug_mode {
-            debug!("Handling async geometric_dimensions command: {}", command.id);
-        }
-        dimensions_reply()
-    })
-}
-
 /// Async version of handle_geometric_discover_range
 pub fn handle_geometric_discover_range_async<'a>(
     command: &'a Command,
@@ -809,7 +490,7 @@ pub fn handle_geometric_discover_range_async<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::super::types::assert_descriptor_fields;
+    use super::super::types::{assert_descriptor_fields, SERVICE_DIMENSION_ALIASES};
 
     fn descriptors() -> Vec<CommandDescriptor> {
         let (mut handlers, mut async_handlers, mut descriptors) = (HashMap::new(), HashMap::new(), Vec::new());
@@ -840,9 +521,6 @@ mod tests {
         let d = descriptors();
         assert_descriptor_fields::<GeometricDiscoverParams>(&d, "geometric_discover", true);
         assert_descriptor_fields::<GeometricDiscoverRangeParams>(&d, "geometric_discover_range", true);
-        assert_descriptor_fields::<GeometricStoreTopologyParams>(&d, "geometric_store_topology", true);
-        assert_descriptor_fields::<GeometricLoadSequenceParams>(&d, "geometric_load_sequence", true);
-        assert_descriptor_fields::<GeometricDistanceParams>(&d, "geometric_distance", true);
     }
 
     #[test]
@@ -918,12 +596,4 @@ mod tests {
         assert!(!rejected(json!({"0": {"gte": 0.1, "lte": 0.2}})));
     }
 
-    #[test]
-    fn dimensions_come_from_the_map_discovery_matches_against() {
-        let r = dimensions_reply().result.unwrap();
-        assert_eq!(r["dimension_index"]["current_load"], axis("current_load"));
-        assert_eq!(r["discovery_dimensions"], DISCOVERY_DIMENSIONS);
-        assert!(r["dimension_index"].get("load").is_none());
-        assert_eq!(r["aliases"]["load"], "current_load");
-    }
 }

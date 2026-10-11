@@ -480,79 +480,6 @@ pub fn read_group_messages(
     }
 }
 
-/// Delete a consumer from a consumer group
-///
-/// This function deletes a consumer from a consumer group,
-/// reassigning its pending messages to other consumers.
-///
-/// # Arguments
-///
-/// * `conn` - Redis connection
-/// * `stream_key` - Stream key
-/// * `group_name` - Consumer group name
-/// * `consumer_name` - Consumer name
-/// * `site_id` - Site identifier for namespacing
-/// * `debug_mode` - Whether debug mode is enabled
-///
-/// # Returns
-///
-/// * `IntegrationResult<usize>` - Number of pending messages reassigned or error
-pub fn delete_consumer(
-    conn: &mut Connection,
-    stream_key: &str,
-    group_name: &str,
-    consumer_name: &str,
-    site_id: &str,
-    debug_mode: bool
-) -> IntegrationResult<usize> {
-    // Try ValKey function first
-    let result = execute_function(
-        conn,
-        "GNODE_STREAM_DELCONSUMER",
-        &[stream_key],
-        &[
-            group_name,
-            consumer_name
-        ],
-        site_id,
-        debug_mode
-    );
-    
-    match result {
-        Ok(pending_str) => {
-            // Parse pending count
-            match pending_str.parse::<usize>() {
-                Ok(count) => Ok(count),
-                Err(_) => Ok(0) // Default to 0 if parsing fails
-            }
-        },
-        Err(e) => {
-            if debug_mode {
-                debug!("ValKey function failed to delete consumer: {}", e);
-            }
-            
-            // Direct Redis command
-            let result: RedisResult<i64> = redis::cmd("XGROUP")
-                .arg("DELCONSUMER")
-                .arg(stream_key)
-                .arg(group_name)
-                .arg(consumer_name)
-                .query(conn);
-            
-            match result {
-                Ok(pending) => Ok(pending as usize),
-                Err(direct_error) => {
-                    let error = consumer_group_error(
-                        format!("Failed to delete consumer with direct command: {}", direct_error)
-                    );
-                    log_error(&error, "deleting consumer");
-                    Err(error)
-                }
-            }
-        }
-    }
-}
-
 
 /// Ensure consumer group exists and has proper start position
 ///
@@ -1689,12 +1616,6 @@ pub fn create_environment_stream_worker_dynamic(
                                                     stream_site_id, target_site_id, &cmd.command,
                                                 );
 
-                                                // --- Phase 5E: Start distributed trace span ---
-                                                let trace_span_id = start_relay_trace_span(
-                                                    &mut conn, &cmd.id, &cmd.command,
-                                                    stream_site_id, target_site_id, debug_mode,
-                                                );
-
                                                 // Build forwarded command fields
                                                 let mut forwarded = cmd.clone();
                                                 forwarded.dest_site = target_site_id.clone();
@@ -1775,13 +1696,6 @@ pub fn create_environment_stream_worker_dynamic(
                                                 // --- Phase 5C: Complete telemetry ---
                                                 relay_metrics.translated = relay_translated;
                                                 relay_telemetry.record_complete(relay_metrics, relay_success);
-
-                                                // --- Phase 5E: Finish trace span ---
-                                                if let Some(ref span_id) = trace_span_id {
-                                                    finish_relay_trace_span(
-                                                        &mut conn, span_id, relay_success, debug_mode,
-                                                    );
-                                                }
 
                                                 // Send relay-accepted acknowledgment to source
                                                 let ack_response = crate::daemon::Response {
@@ -1997,7 +1911,7 @@ pub fn create_environment_stream_worker_dynamic(
                         state.last_empty_time = Instant::now();
                     }
 
-                    // Periodic staleness check: scan service topologies for stale/dead entities
+                    // Periodic housekeeping: relay tracker, telemetry flush, direct-channel expiry
                     if last_staleness_check.elapsed().as_millis() as u64 >= staleness_check_interval_ms {
                         last_staleness_check = Instant::now();
 
@@ -2027,53 +1941,6 @@ pub fn create_environment_stream_worker_dynamic(
                             );
                         }
 
-                        // Deduplicate site_ids from active streams to avoid checking the same topology twice
-                        let mut checked_sites: std::collections::HashSet<String> = std::collections::HashSet::new();
-                        for stream_key in &active_unified_streams {
-                            // Extract site_id from "{site_id}:gnode:unified:{env}" pattern
-                            if let Some(site_id) = stream_key.split(":gnode:").next() {
-                                if !site_id.is_empty() && checked_sites.insert(site_id.to_string()) {
-                                    let topology_key = crate::GeometricTopology::get_services_topology_key(site_id);
-                                    let now_s = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH)
-                                        .unwrap_or_default()
-                                        .as_secs();
-
-                                    let staleness_result: redis::RedisResult<String> = redis::cmd("FCALL")
-                                        .arg("GNODE_TOPO_CHECK_STALENESS")
-                                        .arg(1)
-                                        .arg(&topology_key)
-                                        .arg(60)    // staleness_threshold_s
-                                        .arg(300)   // deregister_threshold_s
-                                        .arg(now_s)
-                                        .query(&mut conn);
-
-                                    match staleness_result {
-                                        Ok(json_str) => {
-                                            if let Ok(result) = serde_json::from_str::<serde_json::Value>(&json_str) {
-                                                let stale = result.get("stale").and_then(|v| v.as_i64()).unwrap_or(0);
-                                                let deregistered = result.get("deregistered")
-                                                    .and_then(|v| v.as_array())
-                                                    .map(|a| a.len())
-                                                    .unwrap_or(0);
-                                                if stale > 0 || deregistered > 0 {
-                                                    warn!("Staleness check [{}]: {} stale, {} deregistered",
-                                                        site_id, stale, deregistered);
-                                                } else if debug_mode {
-                                                    let checked = result.get("checked").and_then(|v| v.as_i64()).unwrap_or(0);
-                                                    debug!("Staleness check [{}]: {} checked, all healthy", site_id, checked);
-                                                }
-                                            }
-                                        },
-                                        Err(e) => {
-                                            if debug_mode {
-                                                debug!("Staleness check skipped for {}: {}", site_id, e);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
                     }
 
                     // If no streams had data, minimal sleep to prevent tight spinning
@@ -2458,104 +2325,3 @@ pub fn acknowledge_messages(
 // =========================================================================
 // Relay tracing helpers (Phase 5E)
 // =========================================================================
-
-/// Start a W3C-compatible trace span for a relay operation.
-/// Uses FCALL GNODE_SPAN_START if available (pro tracing library).
-/// Returns the span_id on success, None if tracing is unavailable.
-fn start_relay_trace_span(
-    conn: &mut Connection,
-    command_id: &str,
-    command_name: &str,
-    source_site: &str,
-    target_site: &str,
-    debug_mode: bool,
-) -> Option<String> {
-    // Generate trace_id from command_id (deterministic for correlation)
-    let trace_id = format!("{:0>32}", &command_id.replace('-', ""));
-    let operation = format!("relay:{}", command_name);
-
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_SPAN_START")
-        .arg(1)
-        .arg(format!("{{{}}}:tracing", source_site))
-        .arg(&trace_id)
-        .arg("") // no parent span (root)
-        .arg(&operation)
-        .query(conn);
-
-    match result {
-        Ok(json_str) => {
-            match serde_json::from_str::<serde_json::Value>(&json_str) {
-                Ok(val) => {
-                    let span_id = val.get("span_id")
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string());
-
-                    // Annotate span with relay metadata
-                    if let Some(ref sid) = span_id {
-                        let _ = redis::cmd("FCALL")
-                            .arg("GNODE_SPAN_ANNOTATE")
-                            .arg(1)
-                            .arg(format!("{{{}}}:tracing", source_site))
-                            .arg(sid)
-                            .arg("relay.source")
-                            .arg(source_site)
-                            .query::<String>(conn);
-                        let _ = redis::cmd("FCALL")
-                            .arg("GNODE_SPAN_ANNOTATE")
-                            .arg(1)
-                            .arg(format!("{{{}}}:tracing", source_site))
-                            .arg(sid)
-                            .arg("relay.target")
-                            .arg(target_site)
-                            .query::<String>(conn);
-                    }
-
-                    if debug_mode {
-                        debug!("Trace span started: trace={} span={:?} op={}",
-                            trace_id, span_id, operation);
-                    }
-                    span_id
-                }
-                Err(_) => None,
-            }
-        }
-        Err(e) => {
-            let err_str = e.to_string();
-            if !err_str.contains("Function not found") && !err_str.contains("NOSCRIPT")
-                && debug_mode {
-                    debug!("GNODE_SPAN_START failed: {}", e);
-                }
-            None
-        }
-    }
-}
-
-/// Finish a trace span for a relay operation.
-fn finish_relay_trace_span(
-    conn: &mut Connection,
-    span_id: &str,
-    success: bool,
-    debug_mode: bool,
-) {
-    // Use a generic site key — span_id is globally unique
-    // The tracing library stores spans by span_id, not by site
-    let status = if success { "OK" } else { "ERROR" };
-
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_SPAN_FINISH")
-        .arg(1)
-        .arg("tracing") // generic key — span storage is keyed by span_id
-        .arg(span_id)
-        .arg(status)
-        .query(conn);
-
-    if let Err(e) = result {
-        let err_str = e.to_string();
-        if !err_str.contains("Function not found") && !err_str.contains("NOSCRIPT") && debug_mode {
-            debug!("GNODE_SPAN_FINISH failed for span {}: {}", span_id, e);
-        }
-    } else if debug_mode {
-        debug!("Trace span finished: span={} status={}", span_id, status);
-    }
-}

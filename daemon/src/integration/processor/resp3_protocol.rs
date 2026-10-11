@@ -1057,10 +1057,6 @@ fn parse_json(json_str: &str) -> Value {
 fn shorten_command_name(command: &str) -> String {
     match command {
         "geometric_discover" => "geo_disc".to_string(),
-        "geometric_store_topology" => "geo_store".to_string(),
-        "geometric_load_sequence" => "geo_seq".to_string(),
-        "geometric_distance" => "geo_dist".to_string(),
-        "geometric_dimensions" => "geo_dim".to_string(),
         "stream_info" => "str_info".to_string(),
         "stream_group_info" => "str_group".to_string(),
         "stream_consumer_info" => "str_cons".to_string(),
@@ -1075,10 +1071,6 @@ fn shorten_command_name(command: &str) -> String {
 fn expand_command_name(short: &str) -> String {
     match short {
         "geo_disc" => "geometric_discover".to_string(),
-        "geo_store" => "geometric_store_topology".to_string(),
-        "geo_seq" => "geometric_load_sequence".to_string(),
-        "geo_dist" => "geometric_distance".to_string(),
-        "geo_dim" => "geometric_dimensions".to_string(),
         "str_info" => "stream_info".to_string(),
         "str_group" => "stream_group_info".to_string(),
         "str_cons" => "stream_consumer_info".to_string(),

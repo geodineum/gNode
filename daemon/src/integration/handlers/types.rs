@@ -213,7 +213,7 @@ pub fn discovery_point(
 // YAML — see daemon/config/{service,tool,constellation}_schema.yaml.
 //
 // Custom topologies created via topo_create / gNode-TOPO have user-defined
-// dim counts and live in handlers/topology_custom.rs + custom_topology.rs.
+// dim counts; they are the named topologies of the one library (D16).
 
 /// Build a service-tier FixedVector from a capability name→value HashMap.
 /// Reads dim count + dim map from the service tier (TOTAL_DIMENSIONS = 23).
