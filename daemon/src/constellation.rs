@@ -17,6 +17,57 @@ pub const LIFECYCLE_ACTIVE: f64 = 0.25;
 pub fn one_topology_enabled() -> bool {
     std::env::var("GNODE_ONE_TOPOLOGY").map(|v| v == "on").unwrap_or(false)
 }
+
+/// The constellations this daemon serves (SPEC §10a): `GNODE_CONSTELLATIONS`, comma separated,
+/// else the topology namespace alone. The first is the default for anything not yet placed.
+pub fn served() -> Vec<Constellation> {
+    let default_ns = crate::daemon::GNodeDaemon::get_topology_namespace();
+    let raw = std::env::var("GNODE_CONSTELLATIONS").unwrap_or_default();
+    let mut names: Vec<String> = raw.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    if names.is_empty() {
+        names.push(default_ns.to_string());
+    }
+    names.into_iter().map(|n| Constellation::new(&n)).collect()
+}
+
+/// The constellation an entity (a site, a service) belongs to: the served constellation whose
+/// key holds it; a site named like a constellation is its own; otherwise the default. One owner
+/// per constellation (D2) makes the first hit the only hit.
+pub fn for_entity(conn: &mut redis::Connection, entity_id: &str) -> Constellation {
+    let served = served();
+    if let Some(c) = served.iter().find(|c| c.name == entity_id) {
+        return c.clone();
+    }
+    for c in &served {
+        let hit: redis::RedisResult<i64> = redis::cmd("HEXISTS").arg(format!("{}:entities", c.key())).arg(entity_id).query(conn);
+        if matches!(hit, Ok(1)) {
+            return c.clone();
+        }
+    }
+    served.into_iter().next().unwrap_or_else(|| Constellation::new("geodineum"))
+}
+
+pub async fn for_entity_async(conn: &mut redis::aio::MultiplexedConnection, entity_id: &str) -> Constellation {
+    let served = served();
+    if let Some(c) = served.iter().find(|c| c.name == entity_id) {
+        return c.clone();
+    }
+    for c in &served {
+        let hit: redis::RedisResult<i64> = redis::cmd("HEXISTS").arg(format!("{}:entities", c.key())).arg(entity_id).query_async(conn).await;
+        if matches!(hit, Ok(1)) {
+            return c.clone();
+        }
+    }
+    served.into_iter().next().unwrap_or_else(|| Constellation::new("geodineum"))
+}
+
+/// A registration may name its constellation; it must be one this daemon serves.
+pub fn named_or_for_site(conn: &mut redis::Connection, named: Option<&str>, site_id: &str) -> std::result::Result<Constellation, String> {
+    match named {
+        Some(n) => served().into_iter().find(|c| c.name == n).ok_or_else(|| format!("constellation {} is not served by this daemon", n)),
+        None => Ok(for_entity(conn, site_id)),
+    }
+}
 const HEALTH_SLOT: usize = 17;
 const LIFECYCLE_SLOT: usize = 18;
 

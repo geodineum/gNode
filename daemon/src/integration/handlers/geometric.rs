@@ -507,8 +507,7 @@ pub fn handle_geometric_discover(
         debug!("Handling geometric_discover command: {}", command.id);
     }
     if crate::constellation::one_topology_enabled() {
-        let c = crate::constellation::Constellation::new(crate::daemon::GNodeDaemon::get_topology_namespace());
-        return super::one_topology::discover(conn, &c, command.parameters.clone());
+        return super::one_topology::discover(conn, site_id, command.parameters.clone());
     }
     let params = match parse_parameters::<GeometricDiscoverParams>(command) {
         Ok(p) => p,
@@ -552,8 +551,7 @@ pub fn handle_geometric_discover_range(
         debug!("Handling geometric_discover_range command: {}", command.id);
     }
     if crate::constellation::one_topology_enabled() {
-        let c = crate::constellation::Constellation::new(crate::daemon::GNodeDaemon::get_topology_namespace());
-        return super::one_topology::discover(conn, &c, command.parameters.clone());
+        return super::one_topology::discover(conn, site_id, command.parameters.clone());
     }
     let params = match parse_parameters::<GeometricDiscoverRangeParams>(command) {
         Ok(p) => p,
@@ -663,8 +661,7 @@ pub fn handle_geometric_discover_async<'a>(
             debug!("Handling async geometric_discover command: {}", command.id);
         }
         if crate::constellation::one_topology_enabled() {
-            let c = crate::constellation::Constellation::new(crate::daemon::GNodeDaemon::get_topology_namespace());
-            return super::one_topology::discover_async(conn, &c, command.parameters.clone()).await;
+            return super::one_topology::discover_async(conn, site_id, command.parameters.clone()).await;
         }
         let params: GeometricDiscoverParams = match serde_json::from_value(command.parameters.clone()) {
             Ok(p) => p,
@@ -784,8 +781,7 @@ pub fn handle_geometric_discover_range_async<'a>(
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
         if crate::constellation::one_topology_enabled() {
-            let c = crate::constellation::Constellation::new(crate::daemon::GNodeDaemon::get_topology_namespace());
-            return super::one_topology::discover_async(conn, &c, command.parameters.clone()).await;
+            return super::one_topology::discover_async(conn, site_id, command.parameters.clone()).await;
         }
         if debug_mode {
             debug!("Handling async geometric_discover_range command: {}", command.id);

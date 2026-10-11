@@ -1601,7 +1601,7 @@ pub fn create_environment_stream_worker_dynamic(
                                     let stream_site_id = crate::config::site_of_stream_key(current_unified_stream).unwrap_or(&site_id_owned);
 
                                     let one_topology = crate::constellation::one_topology_enabled();
-                                    let constellation = crate::constellation::Constellation::new(crate::daemon::GNodeDaemon::get_topology_namespace());
+                                    let constellation = crate::constellation::for_entity(&mut conn, stream_site_id);
                                     for (msg_id, cmd) in &relay_commands {
                                         let relay_target = match cmd.relay_target.as_ref() {
                                             Some(t) => t,

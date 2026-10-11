@@ -880,10 +880,11 @@ impl GNodeDaemon {
                     match crate::topology_schema::TopologySchema::default_path(&service_path) {
                         Some(tpath) => match crate::topology_schema::TopologySchema::load(&tpath) {
                             Ok(ts) => if let Ok(mut conn) = self.client.get_connection() {
-                                let tk = format!("{{{}}}:gnode:constellation", self.topology_namespace);
-                                match ts.publish(&mut conn, &tk) {
-                                    Ok(()) => info!("Published topology schema {} for {} shapes at {}:schema:*", ts.version, ts.shape_keys().len(), tk),
-                                    Err(e) => warn!("Topology schema publish failed: {}", e),
+                                for c in crate::constellation::served() {
+                                    match c.publish_schema(&mut conn, &ts) {
+                                        Ok(()) => info!("Published topology schema {} for {} shapes at {}:schema:*", ts.version, ts.shape_keys().len(), c.key()),
+                                        Err(e) => warn!("Topology schema publish for {} failed: {}", c.name, e),
+                                    }
                                 }
                             },
                             Err(e) => error!("Topology schema {:?} does not compile: {}", tpath, e),
@@ -2041,7 +2042,7 @@ impl GNodeDaemon {
                             },
                             version: env!("CARGO_PKG_VERSION").to_string(),
                         };
-                        let constellations = crate::constellation_worker::ConstellationWorker::constellations_from_env(&self.topology_namespace);
+                        let constellations = crate::constellation::served();
                         info!("  ✓ Registered constellation worker for {:?}", constellations.iter().map(|c| c.name.clone()).collect::<Vec<_>>());
                         registry.register(crate::constellation_worker::ConstellationWorker::new(constellations, schema, facts));
                     }

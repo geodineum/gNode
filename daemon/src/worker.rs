@@ -538,11 +538,11 @@ impl DaemonWorker for LoadSamplerWorker {
             return TickResult::Error;
         };
         let one_topology = crate::constellation::one_topology_enabled();
-        let constellation = crate::constellation::Constellation::new(&self.topology_namespace);
+        let served = crate::constellation::served();
         // One writer of the axis. A node that does not hold the lease does not even
         // read: the group's position would then advance on a node that cannot write.
         let leased = if one_topology {
-            crate::integration::lease::hold_lease(&mut conn, &constellation.lease_key(), &self.node_id)
+            served.iter().all(|c| crate::integration::lease::hold_lease(&mut conn, &c.lease_key(), &self.node_id))
         } else {
             crate::integration::lease::hold_writer_lease(&mut conn, &self.node_id)
         };
@@ -571,13 +571,20 @@ impl DaemonWorker for LoadSamplerWorker {
 
         if one_topology && self.mode == SamplerMode::Write {
             let now_ms = crate::utils::current_timestamp_ms().max(0) as u64;
-            let services: Vec<String> = constellation.query(&mut conn, "3", &crate::constellation::Filters::default(), 0)
-                .unwrap_or_default().iter()
-                .filter(|r| r["sh"].as_str() != Some("3.1"))
-                .filter_map(|r| r["id"].as_str().map(str::to_string)).collect();
-            let counters = Self::ring_counters(&mut conn, &constellation, &services);
             let suggestions = self.sampler.suggestions().to_vec();
-            let done = Self::apply_one_topology(&mut conn, &constellation, &self.node_id, now_ms, &writes, &suggestions, &mut self.demand, &services, &counters);
+            let mut done = Vec::new();
+            for constellation in &served {
+                let services: Vec<String> = constellation.query(&mut conn, "3", &crate::constellation::Filters::default(), 0)
+                    .unwrap_or_default().iter()
+                    .filter(|r| r["sh"].as_str() != Some("3.1"))
+                    .filter_map(|r| r["id"].as_str().map(str::to_string)).collect();
+                // A write belongs to the constellation that holds the entity; each pass sees its own.
+                let mine: Vec<crate::integration::sampler::DerivedWrite> = writes.iter()
+                    .filter(|w| services.iter().any(|s| w.entity == *s || w.entity.starts_with(&format!("{}@", s))))
+                    .cloned().collect();
+                let counters = Self::ring_counters(&mut conn, constellation, &services);
+                done.extend(Self::apply_one_topology(&mut conn, constellation, &self.node_id, now_ms, &mine, &suggestions, &mut self.demand, &services, &counters));
+            }
             if !done.is_empty() {
                 info!("[load-sampler] {}", done.join(", "));
             }

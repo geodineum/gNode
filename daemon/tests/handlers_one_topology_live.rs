@@ -34,7 +34,7 @@ fn setup() -> Option<(redis::Client, Constellation)> {
 fn the_sync_lane_registers_discovers_and_deregisters_by_name() {
     let Some((client, c)) = setup() else { return };
     let mut conn = client.get_connection().unwrap();
-    let r = h::register(&mut conn, &c, json!({
+    let r = h::register(&mut conn, "nierto_com", json!({
         "id": "gflow", "shape": "daemon", "environment": "production",
         "axes": { "protocol": ["gnode_stream"], "domain": ["workflow"], "implementation_language": "rust", "contract_version": "v2" },
         "metadata": { "manifest": "gFlow/geodeploy.yaml" }, "on": "aesir-solutions", "capacity_weight": 2, "holds": ["infra"]
@@ -45,10 +45,10 @@ fn the_sync_lane_registers_discovers_and_deregisters_by_name() {
     assert_eq!(v["placement"], "gflow@aesir-solutions");
     assert_eq!(c.route(&mut conn, "gflow").unwrap().node, "aesir-solutions", "the placement joined the ring");
 
-    let r = h::register(&mut conn, &c, json!({ "id": "nierto_com", "shape": "site", "axes": { "protocol": ["http_rest"], "domain": ["presentation"] } }));
+    let r = h::register(&mut conn, "nierto_com", json!({ "id": "nierto_com", "shape": "site", "axes": { "protocol": ["http_rest"], "domain": ["presentation"] } }));
     assert_eq!(r.status, "ok", "{:?}", r.error);
 
-    let r = h::discover(&mut conn, &c, json!({ "layer": "daemon", "facets": { "implementation_language": "rust" }, "axes": { "contract_version": ["v2", "v5"] } }));
+    let r = h::discover(&mut conn, "nierto_com", json!({ "layer": "daemon", "facets": { "implementation_language": "rust" }, "axes": { "contract_version": ["v2", "v5"] } }));
     assert_eq!(r.status, "ok", "{:?}", r.error);
     let v = r.result.unwrap();
     assert_eq!(v["total_matches"], 1);
@@ -56,7 +56,7 @@ fn the_sync_lane_registers_discovers_and_deregisters_by_name() {
     assert_eq!(v["results"][0]["colour"]["domain"][0], "workflow", "colour rides in the answer");
     assert_eq!(v["results"][0]["metadata"]["manifest"], "gFlow/geodeploy.yaml");
     assert_eq!(v["lookup"], "index");
-    let r = h::discover(&mut conn, &c, json!({}));
+    let r = h::discover(&mut conn, "nierto_com", json!({}));
     assert_eq!(r.result.unwrap()["total_matches"], 2, "default layer 3 covers site and daemon");
 
     for bad in [
@@ -65,18 +65,18 @@ fn the_sync_lane_registers_discovers_and_deregisters_by_name() {
         json!({ "id": "x", "shape": "daemon", "axes": { "cpu_tier": "gpu" } }),
         json!({ "id": "", "shape": "daemon" }),
     ] {
-        let r = h::register(&mut conn, &c, bad.clone());
+        let r = h::register(&mut conn, "nierto_com", bad.clone());
         assert_eq!(r.status, "error", "{bad} was accepted");
     }
-    assert_eq!(h::discover(&mut conn, &c, json!({ "capabilities": { "x": 0.1 } })).status, "error");
+    assert_eq!(h::discover(&mut conn, "nierto_com", json!({ "capabilities": { "x": 0.1 } })).status, "error");
 
-    let r = h::deregister(&mut conn, &c, json!({ "service_id": "gflow" }));
+    let r = h::deregister(&mut conn, "nierto_com", json!({ "service_id": "gflow" }));
     assert_eq!(r.status, "ok", "{:?}", r.error);
     assert_eq!(r.result.unwrap()["status"], "deregistered");
     assert!(c.route(&mut conn, "gflow").is_err(), "the placement left with the service");
-    let r = h::deregister(&mut conn, &c, json!({ "id": "gflow" }));
+    let r = h::deregister(&mut conn, "nierto_com", json!({ "id": "gflow" }));
     assert_eq!(r.result.unwrap()["status"], "not_found");
-    assert_eq!(h::deregister(&mut conn, &c, json!({ "id": "gNode" })).status, "error");
+    assert_eq!(h::deregister(&mut conn, "nierto_com", json!({ "id": "gNode" })).status, "error");
     assert_eq!(c.verify(&mut conn).unwrap(), "OK");
     assert_eq!(c.query(&mut conn, "3", &Filters::default(), 0).unwrap().len(), 1);
 }
@@ -86,11 +86,11 @@ fn the_sync_lane_registers_discovers_and_deregisters_by_name() {
 async fn the_async_lane_runs_the_same_plan() {
     let Some((client, c)) = setup() else { return };
     let mut conn = client.get_multiplexed_async_connection().await.unwrap();
-    let r = h::register_async(&mut conn, &c, json!({ "id": "gschedule", "shape": "daemon", "axes": { "protocol": ["gnode_stream"], "domain": ["workflow"] }, "on": "aesir-solutions" })).await;
+    let r = h::register_async(&mut conn, "nierto_com", json!({ "id": "gschedule", "shape": "daemon", "axes": { "protocol": ["gnode_stream"], "domain": ["workflow"] }, "on": "aesir-solutions" })).await;
     assert_eq!(r.status, "ok", "{:?}", r.error);
-    let r = h::discover_async(&mut conn, &c, json!({ "facets": { "domain": "workflow" } })).await;
+    let r = h::discover_async(&mut conn, "nierto_com", json!({ "facets": { "domain": "workflow" } })).await;
     assert_eq!(r.result.unwrap()["results"][0]["service_id"], "gschedule");
-    let r = h::deregister_async(&mut conn, &c, json!({ "service_id": "gschedule" })).await;
+    let r = h::deregister_async(&mut conn, "nierto_com", json!({ "service_id": "gschedule" })).await;
     assert_eq!(r.result.unwrap()["status"], "deregistered");
     let mut sync = client.get_connection().unwrap();
     assert_eq!(c.verify(&mut sync).unwrap(), "OK");

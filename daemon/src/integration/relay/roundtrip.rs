@@ -164,7 +164,7 @@ pub fn note_arrival(
 
     // The reply closes the in-flight entry of the placement it was imposed on (P-k).
     if !departure.placement.is_empty() {
-        let c = crate::constellation::Constellation::new(topology_namespace);
+        let c = crate::constellation::for_entity(conn, &departure.target_site);
         if let Err(e) = c.arrive(conn, &departure.placement, correlation_id) {
             debug!("in-flight arrive for {} failed: {}", departure.placement, e);
         }

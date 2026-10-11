@@ -331,8 +331,7 @@ pub fn handle_register_service(
         debug!("[STATELESS] Handling registerService command: {}", command.id);
     }
     if crate::constellation::one_topology_enabled() {
-        let c = crate::constellation::Constellation::new(crate::daemon::GNodeDaemon::get_topology_namespace());
-        return super::one_topology::register(conn, &c, command.parameters.clone());
+        return super::one_topology::register(conn, site_id, command.parameters.clone());
     }
 
     // Parse parameters
@@ -417,8 +416,7 @@ pub fn handle_deregister_service(
         debug!("[STATELESS] Handling deregisterService command: {}", command.id);
     }
     if crate::constellation::one_topology_enabled() {
-        let c = crate::constellation::Constellation::new(crate::daemon::GNodeDaemon::get_topology_namespace());
-        return super::one_topology::deregister(conn, &c, command.parameters.clone());
+        return super::one_topology::deregister(conn, site_id, command.parameters.clone());
     }
 
     // Parse parameters
@@ -546,8 +544,7 @@ pub fn handle_register_service_async<'a>(
             debug!("[STATELESS] Handling async registerService command: {}", command.id);
         }
         if crate::constellation::one_topology_enabled() {
-            let c = crate::constellation::Constellation::new(crate::daemon::GNodeDaemon::get_topology_namespace());
-            return super::one_topology::register_async(conn, &c, command.parameters.clone()).await;
+            return super::one_topology::register_async(conn, site_id, command.parameters.clone()).await;
         }
 
         // Parse parameters
@@ -646,8 +643,7 @@ pub fn handle_deregister_service_async<'a>(
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
         if crate::constellation::one_topology_enabled() {
-            let c = crate::constellation::Constellation::new(crate::daemon::GNodeDaemon::get_topology_namespace());
-            return super::one_topology::deregister_async(conn, &c, command.parameters.clone()).await;
+            return super::one_topology::deregister_async(conn, site_id, command.parameters.clone()).await;
         }
         if debug_mode {
             debug!("[STATELESS] Handling async deregisterService command: {}", command.id);

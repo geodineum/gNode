@@ -64,6 +64,9 @@ pub struct RegisterParams {
     /// The legacy numeric form; refused by name when present.
     #[serde(default)]
     pub capabilities: Option<Value>,
+    /// The constellation to register in; must be served by this daemon. Default: the caller's.
+    #[serde(default)]
+    pub constellation: Option<String>,
 }
 
 fn default_shape() -> String { "app".to_string() }
@@ -168,9 +171,11 @@ fn register_reply(plan: &RegisterPlan, c: &Constellation) -> CommandResult {
     }))
 }
 
-pub fn register(conn: &mut redis::Connection, c: &Constellation, params: Value) -> CommandResult {
+pub fn register(conn: &mut redis::Connection, site_id: &str, params: Value) -> CommandResult {
     let Some(schema) = schema() else { return CommandResult::error("topology schema not loaded") };
     let p: RegisterParams = match serde_json::from_value(params) { Ok(p) => p, Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)) };
+    let c = match crate::constellation::named_or_for_site(conn, p.constellation.as_deref(), site_id) { Ok(c) => c, Err(e) => return CommandResult::error(e) };
+    let c = &c;
     let plan = match plan_register(schema, &p) { Ok(p) => p, Err(e) => return CommandResult::error(e) };
     for cmd in register_cmds(c, &plan) {
         if let Err(e) = cmd.query::<String>(conn) {
@@ -180,9 +185,14 @@ pub fn register(conn: &mut redis::Connection, c: &Constellation, params: Value) 
     register_reply(&plan, c)
 }
 
-pub async fn register_async(conn: &mut AsyncConnection, c: &Constellation, params: Value) -> CommandResult {
+pub async fn register_async(conn: &mut AsyncConnection, site_id: &str, params: Value) -> CommandResult {
     let Some(schema) = schema() else { return CommandResult::error("topology schema not loaded") };
     let p: RegisterParams = match serde_json::from_value(params) { Ok(p) => p, Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)) };
+    let c = match p.constellation.as_deref() {
+        Some(n) => match crate::constellation::served().into_iter().find(|c| c.name == n) { Some(c) => c, None => return CommandResult::error(format!("constellation {} is not served by this daemon", n)) },
+        None => crate::constellation::for_entity_async(conn, site_id).await,
+    };
+    let c = &c;
     let plan = match plan_register(schema, &p) { Ok(p) => p, Err(e) => return CommandResult::error(e) };
     for cmd in register_cmds(c, &plan) {
         if let Err(e) = cmd.query_async::<String>(conn).await {
@@ -206,17 +216,19 @@ fn deregister_reply(id: &str, r: redis::RedisResult<String>) -> CommandResult {
     }
 }
 
-pub fn deregister(conn: &mut redis::Connection, c: &Constellation, params: Value) -> CommandResult {
+pub fn deregister(conn: &mut redis::Connection, _site_id: &str, params: Value) -> CommandResult {
     let p: DeregisterParams = match serde_json::from_value(params) { Ok(p) => p, Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)) };
     if p.service_id.is_empty() { return CommandResult::error("Service ID cannot be empty"); }
     if p.service_id == "gNode" || p.service_id.starts_with("gNode@") { return CommandResult::error("Cannot deregister the gNode component itself"); }
+    let c = crate::constellation::for_entity(conn, &p.service_id);
     deregister_reply(&p.service_id, fcall(&c.key(), "GNODE_TOPO_DEREGISTER", &[&p.service_id]).query(conn))
 }
 
-pub async fn deregister_async(conn: &mut AsyncConnection, c: &Constellation, params: Value) -> CommandResult {
+pub async fn deregister_async(conn: &mut AsyncConnection, _site_id: &str, params: Value) -> CommandResult {
     let p: DeregisterParams = match serde_json::from_value(params) { Ok(p) => p, Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)) };
     if p.service_id.is_empty() { return CommandResult::error("Service ID cannot be empty"); }
     if p.service_id == "gNode" || p.service_id.starts_with("gNode@") { return CommandResult::error("Cannot deregister the gNode component itself"); }
+    let c = crate::constellation::for_entity_async(conn, &p.service_id).await;
     deregister_reply(&p.service_id, fcall(&c.key(), "GNODE_TOPO_DEREGISTER", &[&p.service_id]).query_async(conn).await)
 }
 
@@ -289,8 +301,9 @@ fn discover_reply(records: Vec<Value>, layer: &str, c: &Constellation) -> Comman
     CommandResult::success(json!({ "total_matches": results.len(), "results": results, "layer": layer, "topology_key": c.key(), "lookup": "index" }))
 }
 
-pub fn discover(conn: &mut redis::Connection, c: &Constellation, params: Value) -> CommandResult {
+pub fn discover(conn: &mut redis::Connection, site_id: &str, params: Value) -> CommandResult {
     let Some(schema) = schema() else { return CommandResult::error("topology schema not loaded") };
+    let c = &crate::constellation::for_entity(conn, site_id);
     let p: DiscoverParams = match serde_json::from_value(params) { Ok(p) => p, Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)) };
     let (layer, f) = match plan_discover(schema, &p) { Ok(x) => x, Err(e) => return CommandResult::error(e) };
     match c.query(conn, &layer, &f, p.limit) {
@@ -299,8 +312,9 @@ pub fn discover(conn: &mut redis::Connection, c: &Constellation, params: Value) 
     }
 }
 
-pub async fn discover_async(conn: &mut AsyncConnection, c: &Constellation, params: Value) -> CommandResult {
+pub async fn discover_async(conn: &mut AsyncConnection, site_id: &str, params: Value) -> CommandResult {
     let Some(schema) = schema() else { return CommandResult::error("topology schema not loaded") };
+    let c = &crate::constellation::for_entity_async(conn, site_id).await;
     let p: DiscoverParams = match serde_json::from_value(params) { Ok(p) => p, Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)) };
     let (layer, f) = match plan_discover(schema, &p) { Ok(x) => x, Err(e) => return CommandResult::error(e) };
     let (lo, hi) = layer_interval(&layer).unwrap();
