@@ -41,31 +41,38 @@ pub const LEASE_TTL_SECS: usize = RENEW_INTERVAL_SECS * 3;
 /// `true` means this node owns shared writes right now. A node that loses the lease
 /// must stop writing immediately, so callers ask every tick rather than caching.
 pub fn hold_writer_lease(conn: &mut Connection, node_id: &str) -> bool {
+    hold_lease(conn, WRITER_LEASE_KEY, node_id)
+}
+
+/// Take or renew the lease at `key`. One lease per constellation under the one
+/// topology (`{c}:gnode:cluster:writer`, SPEC §10a); the legacy global key above
+/// stays until WP6.
+pub fn hold_lease(conn: &mut Connection, key: &str, node_id: &str) -> bool {
     // NX: nobody holds it. This is also the path taken after a holder dies and its
     // key expires.
     let taken: redis::RedisResult<Option<String>> = redis::cmd("SET")
-        .arg(WRITER_LEASE_KEY).arg(node_id).arg("NX").arg("EX").arg(LEASE_TTL_SECS)
+        .arg(key).arg(node_id).arg("NX").arg("EX").arg(LEASE_TTL_SECS)
         .query(conn);
     if matches!(taken, Ok(Some(_))) {
         // Taking is news; renewing is not. If this line appears on every tick, the
         // TTL is shorter than the renew interval.
-        info!("Took the shared-writer lease ({} for {}s)", WRITER_LEASE_KEY, LEASE_TTL_SECS);
+        info!("Took the writer lease ({} for {}s)", key, LEASE_TTL_SECS);
         return true;
     }
 
-    match lease_holder(conn) {
+    match lease_holder_at(conn, key) {
         Some(holder) if holder == node_id => {
             // XX so a lease that expired between the GET and here is not silently
             // re-taken: losing it must read as losing it.
             let renewed: redis::RedisResult<Option<String>> = redis::cmd("SET")
-                .arg(WRITER_LEASE_KEY).arg(node_id).arg("XX").arg("EX").arg(LEASE_TTL_SECS)
+                .arg(key).arg(node_id).arg("XX").arg("EX").arg(LEASE_TTL_SECS)
                 .query(conn);
             let ok = matches!(renewed, Ok(Some(_)));
-            debug!("Renewed the shared-writer lease: {}", ok);
+            debug!("Renewed the writer lease {}: {}", key, ok);
             ok
         }
         Some(holder) => {
-            debug!("Shared-writer lease is held by {}; not writing shared state", holder);
+            debug!("Writer lease {} is held by {}; not writing", key, holder);
             false
         }
         None => false,
@@ -74,16 +81,24 @@ pub fn hold_writer_lease(conn: &mut Connection, node_id: &str) -> bool {
 
 /// Who holds the lease, if anyone. Read-only: for a status line or an audit.
 pub fn lease_holder(conn: &mut Connection) -> Option<String> {
-    redis::cmd("GET").arg(WRITER_LEASE_KEY).query::<Option<String>>(conn).ok().flatten()
+    lease_holder_at(conn, WRITER_LEASE_KEY)
+}
+
+pub fn lease_holder_at(conn: &mut Connection, key: &str) -> Option<String> {
+    redis::cmd("GET").arg(key).query::<Option<String>>(conn).ok().flatten()
+}
+
+pub fn release_lease(conn: &mut Connection, key: &str, node_id: &str) {
+    if lease_holder_at(conn, key).as_deref() == Some(node_id) {
+        let _: redis::RedisResult<i64> = redis::cmd("DEL").arg(key).query(conn);
+        debug!("Released the writer lease {}", key);
+    }
 }
 
 /// Give the lease up on a clean shutdown, so the other node takes over in seconds
 /// rather than waiting out the TTL. Only ever releases our own.
 pub fn release_writer_lease(conn: &mut Connection, node_id: &str) {
-    if lease_holder(conn).as_deref() == Some(node_id) {
-        let _: redis::RedisResult<i64> = redis::cmd("DEL").arg(WRITER_LEASE_KEY).query(conn);
-        debug!("Released the shared-writer lease");
-    }
+    release_lease(conn, WRITER_LEASE_KEY, node_id)
 }
 
 #[cfg(test)]

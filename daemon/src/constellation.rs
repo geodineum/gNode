@@ -419,6 +419,7 @@ pub fn declare_gnode_component() -> Declared {
         .word("systemd_managed", "yes")
         .word("native_format", "resp3")
         .word("contract_stability", "stable")
+        .meta(serde_json::json!({ "heartbeat": "gnode-daemon" }))
 }
 
 pub fn declare_gnode_placement(node_id: &str, version: &str) -> (Placement, Declared) {

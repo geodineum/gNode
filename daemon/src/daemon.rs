@@ -2023,6 +2023,33 @@ impl GNodeDaemon {
             registry.register(sampler_worker);
             info!("  ✓ Registered load sampler worker (mode: {:?})", sampler_mode);
 
+            // The one-topology constellation tick (SPEC §5): self-declaration, placements from
+            // heartbeats, health from placements, one lease per constellation. Opt-in on this
+            // branch (GNODE_ONE_TOPOLOGY=on) until WP3e makes it the only path.
+            if std::env::var("GNODE_ONE_TOPOLOGY").map(|v| v == "on").unwrap_or(false) {
+                match crate::tool_registration::find_schema_path(None)
+                    .and_then(|sp| crate::topology_schema::TopologySchema::default_path(&sp))
+                    .map(|tp| crate::topology_schema::TopologySchema::load(&tp))
+                {
+                    Some(Ok(schema)) => {
+                        let facts = crate::constellation_worker::SelfFacts {
+                            node_id: self.node_id.clone(),
+                            role: if self.is_master { "master".into() } else { "full_node".into() },
+                            specialization: match self.node_type.to_string().as_str() {
+                                t @ ("general" | "inference" | "storage" | "compute" | "content") => t.to_string(),
+                                _ => "general".to_string(),
+                            },
+                            version: env!("CARGO_PKG_VERSION").to_string(),
+                        };
+                        let constellations = crate::constellation_worker::ConstellationWorker::constellations_from_env(&self.topology_namespace);
+                        info!("  ✓ Registered constellation worker for {:?}", constellations.iter().map(|c| c.name.clone()).collect::<Vec<_>>());
+                        registry.register(crate::constellation_worker::ConstellationWorker::new(constellations, schema, facts));
+                    }
+                    Some(Err(e)) => error!("topology_schema.yaml does not compile; constellation worker not started: {}", e),
+                    None => warn!("No topology_schema.yaml found; constellation worker not started"),
+                }
+            }
+
             // Register discovery refresh worker
             let discovery_worker = crate::worker::DiscoveryRefreshWorker::new(
                 Arc::clone(&self.stream_discovery),
