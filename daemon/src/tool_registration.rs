@@ -113,6 +113,9 @@ pub struct ServiceMetadata {
     /// Schema keys for schema↔topology cross-reference.
     /// Each entry is "{component}:{contract_name}" matching ValKey schema keys.
     pub schema_keys: Option<Vec<String>>,
+    /// The component name in its heartbeat key when it differs from the id (one topology, K2).
+    #[serde(default)]
+    pub heartbeat: Option<String>,
     /// How to ask this component what it can do.
     ///
     /// The tool tier catalogues what a component IS — language, build type,
@@ -1078,6 +1081,7 @@ pub fn derive_profile_entity(
             tier: Some("SERVICE".to_string()),
             schema_keys: None,
             affordances: None,
+            heartbeat: None,
         }),
         capabilities: caps,
         depends_on: Vec::new(),
@@ -1151,6 +1155,7 @@ fn run_service_profile(args: &RegisterToolsArgs) -> Result<()> {
             tier: Some("SERVICE".to_string()),
             schema_keys: None,
             affordances: None,
+            heartbeat: None,
         }),
         capabilities: caps,
         depends_on: Vec::new(),
@@ -1225,6 +1230,27 @@ fn run_tool_tier(args: &RegisterToolsArgs) -> Result<()> {
             });
             info!("  {} → x={:.2} y={:.2} z={:.2}", comp.id, px, py, pz);
         }
+    }
+
+    // One topology (K2): components register by name as shape 2 in the served constellation;
+    // the pyramid and the tool-tier vector are not needed.
+    if crate::constellation::one_topology_enabled() {
+        let params: Vec<serde_json::Value> = components.iter().map(crate::integration::handlers::one_topology::component_params).collect();
+        if args.dry_run {
+            for p in &params { info!("  [DRY-RUN] {} → shape 2 {}", p["id"], p["axes"]); }
+            info!("Dry run complete. {} components would register on the one topology.", params.len());
+            return Ok(());
+        }
+        let client = redis::Client::open(args.redis_url.as_str()).map_err(GeometricError::Redis)?;
+        let mut conn = client.get_connection().map_err(GeometricError::Redis)?;
+        let (mut ok, mut err) = (0usize, 0usize);
+        for p in params {
+            let id = p["id"].as_str().unwrap_or("").to_string();
+            let r = crate::integration::handlers::one_topology::register(&mut conn, &id, p);
+            if r.status == "ok" { ok += 1 } else { err += 1; warn!("component {} refused: {:?}", id, r.error) }
+        }
+        info!("One-topology component registration: {} registered, {} refused", ok, err);
+        return Ok(());
     }
 
     // 5. Translate capabilities to coordinates
@@ -1573,6 +1599,7 @@ mod affordance_tests {
             tier: None,
             schema_keys: None,
             affordances,
+            heartbeat: None,
         })
     }
 
@@ -1625,6 +1652,7 @@ mod affordance_tests {
             tier: None,
             schema_keys: Some(vec!["gnode:command_schema".into()]),
             affordances: Some(vec!["doc:CONTRACT.md".into()]),
+            heartbeat: None,
         }));
         assert_eq!(m["schema_keys"].as_array().unwrap().len(), 1);
         assert_eq!(m["affordances"].as_array().unwrap().len(), 1);

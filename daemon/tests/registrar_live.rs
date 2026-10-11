@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use gnode::constellation::{encode, Constellation, Declared, Filters};
+use gnode::constellation::{NodeHardware, encode, Constellation, Declared, Filters};
 use gnode::constellation_worker::{ConstellationWorker, SelfFacts};
 use gnode::integration::lease::{hold_lease, release_lease};
 use gnode::topology_schema::TopologySchema;
@@ -27,7 +27,7 @@ fn connect() -> Option<(redis::Connection, Constellation, TopologySchema)> {
 }
 
 fn facts(node: &str) -> SelfFacts {
-    SelfFacts { node_id: node.into(), role: "master".into(), specialization: "general".into(), version: "0.1.1".into() }
+    SelfFacts { node_id: node.into(), hardware: NodeHardware { is_master: true, node_type: "general".into(), cores: 8, max_memory_mb: 64_083, ..Default::default() }, version: "0.1.1".into() }
 }
 
 fn heartbeat(conn: &mut redis::Connection, c: &Constellation, env: &str, comp: &str, node: &str, ts: u64) {

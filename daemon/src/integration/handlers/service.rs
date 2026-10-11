@@ -492,15 +492,22 @@ pub fn handle_discover_with_endpoints(
         Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
     };
 
-    let topology_key = GeometricTopology::get_services_topology_key(site_id);
-    let service_ids = match redis::cmd("FCALL")
-        .arg("GNODE_TOPO_GET_ENTITIES").arg(1).arg(&topology_key).arg("*")
-        .query::<String>(conn)
-        .map_err(|e| format!("Discovery FCALL failed: {:?}", e))
-        .and_then(|j| filter_entities_by_capabilities(&j, &params.capabilities, params.limit))
-    {
-        Ok(ids) => ids,
-        Err(e) => return CommandResult::error(e),
+    let service_ids = if crate::constellation::one_topology_enabled() {
+        match super::one_topology::discover_ids(conn, site_id, &command.parameters) {
+            Ok(ids) => ids,
+            Err(e) => return CommandResult::error(e),
+        }
+    } else {
+        let topology_key = GeometricTopology::get_services_topology_key(site_id);
+        match redis::cmd("FCALL")
+            .arg("GNODE_TOPO_GET_ENTITIES").arg(1).arg(&topology_key).arg("*")
+            .query::<String>(conn)
+            .map_err(|e| format!("Discovery FCALL failed: {:?}", e))
+            .and_then(|j| filter_entities_by_capabilities(&j, &params.capabilities, params.limit))
+        {
+            Ok(ids) => ids,
+            Err(e) => return CommandResult::error(e),
+        }
     };
 
     let endpoint_registry = params.endpoint_registry
@@ -740,17 +747,24 @@ pub fn handle_discover_with_endpoints_async<'a>(
             Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
         };
 
-        let topology_key = GeometricTopology::get_services_topology_key(site_id);
-        let entities: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_GET_ENTITIES").arg(1).arg(&topology_key).arg("*")
-            .query_async(conn)
-            .await;
-        let service_ids = match entities
-            .map_err(|e| format!("Discovery FCALL failed: {:?}", e))
-            .and_then(|j| filter_entities_by_capabilities(&j, &params.capabilities, params.limit))
-        {
-            Ok(ids) => ids,
-            Err(e) => return CommandResult::error(e),
+        let service_ids = if crate::constellation::one_topology_enabled() {
+            match super::one_topology::discover_ids_async(conn, site_id, &command.parameters).await {
+                Ok(ids) => ids,
+                Err(e) => return CommandResult::error(e),
+            }
+        } else {
+            let topology_key = GeometricTopology::get_services_topology_key(site_id);
+            let entities: redis::RedisResult<String> = redis::cmd("FCALL")
+                .arg("GNODE_TOPO_GET_ENTITIES").arg(1).arg(&topology_key).arg("*")
+                .query_async(conn)
+                .await;
+            match entities
+                .map_err(|e| format!("Discovery FCALL failed: {:?}", e))
+                .and_then(|j| filter_entities_by_capabilities(&j, &params.capabilities, params.limit))
+            {
+                Ok(ids) => ids,
+                Err(e) => return CommandResult::error(e),
+            }
         };
 
         let endpoint_registry = params.endpoint_registry

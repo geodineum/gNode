@@ -169,6 +169,32 @@ pub struct StreamDiscoveryManager {
     needs_immediate_sync: Arc<AtomicBool>,
 }
 
+
+/// One topology (K4): the streams of the 4.2 placements on THIS node, `{service}:gnode:unified:<env>:<node>`.
+/// The relay addresses a placement's stream (SPEC §6); the daemon reads it so daemon-handled commands
+/// relayed to a service on this node are answered.
+pub fn placement_streams(conn: &mut Connection, node_id: &str) -> Vec<DiscoveredStream> {
+    if !crate::constellation::one_topology_enabled() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    for c in crate::constellation::served() {
+        let Ok(placements) = c.query(conn, "4.2", &crate::constellation::Filters::default(), 0) else { continue };
+        for p in placements {
+            if p["on"].as_str() != Some(node_id) { continue; }
+            let (Some(of), Some(env)) = (p["of"].as_str(), p["env"].as_str()) else { continue };
+            out.push(DiscoveredStream {
+                key: crate::config::build_placement_stream_key(of, env, node_id),
+                site_id: Some(of.to_string()),
+                environment: Some(env.to_string()),
+                topology_namespace: Some(c.name.clone()),
+                stream_type: "unified".to_string(),
+            });
+        }
+    }
+    out
+}
+
 impl StreamDiscoveryManager {
     /// Create a new stream discovery manager
     pub fn new(config: StreamDiscoveryConfig) -> Self {
@@ -336,6 +362,12 @@ impl StreamDiscoveryManager {
                 }
                 discovered.push(stream);
             }
+        }
+        for stream in placement_streams(conn, &crate::daemon::GNodeDaemon::node_id_for_lease()) {
+            if !current_keys.contains(&stream.key) {
+                newly_added_keys.insert(stream.key.clone());
+            }
+            discovered.push(stream);
         }
 
         // Process health streams
@@ -510,6 +542,10 @@ impl StreamDiscoveryManager {
                 all_discovered.push(stream);
                 total_unified += 1;
             }
+        }
+        for stream in placement_streams(conn, &crate::daemon::GNodeDaemon::node_id_for_lease()) {
+            all_discovered.push(stream);
+            total_unified += 1;
         }
 
         // Process health streams

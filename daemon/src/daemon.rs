@@ -2033,12 +2033,15 @@ impl GNodeDaemon {
                     .map(|tp| crate::topology_schema::TopologySchema::load(&tp))
                 {
                     Some(Ok(schema)) => {
+                        let node_config = crate::node_config::get_cached_node_config(&self.node_type.to_string());
                         let facts = crate::constellation_worker::SelfFacts {
                             node_id: self.node_id.clone(),
-                            role: if self.is_master { "master".into() } else { "full_node".into() },
-                            specialization: match self.node_type.to_string().as_str() {
-                                t @ ("general" | "inference" | "storage" | "compute" | "content") => t.to_string(),
-                                _ => "general".to_string(),
+                            hardware: crate::constellation::NodeHardware {
+                                is_master: self.is_master,
+                                node_type: self.node_type.to_string(),
+                                cores: node_config.resources.cores,
+                                max_memory_mb: node_config.resources.max_memory_mb,
+                                axes: node_config.capabilities.axes.clone(),
                             },
                             version: env!("CARGO_PKG_VERSION").to_string(),
                         };

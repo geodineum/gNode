@@ -119,3 +119,18 @@ fn edges_have_a_command_surface_and_obey_the_potential() {
     assert_eq!(h::edge_list(&mut conn, "nierto_com", json!({ "id": "nierto_com" })).result.unwrap()["edges"], json!([]));
     assert_eq!(c.verify(&mut conn).unwrap(), "OK");
 }
+
+#[test]
+#[ignore]
+fn endpoints_discovery_picks_services_by_the_query() {
+    let Some((client, _c)) = setup() else { return };
+    let mut conn = client.get_connection().unwrap();
+    for (id, dom) in [("gflow", "workflow"), ("gschedule", "workflow"), ("geodine", "ml_inference")] {
+        assert_eq!(h::register(&mut conn, "nierto_com", json!({ "id": id, "shape": "daemon", "axes": { "protocol": ["gnode_stream"], "domain": [dom] } })).status, "ok");
+    }
+    let ids = h::discover_ids(&mut conn, "nierto_com", &json!({ "facets": { "domain": "workflow" } })).unwrap();
+    assert_eq!(ids, vec!["gflow", "gschedule"], "sorted, by colour");
+    let ids = h::discover_ids(&mut conn, "nierto_com", &json!({ "facets": { "domain": "workflow" }, "limit": 1 })).unwrap();
+    assert_eq!(ids.len(), 1);
+    assert!(h::discover_ids(&mut conn, "nierto_com", &json!({ "capabilities": ["workflow"] })).unwrap_err().contains("by name"), "the legacy name list is refused");
+}

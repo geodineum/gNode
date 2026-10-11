@@ -187,6 +187,11 @@ pub struct CapabilitiesConfig {
     /// Capability name -> value (0.0-1.0)
     #[serde(default)]
     pub dimensions: HashMap<String, f64>,
+    /// One topology: node axes declared as WORDS of the schema's vocabulary
+    /// (`bandwidth_tier: high`, `accelerator_tier: gpu`, `data_residency: eu`, …).
+    /// The encoder refuses a float on a vocabulary axis, so this is the operator's route.
+    #[serde(default)]
+    pub axes: std::collections::BTreeMap<String, String>,
 }
 
 /// Health reporting configuration

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use log::{info, warn};
 
-use crate::constellation::{declare_gnode_component, declare_gnode_placement, declare_node, encode, Constellation, Declared, Filters, Placement};
+use crate::constellation::{declare_gnode_component, declare_gnode_placement, declare_node, encode, Constellation, Declared, Filters, NodeHardware, Placement};
 use crate::integration::lease::hold_lease;
 use crate::topology_schema::TopologySchema;
 use crate::worker::{DaemonWorker, TickResult, WorkerConfig};
@@ -67,8 +67,7 @@ pub struct PassReport {
 #[derive(Debug, Clone)]
 pub struct SelfFacts {
     pub node_id: String,
-    pub role: String,
-    pub specialization: String,
+    pub hardware: NodeHardware,
     pub version: String,
 }
 
@@ -101,7 +100,7 @@ impl ConstellationWorker {
     /// and its placement on this node. Idempotent.
     pub fn declare_self(&self, conn: &mut redis::Connection, c: &Constellation) -> crate::Result<()> {
         c.ensure(conn)?;
-        c.register(conn, &encode(&self.schema, &declare_node(&self.facts.node_id, &self.facts.role, &self.facts.specialization))?)?;
+        c.register(conn, &encode(&self.schema, &declare_node(&self.facts.node_id, &self.facts.hardware))?)?;
         c.register(conn, &encode(&self.schema, &declare_gnode_component())?)?;
         let (p, d) = declare_gnode_placement(&self.facts.node_id, &self.facts.version);
         c.place(conn, &p, &encode(&self.schema, &d)?)?;

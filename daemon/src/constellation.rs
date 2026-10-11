@@ -462,11 +462,40 @@ pub fn encode(schema: &TopologySchema, d: &Declared) -> Result<Encoded> {
     })
 }
 
-/// The node entity the daemon declares for the host it runs on.
-pub fn declare_node(node_id: &str, role: &str, specialization: &str) -> Declared {
-    Declared::new(node_id, "1", "global")
-        .word("node_role", role)
-        .word("specialization", specialization)
+/// What a node knows about itself without being told (K1): the legacy derivation, kept.
+#[derive(Debug, Clone, Default)]
+pub struct NodeHardware {
+    pub is_master: bool,
+    /// `general | inference | storage | compute | content`; anything else stays undeclared with a warning.
+    pub node_type: String,
+    pub cores: u32,
+    pub max_memory_mb: u32,
+    /// Operator words for the axes nothing derives (bandwidth, storage, accelerator, residency, zone).
+    pub axes: BTreeMap<String, String>,
+}
+
+/// The node entity the daemon declares for the host it runs on. Role and ValKey mode follow the
+/// master election; cpu and memory tiers follow the resources the node config reports (0 = unknown,
+/// left undeclared); the specialization is the declared node type when it is a vocabulary word.
+pub fn declare_node(node_id: &str, hw: &NodeHardware) -> Declared {
+    let mut d = Declared::new(node_id, "1", "global")
+        .word("node_role", if hw.is_master { "master" } else { "full_node" })
+        .word("valkey_mode", if hw.is_master { "primary" } else { "client_only" });
+    match hw.node_type.as_str() {
+        t @ ("general" | "inference" | "storage" | "compute" | "content") => { d = d.word("specialization", t); }
+        "" => {}
+        other => log::warn!("node_type {:?} is not a specialization (general|inference|storage|compute|content); left undeclared", other),
+    }
+    if hw.cores > 0 {
+        d = d.word("cpu_tier", if hw.cores <= 2 { "minimal" } else if hw.cores <= 8 { "standard" } else { "compute" });
+    }
+    if hw.max_memory_mb > 0 {
+        d = d.word("memory_tier", if hw.max_memory_mb < 4_096 { "minimal" } else if hw.max_memory_mb < 32_768 { "standard" } else { "high_memory" });
+    }
+    for (axis, word) in &hw.axes {
+        d = d.word(axis, word);
+    }
+    d
 }
 
 /// The gNode component and its placement on this node; the heartbeat the placement reads is the daemon's own.
@@ -565,9 +594,31 @@ mod tests {
     }
 
     #[test]
+    fn the_node_derives_what_the_legacy_path_derived_and_never_coerces() {
+        let s = schema();
+        let hw = NodeHardware { is_master: true, node_type: "inference".into(), cores: 32, max_memory_mb: 128_713, axes: [("accelerator_tier".to_string(), "gpu".to_string())].into() };
+        let e = encode(&s, &declare_node("squad", &hw)).unwrap();
+        let c: BTreeMap<String, Vec<String>> = serde_json::from_str(&e.colours).unwrap();
+        assert_eq!(c["node_role"], vec!["master"]);
+        assert_eq!(c["valkey_mode"], vec!["primary"]);
+        assert_eq!(c["specialization"], vec!["inference"]);
+        let o: BTreeMap<String, String> = serde_json::from_str(&e.ordered).unwrap();
+        assert_eq!(o["cpu_tier"], score_of(0.67), "32 cores is compute");
+        assert_eq!(o["memory_tier"], score_of(1.0), "128 GB is high_memory");
+        assert_eq!(o["accelerator_tier"], score_of(0.67), "the operator's word");
+        let plain = encode(&s, &declare_node("laptop", &NodeHardware { node_type: "laptop-thing".into(), ..Default::default() })).unwrap();
+        let c: BTreeMap<String, Vec<String>> = serde_json::from_str(&plain.colours).unwrap();
+        assert!(!c.contains_key("specialization"), "an unknown node type is left undeclared, never coerced");
+        assert_eq!(c["valkey_mode"], vec!["client_only"]);
+        let o: BTreeMap<String, String> = serde_json::from_str(&plain.ordered).unwrap();
+        assert!(!o.contains_key("cpu_tier") && !o.contains_key("memory_tier"), "0 resources stay undeclared");
+        assert!(encode(&s, &declare_node("x", &NodeHardware { axes: [("accelerator_tier".to_string(), "warp-drive".to_string())].into(), ..Default::default() })).is_err(), "a word outside the vocabulary is refused by name");
+    }
+
+    #[test]
     fn node_component_and_placement_declarations_encode() {
         let s = schema();
-        let n = encode(&s, &declare_node("aesir-solutions", "master", "general")).unwrap();
+        let n = encode(&s, &declare_node("aesir-solutions", &NodeHardware { is_master: true, node_type: "general".into(), cores: 8, max_memory_mb: 64_083, ..Default::default() })).unwrap();
         assert_eq!(n.shape, "1");
         let c = encode(&s, &declare_gnode_component()).unwrap();
         assert_eq!(c.shape, "2");

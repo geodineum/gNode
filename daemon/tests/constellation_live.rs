@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use gnode::constellation::{declare_gnode_component, declare_gnode_placement, declare_node, encode, Constellation, Declared, Filters, Placement};
+use gnode::constellation::{declare_gnode_component, declare_gnode_placement, declare_node, encode, Constellation, Declared, Filters, NodeHardware, Placement};
 use gnode::topology_schema::TopologySchema;
 
 fn connect() -> Option<(redis::Connection, Constellation, TopologySchema)> {
@@ -31,7 +31,7 @@ fn connect() -> Option<(redis::Connection, Constellation, TopologySchema)> {
 #[ignore]
 fn the_daemon_declares_its_node_component_and_placement_and_health_follows_the_heartbeat() {
     let Some((mut conn, c, s)) = connect() else { return };
-    c.register(&mut conn, &encode(&s, &declare_node("aesir-solutions", "master", "general")).unwrap()).unwrap();
+    c.register(&mut conn, &encode(&s, &declare_node("aesir-solutions", &NodeHardware { is_master: true, node_type: "general".into(), cores: 8, max_memory_mb: 64_083, ..Default::default() })).unwrap()).unwrap();
     c.register(&mut conn, &encode(&s, &declare_gnode_component()).unwrap()).unwrap();
     let (p, d) = declare_gnode_placement("aesir-solutions", "0.1.4");
     let r = c.place(&mut conn, &p, &encode(&s, &d).unwrap()).unwrap();
@@ -59,7 +59,7 @@ fn the_daemon_declares_its_node_component_and_placement_and_health_follows_the_h
 fn a_service_is_registered_placed_queried_routed_and_reached() {
     let Some((mut conn, c, s)) = connect() else { return };
     for n in ["aesir-solutions", "squad"] {
-        c.register(&mut conn, &encode(&s, &declare_node(n, "full_node", "general")).unwrap()).unwrap();
+        c.register(&mut conn, &encode(&s, &declare_node(n, &NodeHardware { node_type: "general".into(), ..Default::default() })).unwrap()).unwrap();
     }
     let gflow = Declared::new("gflow", "3.3", "production")
         .words("protocol", &["gnode_stream"]).words("domain", &["workflow"]).word("implementation_language", "rust")
@@ -113,4 +113,26 @@ fn a_service_is_registered_placed_queried_routed_and_reached() {
     c.deregister(&mut conn, "gflow").unwrap();
     assert!(c.route(&mut conn, "gflow").is_err());
     assert_eq!(c.verify(&mut conn).unwrap(), "OK");
+}
+
+#[test]
+#[ignore]
+fn the_daemon_reads_the_placement_streams_of_its_own_node() {
+    let Some((mut conn, c, s)) = connect() else { return };
+    std::env::set_var("GNODE_ONE_TOPOLOGY", "on");
+    for n in ["aesir-solutions", "squad"] {
+        c.register(&mut conn, &encode(&s, &declare_node(n, &NodeHardware { node_type: "general".into(), ..Default::default() })).unwrap()).unwrap();
+    }
+    c.register(&mut conn, &encode(&s, &Declared::new("gflow", "3.3", "production").words("protocol", &["gnode_stream"])).unwrap()).unwrap();
+    c.register(&mut conn, &encode(&s, &Declared::new("gschedule", "3.3", "staging").words("protocol", &["gnode_stream"])).unwrap()).unwrap();
+    for (of, on, env) in [("gflow", "aesir-solutions", "production"), ("gflow", "squad", "production"), ("gschedule", "aesir-solutions", "staging")] {
+        let p = Placement { of: of.into(), on: on.into(), env: env.into(), heartbeat: of.into(), heartbeat_env: None, weight: 1 };
+        c.place(&mut conn, &p, &encode(&s, &Declared::new(&p.id(), "4.2", env)).unwrap()).unwrap();
+    }
+    let mut keys: Vec<String> = gnode::integration::stream_discovery::placement_streams(&mut conn, "aesir-solutions").into_iter().map(|d| d.key).collect();
+    keys.sort();
+    assert_eq!(keys, vec!["{gflow}:gnode:unified:production:aesir-solutions", "{gschedule}:gnode:unified:staging:aesir-solutions"], "this node's placements only, each with its own environment");
+    let squad: Vec<String> = gnode::integration::stream_discovery::placement_streams(&mut conn, "squad").into_iter().map(|d| d.key).collect();
+    assert_eq!(squad, vec!["{gflow}:gnode:unified:production:squad"]);
+    std::env::remove_var("GNODE_ONE_TOPOLOGY");
 }

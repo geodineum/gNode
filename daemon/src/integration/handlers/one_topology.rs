@@ -525,3 +525,129 @@ pub fn register_commands(
         example: r#"{"cmd":"topology_edge_validate","params":{"from":"gCore","to":"nierto_com"}}"#, async_capable: false, lane: crate::integration::handlers::types::Lane::Ordered,
     });
 }
+
+// ============================================================================
+// K5: `discover_with_endpoints` picks its services with the same query; the handler enriches.
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct DiscoverIdsParams {
+    #[serde(default = "default_layer")]
+    pub layer: String,
+    #[serde(default)]
+    pub facets: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub axes: BTreeMap<String, Value>,
+    #[serde(default)]
+    pub limit: usize,
+    /// The legacy list of capability NAMES; refused by name (a colour is a word, not a presence).
+    #[serde(default)]
+    pub capabilities: Option<Value>,
+}
+
+fn plan_ids(p: &DiscoverIdsParams) -> Result<(String, Filters), String> {
+    let Some(schema) = schema() else { return Err("topology schema not loaded".to_string()) };
+    if p.capabilities.is_some() {
+        return Err("capabilities by name are not axes: name `facets` (words) and `axes` ([lo, hi])".to_string());
+    }
+    plan_discover(schema, &DiscoverParams { layer: p.layer.clone(), facets: p.facets.clone(), axes: p.axes.clone(), limit: p.limit, capabilities: None, requirements: None })
+}
+
+pub fn discover_ids(conn: &mut redis::Connection, site_id: &str, params: &Value) -> Result<Vec<String>, String> {
+    let p: DiscoverIdsParams = serde_json::from_value(params.clone()).map_err(|e| format!("Invalid parameters: {}", e))?;
+    let (layer, f) = plan_ids(&p)?;
+    let c = crate::constellation::for_entity(conn, site_id);
+    let mut ids: Vec<String> = c.query(conn, &layer, &f, p.limit).map_err(|e| e.to_string())?
+        .iter().filter_map(|r| r["id"].as_str().map(str::to_string)).collect();
+    ids.sort();
+    Ok(ids)
+}
+
+pub async fn discover_ids_async(conn: &mut AsyncConnection, site_id: &str, params: &Value) -> Result<Vec<String>, String> {
+    let p: DiscoverIdsParams = serde_json::from_value(params.clone()).map_err(|e| format!("Invalid parameters: {}", e))?;
+    let (layer, f) = plan_ids(&p)?;
+    let c = crate::constellation::for_entity_async(conn, site_id).await;
+    let (lo, hi) = layer_interval(&layer)?;
+    let filters = serde_json::to_string(&f).unwrap_or_default();
+    let opts = json!({ "limit": p.limit }).to_string();
+    let raw: Vec<String> = fcall(&c.key(), "GNODE_TOPO_QUERY", &[&lo.to_string(), &hi.to_string(), &filters, &opts]).query_async(conn).await.map_err(|e| e.to_string())?;
+    let mut ids: Vec<String> = raw.iter().filter_map(|r| serde_json::from_str::<Value>(r).ok()).filter_map(|r| r["id"].as_str().map(str::to_string)).collect();
+    ids.sort();
+    Ok(ids)
+}
+
+// ============================================================================
+// K2: the components of the ecosystem catalogue register by name as shape 2.
+// ============================================================================
+
+/// `ecosystem_tools.yaml` component → `register_service` parameters by name: the tool-tier
+/// capability names mapped to the component body (`domain_primary` → `domain`, `api_version` →
+/// `contract_version`), `data_sensitivity` → a `requires` label, the pyramid and order axes dropped
+/// (positions the index replaces), the heartbeat name from the catalogue or the known writers.
+pub fn component_params(comp: &crate::tool_registration::ToolServiceDef) -> Value {
+    let mut axes = serde_json::Map::new();
+    let mut requires: Vec<String> = Vec::new();
+    for cap in &comp.capabilities {
+        let word = match &cap.value {
+            serde_yaml::Value::String(s) => s.clone(),
+            serde_yaml::Value::Bool(b) => if *b { "yes".into() } else { "no".into() },
+            serde_yaml::Value::Number(n) => n.to_string(),
+            _ => continue,
+        };
+        match cap.name.as_str() {
+            "domain_primary" => { axes.insert("domain".into(), json!([word])); }
+            "protocol" => { axes.insert("protocol".into(), json!([word])); }
+            "api_version" => { axes.insert("contract_version".into(), json!(word)); }
+            "data_sensitivity" => { if word != "public" { requires.push(word); } }
+            "pyramid_x" | "pyramid_y" | "pyramid_z" | "registration_order" | "domain_secondary" => {}
+            other => { axes.insert(other.into(), json!(word)); }
+        }
+    }
+    let heartbeat = comp.metadata.as_ref().and_then(|m| m.heartbeat.clone()).or_else(|| match comp.id.as_str() {
+        "gNode" => Some("gnode-daemon".into()), "Geodineum-COMMS" => Some("comms".into()),
+        "gFlow" => Some("gflow".into()), "gSchedule" => Some("gschedule".into()), _ => None,
+    });
+    let mut metadata = json!({});
+    if let Some(m) = &comp.metadata {
+        if let Some(d) = &m.description { metadata["description"] = json!(d); }
+        if let Some(a) = &m.affordances { metadata["affordances"] = json!(a); }
+        if let Some(k) = &m.schema_keys { metadata["schema_keys"] = json!(k); }
+    }
+    if !comp.depends_on.is_empty() { metadata["depends_on"] = json!(comp.depends_on); }
+    let mut p = json!({ "id": comp.id, "shape": "component", "environment": "global", "axes": axes, "metadata": metadata, "requires": requires });
+    if let Some(h) = heartbeat { p["heartbeat"] = json!(h); }
+    p
+}
+
+#[cfg(test)]
+mod component_tests {
+    use super::*;
+    use crate::tool_registration::{CapabilityEntry, ToolServiceDef};
+
+    fn cap(n: &str, v: &str) -> CapabilityEntry { CapabilityEntry { name: n.into(), value: serde_yaml::Value::String(v.into()) } }
+
+    #[test]
+    fn a_catalogue_component_registers_by_name_as_shape_two() {
+        let comp = ToolServiceDef {
+            id: "Geodineum-COMMS".into(), metadata: None, site: None, depends_on: vec!["ValKey".into(), "gNode".into()],
+            capabilities: vec![cap("protocol", "gnode_stream"), cap("native_format", "json"), cap("api_version", "v2"), cap("contract_stability", "stable"),
+                cap("domain_primary", "messaging"), cap("implementation_language", "rust"), cap("build_type", "cargo_release"), cap("component_tier", "infrastructure"),
+                cap("license_tier", "open_source"), cap("requires_valkey", "yes"), cap("systemd_managed", "yes"), cap("data_sensitivity", "credentials"),
+                cap("pyramid_x", "0.5"), cap("registration_order", "early")],
+        };
+        let p = component_params(&comp);
+        assert_eq!(p["shape"], "component");
+        assert_eq!(p["environment"], "global");
+        assert_eq!(p["axes"]["domain"], json!(["messaging"]));
+        assert_eq!(p["axes"]["contract_version"], "v2");
+        assert_eq!(p["axes"]["protocol"], json!(["gnode_stream"]));
+        assert!(p["axes"].get("pyramid_x").is_none() && p["axes"].get("registration_order").is_none() && p["axes"].get("data_sensitivity").is_none());
+        assert_eq!(p["requires"], json!(["credentials"]));
+        assert_eq!(p["heartbeat"], "comms", "the known writer's name");
+        assert_eq!(p["metadata"]["depends_on"], json!(["ValKey", "gNode"]));
+        let plan = plan_register(&TopologySchema::load(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config/topology_schema.yaml")).unwrap(),
+            &serde_json::from_value::<RegisterParams>(p).unwrap()).unwrap();
+        assert_eq!(plan.entity.shape, "2");
+        assert!(plan.labels.is_some());
+    }
+}
