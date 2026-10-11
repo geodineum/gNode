@@ -160,6 +160,13 @@ impl Constellation {
         Ok(())
     }
 
+    /// Lease holder only: a derived fact beside the point (`m.scale_out`, `m.share`), merged.
+    pub fn set_meta(&self, conn: &mut redis::Connection, id: &str, meta: serde_json::Value, ts: u64, node_id: &str) -> Result<()> {
+        let updates = serde_json::json!({ "m": meta }).to_string();
+        let _: String = self.fcall_leased(conn, "GNODE_TOPO_SET_DERIVED", &[id, &updates, "", &self.snapshot_key(), &ts.to_string(), "", node_id])?;
+        Ok(())
+    }
+
     pub fn verify(&self, conn: &mut redis::Connection) -> Result<String> {
         self.fcall(conn, "GNODE_TOPO_VERIFY", &[])
     }

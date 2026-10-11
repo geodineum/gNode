@@ -228,6 +228,93 @@ pub fn record_from_fields(get: &dyn Fn(&str) -> Option<String>, entry_id: &str) 
     })
 }
 
+/// The baseline may only learn upward below this inflation. The configured guard
+/// (1.5) sits BELOW the one-quantum step at a 1 ms baseline (2.0), so a path whose
+/// true time moved to 2 ms would read I = 2 forever and never teach the baseline
+/// (P-l). The step is added: guard = max(cfg, (b + 1) / b + ε).
+pub fn guard_for(cfg_guard: f64, baseline: f64) -> f64 {
+    if baseline <= 0.0 {
+        return cfg_guard;
+    }
+    cfg_guard.max((baseline + 1.0) / baseline + 1e-9)
+}
+
+/// The scale-out rule (D13, P-j): fire when inflation I ≥ max(θ, (b + 2) / b) on N
+/// consecutive ticks. θ 3 and N 3 measured: false positives ≤ 3·10⁻⁵ per tick at
+/// b = 1 ms, detection 0.89–0.98 at ρ 0.9.
+#[derive(Debug, Clone, Copy)]
+pub struct ScaleOutRule {
+    pub theta: f64,
+    pub ticks: u32,
+}
+
+impl Default for ScaleOutRule {
+    fn default() -> Self {
+        Self { theta: 3.0, ticks: 3 }
+    }
+}
+
+impl ScaleOutRule {
+    pub fn threshold(&self, baseline: f64) -> f64 {
+        if baseline <= 0.0 { self.theta } else { self.theta.max((baseline + 2.0) / baseline) }
+    }
+}
+
+/// A sustained inflation the operator should act on: another placement of this entity.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Suggestion {
+    pub tier: Tier,
+    pub site: String,
+    pub entity: String,
+    pub inflation: f64,
+    pub ticks: u32,
+}
+
+/// D18: a service gNode routed nothing to for a whole window is IDLE, not unmeasured.
+/// Fed with the ring counter's value each tick; idle after `window_ticks` ticks without
+/// movement. Pure, so the rule is a unit test.
+#[derive(Debug, Default, Clone)]
+pub struct DemandTracker {
+    last: HashMap<String, (u64, u32)>,
+    measured_ms: HashMap<String, u64>,
+    pub window_ticks: u32,
+    pub window_ms: u64,
+}
+
+impl DemandTracker {
+    pub fn new(window_ticks: u32) -> Self {
+        Self { last: HashMap::new(), measured_ms: HashMap::new(), window_ticks, window_ms: window_ticks as u64 * 15_000 }
+    }
+
+    /// A measurement of this service (or one of its placements) landed: idleness yields
+    /// to a reading inside the window.
+    pub fn measured(&mut self, service: &str, now_ms: u64) {
+        self.measured_ms.insert(service.to_string(), now_ms);
+    }
+
+    /// Record this tick's counter value; returns true when the service has just become idle
+    /// (exactly `window_ticks` quiet ticks and no measurement inside the window), so the
+    /// caller writes `idle` once.
+    pub fn observe(&mut self, service: &str, counter: u64, now_ms: u64) -> bool {
+        let Some(e) = self.last.get_mut(service) else {
+            self.last.insert(service.to_string(), (counter, 0));
+            return false;
+        };
+        if counter == e.0 {
+            e.1 = e.1.saturating_add(1);
+        } else {
+            e.0 = counter;
+            e.1 = 0;
+        }
+        let measured_recently = self.measured_ms.get(service).map(|m| now_ms.saturating_sub(*m) < self.window_ms).unwrap_or(false);
+        e.1 == self.window_ticks && !measured_recently
+    }
+
+    pub fn is_idle(&self, service: &str) -> bool {
+        self.last.get(service).map(|e| e.1 >= self.window_ticks).unwrap_or(false)
+    }
+}
+
 /// Utilisation from inflation, via R = R0/(1-ρ). `None` when there is nothing to
 /// compare against.
 pub fn utilisation(p50: f64, baseline: f64) -> Option<f64> {
@@ -255,11 +342,20 @@ pub struct Sampler {
     rings: HashMap<RingKey, Ring>,
     baselines: HashMap<RingKey, f64>,
     bands: HashMap<(Tier, String, String), Band>,
+    pub rule: ScaleOutRule,
+    pressure: HashMap<(Tier, String, String), u32>,
+    suggestions: Vec<Suggestion>,
 }
 
 impl Sampler {
     pub fn new(cfg: SamplerConfig) -> Self {
-        Self { cfg, rings: HashMap::new(), baselines: HashMap::new(), bands: HashMap::new() }
+        Self { cfg, rings: HashMap::new(), baselines: HashMap::new(), bands: HashMap::new(),
+               rule: ScaleOutRule::default(), pressure: HashMap::new(), suggestions: Vec::new() }
+    }
+
+    /// The scale-out suggestions the last tick produced.
+    pub fn suggestions(&self) -> &[Suggestion] {
+        &self.suggestions
     }
 
     pub fn observe(&mut self, o: Observation) {
@@ -297,6 +393,9 @@ impl Sampler {
     pub fn tick(&mut self, now_ms: u64) -> Vec<DerivedWrite> {
         let window_ms = self.cfg.window_secs * 1000;
         let mut per_entity: HashMap<(Tier, String, String), (f64, usize)> = HashMap::new();
+        // (Σ I·n, Σ n, smallest baseline) per entity, for the scale-out rule.
+        let mut inflation: HashMap<(Tier, String, String), (f64, usize, f64)> = HashMap::new();
+        self.suggestions.clear();
 
         let baseline_window_ms = self.cfg.baseline_window_secs * 1000;
         let keys: Vec<RingKey> = self.rings.keys().cloned().collect();
@@ -323,7 +422,7 @@ impl Sampler {
                         // it teaches the baseline that the overload is normal and
                         // the inflation returns to 1, a thermometer in the sun. So
                         // it is slow and the guard bounds it.
-                        if slow / b < self.cfg.baseline_guard {
+                        if slow / b < guard_for(self.cfg.baseline_guard, b) {
                             let updated = (1.0 - self.cfg.alpha) * b + self.cfg.alpha * slow;
                             self.baselines.insert(key.clone(), updated);
                         }
@@ -347,6 +446,26 @@ impl Sampler {
                 let slot = per_entity.entry((key.0, key.1.clone(), key.2.clone())).or_insert((0.0, 0));
                 slot.0 += rho * n as f64;
                 slot.1 += n;
+                let inf = inflation.entry((key.0, key.1.clone(), key.2.clone())).or_insert((0.0, 0, f64::MAX));
+                inf.0 += (p50 / b) * n as f64;
+                inf.1 += n;
+                inf.2 = inf.2.min(b);
+            }
+        }
+
+        // The scale-out rule, per entity, on consecutive ticks.
+        let measured: std::collections::HashSet<(Tier, String, String)> = inflation.keys().cloned().collect();
+        self.pressure.retain(|k, _| measured.contains(k));
+        for (key, (sum, n, b_min)) in &inflation {
+            let i = sum / *n as f64;
+            let count = self.pressure.entry(key.clone()).or_insert(0);
+            if i >= self.rule.threshold(*b_min) {
+                *count += 1;
+                if *count >= self.rule.ticks {
+                    self.suggestions.push(Suggestion { tier: key.0, site: key.1.clone(), entity: key.2.clone(), inflation: i, ticks: *count });
+                }
+            } else {
+                *count = 0;
             }
         }
 
@@ -481,6 +600,64 @@ mod tests {
         let map: std::collections::HashMap<String, String> =
             pairs.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect();
         record_from_fields(&|k| map.get(k).cloned(), "1791296391232-0")
+    }
+
+    #[test]
+    fn the_guard_sits_above_the_one_quantum_step() {
+        assert!(guard_for(1.5, 1.0) > 2.0, "at b = 1 ms the step is 2.0; the guard must exceed it (P-l)");
+        assert!((guard_for(1.5, 3.0) - 1.5).abs() < 1e-9, "at b = 3 ms the step (1.33) is below the configured guard");
+        assert!((guard_for(1.5, 29658.0) - 1.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn the_scale_out_threshold_is_three_or_the_step_plus_two() {
+        let r = ScaleOutRule::default();
+        assert_eq!(r.threshold(1.0), 3.0);
+        assert_eq!(r.threshold(3.0), 3.0, "(3+2)/3 = 1.67 < 3");
+        assert!((r.threshold(0.5) - 5.0).abs() < 1e-9, "a sub-ms baseline keeps the floor in charge");
+    }
+
+    #[test]
+    fn a_service_the_ring_routed_nothing_to_for_a_window_is_idle_once() {
+        let mut d = DemandTracker::new(4);
+        let t = |k: u64| 1_000_000 + k * 15_000;
+        assert!(!d.observe("gflow", 100, t(0)));
+        assert!(!d.observe("gflow", 100, t(1)));
+        assert!(!d.observe("gflow", 100, t(2)));
+        assert!(!d.observe("gflow", 100, t(3)), "three quiet ticks after the first sighting");
+        assert!(d.observe("gflow", 100, t(4)), "the fourth quiet tick is the window: idle, written once");
+        assert!(!d.observe("gflow", 100, t(5)), "still idle, not written again");
+        assert!(d.is_idle("gflow"));
+        assert!(!d.observe("gflow", 101, t(6)), "a routed request ends the idleness");
+        assert!(!d.is_idle("gflow"));
+        d.measured("gschedule", t(10));
+        for k in 10..14 { assert!(!d.observe("gschedule", 7, t(k)), "a measurement inside the window keeps idle away"); }
+        assert!(d.observe("gschedule", 7, t(14)), "at the window the measurement has aged out and four quiet ticks decide");
+    }
+
+    #[test]
+    fn a_sustained_inflation_suggests_scale_out_after_three_ticks_and_a_dip_resets() {
+        let mut s = Sampler::new(SamplerConfig { min_samples: 2, ..SamplerConfig::default() });
+        let site = "gflow"; let ent = "gflow@squad";
+        // Baseline 1 ms, learned from the long window.
+        for i in 0..8 { s.observe(obs(site, ent, "run", 1, 1_000 + i)); }
+        let _ = s.tick(2_000);
+        // Four ticks at 4 ms (I = 4 ≥ 3): the third fires, the fourth still fires.
+        let mut fired = Vec::new();
+        for t in 1..=4u64 {
+            let now = 100_000 * t;
+            for i in 0..8 { s.observe(obs(site, ent, "run", 4, now - 10 + i)); }
+            let _ = s.tick(now);
+            fired.push(s.suggestions().iter().any(|x| x.entity == ent));
+        }
+        assert_eq!(fired, vec![false, false, true, true]);
+        // One quiet tick at the baseline resets the count.
+        for i in 0..8 { s.observe(obs(site, ent, "run", 1, 500_000 - 10 + i)); }
+        let _ = s.tick(500_000);
+        assert!(s.suggestions().is_empty());
+        for i in 0..8 { s.observe(obs(site, ent, "run", 4, 600_000 - 10 + i)); }
+        let _ = s.tick(600_000);
+        assert!(s.suggestions().is_empty(), "one tick above threshold is not a suggestion");
     }
 
     #[test]

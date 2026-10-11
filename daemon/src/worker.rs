@@ -311,6 +311,8 @@ pub struct LoadSamplerWorker {
     /// Baselines outlive the process only if they are written when nothing else
     /// is happening, which in a sparse estate is almost every tick.
     last_saved: Instant,
+    /// D18: routed demand per service from the ring counters; idle after a quiet window.
+    demand: crate::integration::sampler::DemandTracker,
 }
 
 /// What the sampler is allowed to do. `Shadow` computes and logs without writing —
@@ -336,6 +338,7 @@ impl LoadSamplerWorker {
     ) -> Self {
         let cfg = crate::integration::sampler::SamplerConfig::from_env();
         let tick_interval = Duration::from_secs(cfg.tick_secs);
+        let window_ticks = ((cfg.window_secs + cfg.tick_secs - 1) / cfg.tick_secs.max(1)) as u32;
         Self {
             sampler: crate::integration::sampler::Sampler::new(cfg),
             stream_discovery,
@@ -346,7 +349,73 @@ impl LoadSamplerWorker {
             tick_interval,
             seeded: false,
             last_saved: Instant::now(),
+            demand: crate::integration::sampler::DemandTracker::new(window_ticks),
         }
+    }
+
+    /// One topology (SPEC §5): the lease holder writes each derived reading to the
+    /// constellation key — a placement's load, the service's max over its placements,
+    /// `idle` for a service the ring routed nothing to in a window, and the scale-out
+    /// suggestion beside the point. Pure over its inputs so a live test can drive it.
+    pub fn apply_one_topology(
+        conn: &mut redis::Connection,
+        c: &crate::constellation::Constellation,
+        node_id: &str,
+        now_ms: u64,
+        writes: &[crate::integration::sampler::DerivedWrite],
+        suggestions: &[crate::integration::sampler::Suggestion],
+        demand: &mut crate::integration::sampler::DemandTracker,
+        services: &[String],
+        counters: &std::collections::HashMap<String, u64>,
+    ) -> Vec<String> {
+        let mut done = Vec::new();
+        let ts = now_ms / 1000;
+        let mut service_max: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+        for w in writes {
+            match c.set_derived(conn, &w.entity, &[(16, w.pd)], ts, node_id) {
+                Ok(()) => done.push(format!("{}={:.4}", w.entity, w.pd)),
+                Err(e) => debug!("[load-sampler] write for {} refused: {}", w.entity, e),
+            }
+            if let Some((service, _)) = w.entity.split_once('@') {
+                let m = service_max.entry(service.to_string()).or_insert(0.0);
+                if w.pd > *m { *m = w.pd; }
+                demand.measured(service, now_ms);
+            } else {
+                demand.measured(&w.entity, now_ms);
+            }
+        }
+        for (service, pd) in &service_max {
+            if c.set_derived(conn, service, &[(16, *pd)], ts, node_id).is_ok() {
+                done.push(format!("{}=max {:.4}", service, pd));
+            }
+        }
+        for service in services {
+            let counter = counters.get(service).copied().unwrap_or(0);
+            if demand.observe(service, counter, now_ms) && !service_max.contains_key(service) {
+                let idle = crate::integration::sampler::LOAD_LANDMARKS[1].0;
+                if c.set_derived(conn, service, &[(16, idle)], ts, node_id).is_ok() {
+                    done.push(format!("{}=idle (no routed demand for a window)", service));
+                }
+            }
+        }
+        for s in suggestions {
+            let meta = serde_json::json!({ "scale_out": { "since_ticks": s.ticks, "inflation": (s.inflation * 100.0).round() / 100.0, "at": ts } });
+            if c.set_meta(conn, &s.entity, meta, ts, node_id).is_ok() {
+                warn!("[load-sampler] SCALE-OUT suggested for {}: inflation {:.2} on {} consecutive ticks — another placement would lower every share", s.entity, s.inflation, s.ticks);
+                done.push(format!("{}: scale-out", s.entity));
+            }
+        }
+        done
+    }
+
+    /// The ring counters of a constellation's services, for the demand tracker.
+    fn ring_counters(conn: &mut redis::Connection, c: &crate::constellation::Constellation, services: &[String]) -> std::collections::HashMap<String, u64> {
+        let mut out = std::collections::HashMap::new();
+        for s in services {
+            let v: redis::RedisResult<Option<u64>> = redis::cmd("GET").arg(format!("{}:rr:{}", c.key(), s)).query(conn);
+            out.insert(s.clone(), v.ok().flatten().unwrap_or(0));
+        }
+        out
     }
 
     fn health_streams(&self) -> Vec<String> {
@@ -468,9 +537,16 @@ impl DaemonWorker for LoadSamplerWorker {
         let Ok(mut conn) = crate::integration::connection_manager::get_connection() else {
             return TickResult::Error;
         };
+        let one_topology = crate::constellation::one_topology_enabled();
+        let constellation = crate::constellation::Constellation::new(&self.topology_namespace);
         // One writer of the axis. A node that does not hold the lease does not even
         // read: the group's position would then advance on a node that cannot write.
-        if !crate::integration::lease::hold_writer_lease(&mut conn, &self.node_id) {
+        let leased = if one_topology {
+            crate::integration::lease::hold_lease(&mut conn, &constellation.lease_key(), &self.node_id)
+        } else {
+            crate::integration::lease::hold_writer_lease(&mut conn, &self.node_id)
+        };
+        if !leased {
             return TickResult::Idle;
         }
         if !self.seeded {
@@ -491,6 +567,25 @@ impl DaemonWorker for LoadSamplerWorker {
         if observed > 0 && self.last_saved.elapsed() >= Duration::from_secs(60) {
             self.save_baselines(&mut conn);
             self.last_saved = Instant::now();
+        }
+
+        if one_topology && self.mode == SamplerMode::Write {
+            let now_ms = crate::utils::current_timestamp_ms().max(0) as u64;
+            let services: Vec<String> = constellation.query(&mut conn, "3", &crate::constellation::Filters::default(), 0)
+                .unwrap_or_default().iter()
+                .filter(|r| r["sh"].as_str() != Some("3.1"))
+                .filter_map(|r| r["id"].as_str().map(str::to_string)).collect();
+            let counters = Self::ring_counters(&mut conn, &constellation, &services);
+            let suggestions = self.sampler.suggestions().to_vec();
+            let done = Self::apply_one_topology(&mut conn, &constellation, &self.node_id, now_ms, &writes, &suggestions, &mut self.demand, &services, &counters);
+            if !done.is_empty() {
+                info!("[load-sampler] {}", done.join(", "));
+            }
+            if observed > 0 || !writes.is_empty() {
+                self.save_baselines(&mut conn);
+                self.last_saved = Instant::now();
+            }
+            return if observed > 0 || !done.is_empty() { TickResult::Busy } else { TickResult::Idle };
         }
 
         if writes.is_empty() {

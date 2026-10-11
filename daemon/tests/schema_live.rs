@@ -35,7 +35,7 @@ fn published_shape_map_is_what_the_lua_getter_serves() {
         assert_eq!(flat["layer_code"].parse::<u64>().unwrap(), layer_code(shape).unwrap(), "{shape}: layer code");
         assert_eq!(flat["width"], "24");
         let slots: HashMap<String, serde_json::Value> = serde_json::from_str(&flat["slots"]).unwrap();
-        assert_eq!(slots.contains_key("16"), matches!(shape, "3.3" | "4.2"), "{shape}: load is a position, not an axis everywhere");
+        assert_eq!(slots.contains_key("16"), matches!(shape, "1" | "3.3" | "4.2"), "{shape}: load is a position, not an axis everywhere");
     }
     let legacy: redis::RedisResult<HashMap<String, String>> = redis::cmd("FCALL_RO").arg("GNODE_SCHEMA_GET").arg(0).arg("geodineum").arg("service").query(&mut conn);
     assert!(legacy.is_err(), "the tier name still reads the legacy key, unpublished here");

@@ -172,8 +172,11 @@ pub fn note_arrival(
 
     match settle(&departure, replier_site, reply_entry_id) {
         Settled::Observed { site, entity, command, elapsed_ms, at_ms } => {
+            // Under the one topology the work was done by ONE placement: credit it, so
+            // load is per placement and the service reads the max over its placements.
+            let credited = if departure.placement.is_empty() { entity.clone() } else { departure.placement.clone() };
             let cmd = crate::integration::sampler::provider_observation_cmd(
-                &site, &entity, &command, elapsed_ms, reply_ok(fields), at_ms);
+                &site, &credited, &command, elapsed_ms, reply_ok(fields), at_ms);
             let _: redis::RedisResult<String> = cmd.query(conn);
             if debug_mode {
                 debug!("Relay round trip {} -> {} '{}': {} ms", correlation_id, entity, command, elapsed_ms);

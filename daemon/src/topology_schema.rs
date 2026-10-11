@@ -413,10 +413,10 @@ mod tests {
             assert_eq!(s.name_of(k, 18), Some("lifecycle"), "{k}");
             assert!(s.name_of(k, 19).is_some(), "{k} names slot 19");
         }
-        for k in ["3.1", "3.2", "3.3", "4.2"] {
+        for k in ["1", "3.1", "3.2", "3.3", "4.2"] {
             assert_eq!(s.name_of(k, 16), Some("load"), "{k}");
         }
-        for k in ["1", "2", "4.1"] {
+        for k in ["2", "4.1"] {
             assert_eq!(s.name_of(k, 16), None, "{k} has no load: a header slot is a position");
         }
         assert_eq!(s.name_of("1", 19), Some("storage_available"));

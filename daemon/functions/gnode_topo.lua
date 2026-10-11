@@ -693,6 +693,12 @@ server.register_function{
 
         local written = 0
         for index, value in pairs(updates) do
+            if constellation and index == 'm' and type(value) == 'table' then
+                -- a derived fact beside the point (m.scale_out, m.share), merged, never a coordinate
+                entity.m = entity.m or {}
+                for k, v in pairs(value) do entity.m[k] = v end
+                written = written + 1
+            else
             local slot = tonumber(index)
             if not slot then
                 return server.error_reply("Update key is not an axis index: " .. tostring(index))
@@ -727,6 +733,7 @@ server.register_function{
                 entity.pr[slot] = tostring(value.pr)
             end
             written = written + 1
+            end
         end
 
         entity.m = entity.m or {}
