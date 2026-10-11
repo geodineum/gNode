@@ -330,6 +330,10 @@ pub fn handle_register_service(
     if debug_mode {
         debug!("[STATELESS] Handling registerService command: {}", command.id);
     }
+    if crate::constellation::one_topology_enabled() {
+        let c = crate::constellation::Constellation::new(crate::daemon::GNodeDaemon::get_topology_namespace());
+        return super::one_topology::register(conn, &c, command.parameters.clone());
+    }
 
     // Parse parameters
     let params = match parse_parameters::<RegisterServiceParams>(command) {
@@ -411,6 +415,10 @@ pub fn handle_deregister_service(
 ) -> CommandResult {
     if debug_mode {
         debug!("[STATELESS] Handling deregisterService command: {}", command.id);
+    }
+    if crate::constellation::one_topology_enabled() {
+        let c = crate::constellation::Constellation::new(crate::daemon::GNodeDaemon::get_topology_namespace());
+        return super::one_topology::deregister(conn, &c, command.parameters.clone());
     }
 
     // Parse parameters
@@ -537,6 +545,10 @@ pub fn handle_register_service_async<'a>(
         if debug_mode {
             debug!("[STATELESS] Handling async registerService command: {}", command.id);
         }
+        if crate::constellation::one_topology_enabled() {
+            let c = crate::constellation::Constellation::new(crate::daemon::GNodeDaemon::get_topology_namespace());
+            return super::one_topology::register_async(conn, &c, command.parameters.clone()).await;
+        }
 
         // Parse parameters
         let params: RegisterServiceParams = match serde_json::from_value(command.parameters.clone()) {
@@ -633,6 +645,10 @@ pub fn handle_deregister_service_async<'a>(
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
+        if crate::constellation::one_topology_enabled() {
+            let c = crate::constellation::Constellation::new(crate::daemon::GNodeDaemon::get_topology_namespace());
+            return super::one_topology::deregister_async(conn, &c, command.parameters.clone()).await;
+        }
         if debug_mode {
             debug!("[STATELESS] Handling async deregisterService command: {}", command.id);
         }

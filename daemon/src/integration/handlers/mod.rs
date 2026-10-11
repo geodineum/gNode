@@ -41,6 +41,8 @@ pub mod topology_custom;
 pub mod topology_unified;
 pub mod direct_channel;
 pub mod relay_ops;
+/// The registration and discovery commands on the one topology (SPEC §4, §13.3).
+pub mod one_topology;
 
 // CMS handlers (content/format/template/asset) come exclusively
 // via the signed-extension pipeline now. They were previously inlined

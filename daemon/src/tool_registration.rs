@@ -563,6 +563,7 @@ pub fn find_schema_path(override_path: Option<&PathBuf>) -> Option<PathBuf> {
 
     let candidates = [
         PathBuf::from("daemon/config/service_schema.yaml"),
+        PathBuf::from("config/service_schema.yaml"),
         PathBuf::from("/opt/gNode/daemon/config/service_schema.yaml"),
         PathBuf::from("/opt/geodineum/gNode/daemon/config/service_schema.yaml"),
     ];
