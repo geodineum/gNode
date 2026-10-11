@@ -657,8 +657,10 @@ server.register_function{
         local topology_key = keys[1]
         local entity_id = args[1]
         local hashed_width = tonumber(args[6])
+        local constellation = server.call('HGET', topology_key .. ':meta', 'sv') == '5'
 
-        local lease = server.call('GET', 'gnode:cluster:writer')
+        -- A constellation passes its own lease key as KEYS[2]; a legacy topology reads the global one.
+        local lease = server.call('GET', (constellation and keys[2]) or 'gnode:cluster:writer')
         if lease and lease ~= false and args[7] and args[7] ~= lease then
             return server.error_reply(string.format(
                 "Derived writes belong to the lease holder (%s); %s does not hold it", lease, args[7]))
@@ -678,13 +680,38 @@ server.register_function{
             return server.error_reply("Stored entity is not decodable: " .. (decode_err or "unknown"))
         end
 
+        local schema = nil
+        if constellation then
+            local flat = server.call('HGETALL', topology_key .. ':schema:' .. tostring(entity.sh))
+            if not flat or #flat == 0 then
+                return server.error_reply("schema for shape " .. tostring(entity.sh) .. " is not published")
+            end
+            schema = {}
+            for i = 1, #flat, 2 do schema[flat[i]] = flat[i + 1] end
+            schema.slots = cjson.decode(schema.slots)
+        end
+
         local written = 0
         for index, value in pairs(updates) do
             local slot = tonumber(index)
             if not slot then
                 return server.error_reply("Update key is not an axis index: " .. tostring(index))
             end
-            if hashed_width and slot < hashed_width then
+            if constellation then
+                local def = schema.slots[tostring(slot)]
+                if slot < 16 or slot > 19 or not def then
+                    return server.error_reply(string.format(
+                        "Slot %d is not a derived axis of shape %s", slot, tostring(entity.sh)))
+                end
+                if def.writer == 'provider' then
+                    return server.error_reply(string.format("Slot %d (%s) belongs to the provider", slot, def.name))
+                end
+                if value.s ~= nil then
+                    entity.q = entity.q or {}
+                    entity.q[def.name] = string.format('%.0f', tonumber(value.s))
+                    server.call('ZADD', topology_key .. ':ix:' .. def.name, entity.q[def.name], entity_id)
+                end
+            elseif hashed_width and slot < hashed_width then
                 return server.error_reply(string.format(
                     "Axis %d is hashed into the bucket key and cannot be written as derived", slot))
             end
@@ -717,6 +744,15 @@ server.register_function{
         server.call('HSET', topology_key .. ':entities', entity_id, final_json)
         if z_score then
             server.call('ZADD', topology_key .. ':z_order', z_score, entity_id)
+        end
+        if constellation and entity.sh == '4.2' and entity.of then
+            local healthy = (tonumber(entity.pd[18]) or 0) > 0
+            local active = tonumber(entity.pd[19]) == 0.25
+            if healthy and active then
+                server.call('ZADD', topology_key .. ':pl:' .. entity.of, entity.ro, entity_id)
+            else
+                server.call('ZREM', topology_key .. ':pl:' .. entity.of, entity_id)
+            end
         end
 
         local snapshot_key = args[4]
@@ -859,6 +895,23 @@ server.register_function{
         end
         if to_exists ~= 1 then
             return server.error_reply("Target entity not found: " .. to_id)
+        end
+
+        -- On a constellation key an edge exists only if phi(from) > phi(to), phi = (top-level layer
+        -- digit, fundamentality): cycles are impossible by one integer comparison (P-c).
+        if server.call('HGET', topology_key .. ':meta', 'sv') == '5' then
+            local lf = tonumber(server.call('ZSCORE', topology_key .. ':ix:layer', from_id))
+            local lt = tonumber(server.call('ZSCORE', topology_key .. ':ix:layer', to_id))
+            if not lf or not lt then
+                return server.error_reply("Both ends must carry a layer")
+            end
+            local pf = tonumber(server.call('ZSCORE', topology_key .. ':ix:fundamentality', from_id) or 0)
+            local pt = tonumber(server.call('ZSCORE', topology_key .. ':ix:fundamentality', to_id) or 0)
+            lf, lt = math.floor(lf / 2 ^ 40), math.floor(lt / 2 ^ 40)
+            if lf < lt or (lf == lt and pf <= pt) then
+                return server.error_reply(string.format(
+                    "cycle: phi(%s) = (%d, %s) must exceed phi(%s) = (%d, %s)", from_id, lf, tostring(pf), to_id, lt, tostring(pt)))
+            end
         end
 
         -- Check for existing edge
@@ -1147,6 +1200,9 @@ server.register_function{
 
         local entity_ids
         if ids_json == "*" then
+            if server.call('HGET', topology_key .. ':meta', 'sv') == '5' then
+                return server.error_reply("A constellation is not scanned: use GNODE_TOPO_QUERY with a layer range")
+            end
             entity_ids = server.call('HKEYS', topology_key .. ':entities') or {}
         else
             local decode_err
@@ -1973,4 +2029,533 @@ server.register_function{
         return result_json
     end,
     flags = {'no-writes'}
+}
+
+-- ============================================================================
+-- ONE TOPOLOGY PER CONSTELLATION (SPEC-ONE-TOPOLOGY §4). A constellation key is a
+-- topology whose meta carries sv = 5; the functions below run only on one, and
+-- the kept functions above branch on it. Scores are Q0.48 integers (pr >> 16)
+-- kept as strings: exact in a double, exact through cjson.
+-- ============================================================================
+
+local W = 24
+local Q48 = 2 ^ 48
+local LIFECYCLE_ACTIVE = 0.25
+
+local function tag_of(tk) return string.match(tk, '^(%b{})') or '' end
+local function is_constellation(tk) return server.call('HGET', tk .. ':meta', 'sv') == '5' end
+local function sfmt(n) return string.format('%.0f', n) end
+
+local function shape_map(tk, sh)
+    local flat = server.call('HGETALL', tk .. ':schema:' .. sh)
+    if not flat or #flat == 0 then return nil end
+    local m = {}
+    for i = 1, #flat, 2 do m[flat[i]] = flat[i + 1] end
+    m.index = cjson.decode(m.dimension_index)
+    m.values = cjson.decode(m.dimension_values)
+    m.by_name = {}
+    for idx, def in pairs(cjson.decode(m.slots)) do def.slot = tonumber(idx); m.by_name[def.name] = def end
+    m.lo, m.hi = tonumber(m.layer_code), tonumber(m.layer_hi)
+    return m
+end
+
+local function hmget_all(key, ids)
+    local out = {}
+    for i = 1, #ids, 1000 do
+        local part = server.call('HMGET', key, unpack(ids, i, math.min(i + 999, #ids)))
+        for _, r in ipairs(part) do out[#out + 1] = r end
+    end
+    return out
+end
+
+local function load_record(tk, id)
+    local raw = server.call('HGET', tk .. ':entities', id)
+    if not raw then return nil end
+    local ok, rec = pcall(cjson.decode, raw)
+    if ok then return rec end
+    return nil
+end
+
+local function ring_sync(tk, rec)
+    if rec.sh ~= '4.2' or not rec.of then return end
+    local healthy = (tonumber(rec.pd[18]) or 0) > 0
+    local active = tonumber(rec.pd[19]) == LIFECYCLE_ACTIVE
+    if healthy and active then
+        server.call('ZADD', tk .. ':pl:' .. rec.of, rec.ro, rec.id)
+    else
+        server.call('ZREM', tk .. ':pl:' .. rec.of, rec.id)
+    end
+end
+
+local function store(tk, rec)
+    server.call('HSET', tk .. ':entities', rec.id, cjson.encode(rec))
+end
+
+-- The one write path for entities and placements.
+local function register(tk, id, sh, rec, ordered, colours, preserve)
+    local sm = shape_map(tk, sh)
+    if not sm then return nil, 'schema for shape ' .. sh .. ' is not published at ' .. tk .. ':schema:' .. sh end
+    if type(rec.pd) ~= 'table' or type(rec.pr) ~= 'table' or #rec.pd ~= W or #rec.pr ~= W then
+        return nil, string.format('point width must be %d (pd %d, pr %d)', W, rec.pd and #rec.pd or 0, rec.pr and #rec.pr or 0)
+    end
+    local ly = tonumber(rec.ly)
+    if not ly or ly < sm.lo or ly > sm.hi then
+        return nil, string.format('layer code %s is outside shape %s [%s, %s]', tostring(rec.ly), sh, sfmt(sm.lo), sfmt(sm.hi))
+    end
+    local q = { layer = sfmt(ly) }
+    for axis, score in pairs(ordered or {}) do
+        local def = sm.by_name[axis]
+        if not def then return nil, 'axis ' .. axis .. ' is not an axis of shape ' .. sh end
+        if def.kind ~= 'ordered' then return nil, 'axis ' .. axis .. ' is a colour, not ordered' end
+        if axis ~= 'layer' then
+            local s = tonumber(score)
+            if not s or s < 0 or s > Q48 then return nil, 'score for ' .. axis .. ' must be an integer in [0, 2^48]' end
+            q[axis] = sfmt(s)
+        end
+    end
+    if q.fundamentality == nil and sm.by_name.fundamentality and sm.fundamentality_default and sm.fundamentality_default ~= '' then
+        q.fundamentality = sfmt(tonumber(sm.fundamentality_default) * Q48)
+    end
+    local c = {}
+    for facet, vals in pairs(colours or {}) do
+        local def = sm.by_name[facet]
+        if not def then return nil, 'facet ' .. facet .. ' is not an axis of shape ' .. sh end
+        if def.kind ~= 'colour' then return nil, 'facet ' .. facet .. ' is ordered, not a colour' end
+        if type(vals) ~= 'table' then vals = { vals } end
+        if #vals == 0 then return nil, 'facet ' .. facet .. ' has no value' end
+        if not def.many and #vals > 1 then return nil, 'facet ' .. facet .. ' takes one value' end
+        local vocab = sm.values[facet]
+        for _, v in ipairs(vals) do
+            if not def.freeform and vocab and vocab[v] == nil then return nil, string.format('%s = %s is not in the vocabulary', facet, tostring(v)) end
+        end
+        c[facet] = vals
+    end
+    local old = load_record(tk, id)
+    rec.id, rec.sh, rec.q, rec.c = id, sh, q, c
+    rec.m = rec.m or {}
+    if old then
+        rec.ro = old.ro
+        for axis in pairs(old.q or {}) do if q[axis] == nil then server.call('ZREM', tk .. ':ix:' .. axis, id) end end
+        for facet, vals in pairs(old.c or {}) do for _, v in ipairs(vals) do server.call('SREM', tk .. ':c:' .. facet .. ':' .. v, id) end end
+        for idx in string.gmatch(preserve or '', '([^,]+)') do
+            local slot = tonumber(idx)
+            if slot and slot >= 16 and slot < W then
+                rec.pd[slot + 1] = old.pd[slot + 1]; rec.pr[slot + 1] = old.pr[slot + 1]
+                if old.q then for a, s in pairs(old.q) do if sm.by_name[a] and sm.by_name[a].slot == slot then q[a] = s end end end
+            end
+        end
+        if old.m and old.m.ds then rec.m.ds = old.m.ds end
+        if old.m and old.m.share then rec.m.share = old.m.share end
+    else
+        rec.ro = server.call('HINCRBY', tk .. ':meta', 'ro', 1)
+        server.call('HINCRBY', tk .. ':meta', 'ec', 1)
+    end
+    rec.ra = get_timestamp()
+    rec.env = rec.env or 'global'
+    store(tk, rec)
+    server.call('HSET', tk .. ':env', id, rec.env)
+    for axis, s in pairs(q) do server.call('ZADD', tk .. ':ix:' .. axis, s, id) end
+    for facet, vals in pairs(c) do for _, v in ipairs(vals) do server.call('SADD', tk .. ':c:' .. facet .. ':' .. v, id) end end
+    if string.sub(sh, 1, 1) == '3' then
+        server.call('HSET', tag_of(tk) .. ':gnode:topology:services', id, cjson.encode({ point = rec.pd, metadata = rec.m }))
+    end
+    return rec, old ~= nil
+end
+
+local function remove_indexes(tk, rec)
+    for axis in pairs(rec.q or {}) do server.call('ZREM', tk .. ':ix:' .. axis, rec.id) end
+    for facet, vals in pairs(rec.c or {}) do for _, v in ipairs(vals) do server.call('SREM', tk .. ':c:' .. facet .. ':' .. v, rec.id) end end
+    server.call('HDEL', tk .. ':env', rec.id)
+    server.call('HDEL', tk .. ':w', rec.id)
+    server.call('DEL', tk .. ':holds:' .. rec.id, tk .. ':req:' .. rec.id, tk .. ':peers:' .. rec.id, tk .. ':inflight:' .. rec.id)
+end
+
+local function remove_edges(tk, id)
+    local n = 0
+    for _, t in ipairs(server.call('SMEMBERS', tk .. ':out:' .. id)) do
+        server.call('HDEL', tk .. ':edges', id .. ':' .. t); server.call('SREM', tk .. ':in:' .. t, id); n = n + 1
+    end
+    for _, f in ipairs(server.call('SMEMBERS', tk .. ':in:' .. id)) do
+        server.call('HDEL', tk .. ':edges', f .. ':' .. id); server.call('SREM', tk .. ':out:' .. f, id); n = n + 1
+    end
+    server.call('DEL', tk .. ':out:' .. id, tk .. ':in:' .. id)
+    if n > 0 then server.call('HINCRBY', tk .. ':meta', 'xc', -n) end
+    return n
+end
+
+local function deregister(tk, id)
+    local rec = load_record(tk, id)
+    if not rec then return nil end
+    local removed = 0
+    if rec.sh ~= '4.1' and rec.sh ~= '4.2' then
+        local pls = {}
+        for _, p in ipairs(server.call('SMEMBERS', tk .. ':plof:' .. id)) do pls[p] = true end
+        for _, p in ipairs(server.call('SMEMBERS', tk .. ':plon:' .. id)) do pls[p] = true end
+        for p in pairs(pls) do if deregister(tk, p) then removed = removed + 1 end end
+        server.call('DEL', tk .. ':plof:' .. id, tk .. ':plon:' .. id, tk .. ':pl:' .. id, tk .. ':rr:' .. id)
+    else
+        if rec.of then server.call('SREM', tk .. ':plof:' .. rec.of, id); server.call('ZREM', tk .. ':pl:' .. rec.of, id) end
+        if rec.on then server.call('SREM', tk .. ':plon:' .. rec.on, id) end
+        server.call('SREM', tk .. ':placements', id)
+    end
+    remove_indexes(tk, rec)
+    remove_edges(tk, id)
+    server.call('HDEL', tk .. ':entities', id)
+    server.call('HDEL', tag_of(tk) .. ':gnode:topology:services', id)
+    server.call('HINCRBY', tk .. ':meta', 'ec', -1)
+    return removed
+end
+
+local function lease_ok(keys, node_id)
+    local lease_key = keys[2] or 'gnode:cluster:writer'
+    local holder = server.call('GET', lease_key)
+    if holder and node_id and node_id ~= '' and node_id ~= holder then
+        return false, string.format('derived writes belong to the lease holder (%s); %s does not hold it', holder, node_id)
+    end
+    return true
+end
+
+-- GNODE_ENSURE_CONSTELLATION tk : the one key of a constellation, created once.
+server.register_function{
+    function_name = 'GNODE_ENSURE_CONSTELLATION',
+    callback = function(keys, args)
+        if #keys < 1 then return server.error_reply('Missing constellation key') end
+        local tk = keys[1]
+        if server.call('HEXISTS', tk .. ':meta', 'data') == 1 then
+            if not is_constellation(tk) then return server.error_reply(tk .. ' exists and is not a constellation topology') end
+            return cjson.encode({ ok = true, tk = tk, created = false })
+        end
+        local now = get_timestamp()
+        server.call('HSET', tk .. ':meta',
+            'data', cjson.encode({ tk = tk, n = 'constellation', ct = 'phi', tt = 'constellation', ca = now, ua = now, w = W }),
+            'sv', '5', 'ec', '0', 'xc', '0', 'ro', '0')
+        return cjson.encode({ ok = true, tk = tk, created = true })
+    end
+}
+
+-- GNODE_TOPO_REGISTER tk | id shape record_json ordered_json colours_json [preserve_csv]
+server.register_function{
+    function_name = 'GNODE_TOPO_REGISTER',
+    callback = function(keys, args)
+        if #keys < 1 or #args < 5 then return server.error_reply('GNODE_TOPO_REGISTER tk | id shape record ordered colours [preserve]') end
+        local tk = keys[1]
+        if not is_constellation(tk) then return server.error_reply(tk .. ' is not a constellation topology (GNODE_ENSURE_CONSTELLATION first)') end
+        local id, sh = args[1], args[2]
+        if id == '' or sh == '' then return server.error_reply('id and shape are required') end
+        if sh == '4.1' or sh == '4.2' then return server.error_reply('placements register through GNODE_TOPO_PLACE') end
+        local ok1, rec = pcall(cjson.decode, args[3]); local ok2, ordered = pcall(cjson.decode, args[4]); local ok3, colours = pcall(cjson.decode, args[5])
+        if not (ok1 and ok2 and ok3) then return server.error_reply('record, ordered and colours must be JSON') end
+        local stored, upd = register(tk, id, sh, rec, ordered, colours, args[6])
+        if not stored then return server.error_reply(upd) end
+        return cjson.encode({ ok = true, eid = id, sh = sh, ro = stored.ro, upd = upd })
+    end
+}
+
+-- GNODE_TOPO_PLACE tk | id shape of on env heartbeat_component weight record_json ordered_json colours_json
+server.register_function{
+    function_name = 'GNODE_TOPO_PLACE',
+    callback = function(keys, args)
+        if #keys < 1 or #args < 10 then return server.error_reply('GNODE_TOPO_PLACE tk | id shape of on env heartbeat weight record ordered colours') end
+        local tk = keys[1]
+        if not is_constellation(tk) then return server.error_reply(tk .. ' is not a constellation topology') end
+        local id, sh, of, on, env, hb, w = args[1], args[2], args[3], args[4], args[5], args[6], tonumber(args[7])
+        if sh ~= '4.1' and sh ~= '4.2' then return server.error_reply('a placement is shape 4.1 or 4.2') end
+        if not w or w < 0 then return server.error_reply('weight must be a number >= 0 (0 = standby)') end
+        local ofr, onr = load_record(tk, of), load_record(tk, on)
+        if not ofr then return server.error_reply('unknown entity ' .. of) end
+        if not onr or onr.sh ~= '1' then return server.error_reply(on .. ' is not a node') end
+        if sh == '4.2' and string.sub(ofr.sh, 1, 1) ~= '3' then return server.error_reply('4.2 places a service; ' .. of .. ' is shape ' .. ofr.sh) end
+        if sh == '4.1' and ofr.sh ~= '2' then return server.error_reply('4.1 places a component; ' .. of .. ' is shape ' .. ofr.sh) end
+        local ok1, rec = pcall(cjson.decode, args[8]); local ok2, ordered = pcall(cjson.decode, args[9]); local ok3, colours = pcall(cjson.decode, args[10])
+        if not (ok1 and ok2 and ok3) then return server.error_reply('record, ordered and colours must be JSON') end
+        rec.of, rec.on, rec.hb, rec.env, rec.w = of, on, hb, env, w
+        if sh == '4.2' and next(colours) == nil then
+            for facet, vals in pairs(ofr.c or {}) do
+                local sm = shape_map(tk, '4.2')
+                if sm and sm.by_name[facet] then colours[facet] = vals end
+            end
+        end
+        local stored, upd = register(tk, id, sh, rec, ordered, colours, nil)
+        if not stored then return server.error_reply(upd) end
+        server.call('SADD', tk .. ':plof:' .. of, id)
+        server.call('SADD', tk .. ':plon:' .. on, id)
+        server.call('SADD', tk .. ':placements', id)
+        server.call('HSET', tk .. ':w', id, sfmt(w))
+        ring_sync(tk, stored)
+        return cjson.encode({ ok = true, eid = id, sh = sh, ro = stored.ro, upd = upd })
+    end
+}
+
+-- GNODE_TOPO_DEREGISTER tk | id : the entity, its indexes, edges and placements.
+server.register_function{
+    function_name = 'GNODE_TOPO_DEREGISTER',
+    callback = function(keys, args)
+        if #keys < 1 or #args < 1 then return server.error_reply('GNODE_TOPO_DEREGISTER tk | id') end
+        local tk = keys[1]
+        if not is_constellation(tk) then return server.error_reply(tk .. ' is not a constellation topology') end
+        local removed = deregister(tk, args[1])
+        if removed == nil then return server.error_reply('unknown entity ' .. args[1]) end
+        return cjson.encode({ ok = true, eid = args[1], placements_removed = removed })
+    end
+}
+
+-- GNODE_TOPO_QUERY tk | layer_lo layer_hi filters_json [opts_json]
+-- filters: { axes: { name: [lo, hi] }, facets: { name: [any-of] } }; opts: { limit }
+-- The layer range drives; every other constraint is one index lookup per candidate; survivors decode.
+server.register_function{
+    function_name = 'GNODE_TOPO_QUERY', flags = { 'no-writes' },
+    callback = function(keys, args)
+        if #keys < 1 or #args < 3 then return server.error_reply('GNODE_TOPO_QUERY tk | lo hi filters [opts]') end
+        local tk = keys[1]
+        local ok, filt = pcall(cjson.decode, args[3])
+        if not ok then return server.error_reply('filters must be JSON') end
+        local opts = {}
+        if args[4] and args[4] ~= '' then local ok2; ok2, opts = pcall(cjson.decode, args[4]); if not ok2 then return server.error_reply('opts must be JSON') end end
+        local limit = tonumber(opts.limit) or 0
+        local ids = server.call('ZRANGEBYSCORE', tk .. ':ix:layer', args[1], args[2])
+        local keep = {}
+        for _, id in ipairs(ids) do
+            local pass = true
+            for axis, r in pairs(filt.axes or {}) do
+                local s = server.call('ZSCORE', tk .. ':ix:' .. axis, id)
+                if not s or tonumber(s) < tonumber(r[1]) or tonumber(s) > tonumber(r[2]) then pass = false; break end
+            end
+            if pass then
+                for facet, vals in pairs(filt.facets or {}) do
+                    if type(vals) ~= 'table' then vals = { vals } end
+                    local any = false
+                    for _, v in ipairs(vals) do if server.call('SISMEMBER', tk .. ':c:' .. facet .. ':' .. v, id) == 1 then any = true; break end end
+                    if not any then pass = false; break end
+                end
+            end
+            if pass then keep[#keep + 1] = id; if limit > 0 and #keep >= limit then break end end
+        end
+        local out = {}
+        if #keep > 0 then for _, r in ipairs(hmget_all(tk .. ':entities', keep)) do if r then out[#out + 1] = r end end end
+        return out
+    end
+}
+
+-- GNODE_TOPO_ORDER tk | axis [limit offset desc] : ids ranked by one indexed axis, with scores.
+server.register_function{
+    function_name = 'GNODE_TOPO_ORDER', flags = { 'no-writes' },
+    callback = function(keys, args)
+        if #keys < 1 or #args < 1 then return server.error_reply('GNODE_TOPO_ORDER tk | axis [limit offset desc]') end
+        local limit, offset = tonumber(args[2]) or -1, tonumber(args[3]) or 0
+        local stop = limit > 0 and offset + limit - 1 or -1
+        if args[4] == 'desc' then return server.call('ZRANGE', keys[1] .. ':ix:' .. args[1], offset, stop, 'REV', 'WITHSCORES') end
+        return server.call('ZRANGE', keys[1] .. ':ix:' .. args[1], offset, stop, 'WITHSCORES')
+    end
+}
+
+-- GNODE_TOPO_ROUTE tk | service : exact weighted round-robin from one shared counter.
+-- Smooth weighted order within a cycle (deterministic from the ring order); weight 0 = standby.
+server.register_function{
+    function_name = 'GNODE_TOPO_ROUTE',
+    callback = function(keys, args)
+        if #keys < 1 or #args < 1 then return server.error_reply('GNODE_TOPO_ROUTE tk | service') end
+        local tk, svc = keys[1], args[1]
+        local pl = server.call('ZRANGE', tk .. ':pl:' .. svc, 0, -1)
+        if #pl == 0 then return server.error_reply('NOPLACEMENT ' .. svc .. ' has no healthy active placement') end
+        local ws, standby, total = {}, {}, 0
+        for i, p in ipairs(pl) do
+            local w = tonumber(server.call('HGET', tk .. ':w', p) or 1)
+            if w > 0 then ws[#ws + 1] = { p = p, w = w }; total = total + w else standby[#standby + 1] = p end
+        end
+        if total == 0 then
+            local n = server.call('INCR', tk .. ':rr:' .. svc)
+            local p = standby[((n - 1) % #standby) + 1]
+            local r = load_record(tk, p)
+            return { p, r and r.on or '', 'standby' }
+        end
+        local n = server.call('INCR', tk .. ':rr:' .. svc)
+        local step = (n - 1) % total
+        local cw = {}
+        for i = 1, #ws do cw[i] = 0 end
+        local pick
+        for s = 0, step do
+            local best = 1
+            for i = 1, #ws do cw[i] = cw[i] + ws[i].w; if cw[i] > cw[best] then best = i end end
+            cw[best] = cw[best] - total
+            pick = ws[best].p
+        end
+        local r = load_record(tk, pick)
+        return { pick, r and r.on or '', 'ring' }
+    end
+}
+
+-- In-flight per placement: a sorted set of correlation ids scored by departure ms (a lost reply reaps itself).
+server.register_function{
+    function_name = 'GNODE_TOPO_DEPART',
+    callback = function(keys, args)
+        if #keys < 1 or #args < 3 then return server.error_reply('GNODE_TOPO_DEPART tk | placement cid now_ms') end
+        server.call('ZADD', keys[1] .. ':inflight:' .. args[1], args[3], args[2])
+        return 'OK'
+    end
+}
+server.register_function{
+    function_name = 'GNODE_TOPO_ARRIVE',
+    callback = function(keys, args)
+        if #keys < 1 or #args < 2 then return server.error_reply('GNODE_TOPO_ARRIVE tk | placement cid') end
+        return server.call('ZREM', keys[1] .. ':inflight:' .. args[1], args[2])
+    end
+}
+server.register_function{
+    function_name = 'GNODE_TOPO_INFLIGHT',
+    callback = function(keys, args)
+        if #keys < 1 or #args < 3 then return server.error_reply('GNODE_TOPO_INFLIGHT tk | placement now_ms ttl_ms') end
+        local k = keys[1] .. ':inflight:' .. args[1]
+        server.call('ZREMRANGEBYSCORE', k, '-inf', tonumber(args[2]) - tonumber(args[3]))
+        return server.call('ZCARD', k)
+    end
+}
+
+-- REACH labels and the deny list (D8).
+server.register_function{
+    function_name = 'GNODE_TOPO_LABEL',
+    callback = function(keys, args)
+        if #keys < 1 or #args < 4 then return server.error_reply('GNODE_TOPO_LABEL tk | id holds_json requires_json peers_json') end
+        local tk, id = keys[1], args[1]
+        if server.call('HEXISTS', tk .. ':entities', id) ~= 1 then return server.error_reply('unknown entity ' .. id) end
+        local ok1, holds = pcall(cjson.decode, args[2]); local ok2, req = pcall(cjson.decode, args[3]); local ok3, peers = pcall(cjson.decode, args[4])
+        if not (ok1 and ok2 and ok3) then return server.error_reply('holds, requires and peers must be JSON arrays') end
+        server.call('DEL', tk .. ':holds:' .. id, tk .. ':req:' .. id, tk .. ':peers:' .. id)
+        for _, l in ipairs(holds) do server.call('SADD', tk .. ':holds:' .. id, l) end
+        for _, l in ipairs(req) do server.call('SADD', tk .. ':req:' .. id, l) end
+        for _, p in ipairs(peers) do server.call('SADD', tk .. ':peers:' .. id, p) end
+        return cjson.encode({ ok = true, eid = id, holds = #holds, requires = #req, peers = #peers })
+    end
+}
+server.register_function{
+    function_name = 'GNODE_TOPO_DENY',
+    callback = function(keys, args)
+        if #keys < 1 or #args < 4 then return server.error_reply('GNODE_TOPO_DENY tk | caller target now_ms ttl_ms') end
+        local ttl = tonumber(args[4])
+        if not ttl or ttl <= 0 then return server.error_reply('ttl_ms must be > 0: a deny is always bounded') end
+        server.call('ZADD', keys[1] .. ':deny', sfmt(tonumber(args[3]) + ttl), args[1] .. '>' .. args[2])
+        return 'OK'
+    end
+}
+server.register_function{
+    function_name = 'GNODE_TOPO_UNDENY',
+    callback = function(keys, args)
+        if #keys < 1 or #args < 2 then return server.error_reply('GNODE_TOPO_UNDENY tk | caller target') end
+        return server.call('ZREM', keys[1] .. ':deny', args[1] .. '>' .. args[2])
+    end
+}
+-- GNODE_TOPO_CAN_REACH tk | caller target now_ms → {0|1, reason}. Fail closed.
+server.register_function{
+    function_name = 'GNODE_TOPO_CAN_REACH', flags = { 'no-writes' },
+    callback = function(keys, args)
+        if #keys < 1 or #args < 3 then return server.error_reply('GNODE_TOPO_CAN_REACH tk | caller target now_ms') end
+        local tk, c, t, now = keys[1], args[1], args[2], tonumber(args[3])
+        local lc, lt = server.call('ZSCORE', tk .. ':ix:layer', c), server.call('ZSCORE', tk .. ':ix:layer', t)
+        if not lc or not lt then return { 0, 'undeclared' } end
+        lc, lt = math.floor(tonumber(lc) / 2 ^ 40), math.floor(tonumber(lt) / 2 ^ 40)
+        local pc = tonumber(server.call('ZSCORE', tk .. ':ix:fundamentality', c) or 0)
+        local pt = tonumber(server.call('ZSCORE', tk .. ':ix:fundamentality', t) or 0)
+        local below = lt < lc or (lt == lc and pt < pc)
+        if not below and server.call('SISMEMBER', tk .. ':peers:' .. c, t) == 0 then return { 0, 'layer' } end
+        local ec, et = server.call('HGET', tk .. ':env', c), server.call('HGET', tk .. ':env', t)
+        if not ec or not et then return { 0, 'undeclared' } end
+        if et ~= 'global' and et ~= ec then return { 0, 'env' } end
+        for _, l in ipairs(server.call('SMEMBERS', tk .. ':req:' .. t)) do
+            if server.call('SISMEMBER', tk .. ':holds:' .. c, l) == 0 then return { 0, 'label:' .. l } end
+        end
+        local d = server.call('ZSCORE', tk .. ':deny', c .. '>' .. t)
+        if d and tonumber(d) > now then return { 0, 'deny' } end
+        return { 1, 'reach' }
+    end
+}
+
+-- GNODE_TOPO_HEALTH_DERIVE tk [lease_key] | now_s fresh_s [node_id]
+-- Placement health from the heartbeat key it names; entity health = max over its placements;
+-- a web placement (service 3.1) reads its node daemon's heartbeat (D13).
+server.register_function{
+    function_name = 'GNODE_TOPO_HEALTH_DERIVE',
+    callback = function(keys, args)
+        if #keys < 1 or #args < 2 then return server.error_reply('GNODE_TOPO_HEALTH_DERIVE tk [lease] | now_s fresh_s [node_id]') end
+        local tk, now, fresh = keys[1], tonumber(args[1]), tonumber(args[2])
+        local ok, why = lease_ok(keys, args[3]); if not ok then return server.error_reply(why) end
+        local hbns = tag_of(tk) .. ':gnode:heartbeat:'
+        local ent, nf, nt = {}, 0, 0
+        for _, pid in ipairs(server.call('SMEMBERS', tk .. ':placements')) do
+            local rec = load_record(tk, pid)
+            if rec then
+                local hb, env = rec.hb or '', rec.env or 'production'
+                local ofr = load_record(tk, rec.of or '')
+                if ofr and ofr.sh == '3.1' then hb, env = 'gnode-daemon', 'all' end
+                local h = 0
+                if hb ~= '' then
+                    local raw = server.call('GET', hbns .. env .. ':' .. hb .. ':' .. (rec.on or ''))
+                    if raw then
+                        local okv, v = pcall(cjson.decode, raw)
+                        if okv and v.ts and now - tonumber(v.ts) <= fresh then h = 1 end
+                    end
+                end
+                nt = nt + 1; if h == 1 then nf = nf + 1 end
+                rec.pd[18] = h; rec.pr[18] = h == 1 and '18446744073709551616' or '0'
+                rec.q.health = sfmt(h * Q48); rec.m.ds = now
+                store(tk, rec); server.call('ZADD', tk .. ':ix:health', rec.q.health, pid)
+                ring_sync(tk, rec)
+                for _, e in ipairs({ rec.of, rec.on }) do if e and h > (ent[e] or -1) then ent[e] = h end end
+            end
+        end
+        local ne = 0
+        for e, h in pairs(ent) do
+            local rec = load_record(tk, e)
+            if rec then
+                rec.pd[18] = h; rec.pr[18] = h == 1 and '18446744073709551616' or '0'; rec.q.health = sfmt(h * Q48); rec.m.ds = now
+                store(tk, rec); server.call('ZADD', tk .. ':ix:health', rec.q.health, e); ne = ne + 1
+            end
+        end
+        return { nf, nt, ne }
+    end
+}
+
+-- GNODE_TOPO_VERIFY tk : the invariants, first violation or OK.
+server.register_function{
+    function_name = 'GNODE_TOPO_VERIFY', flags = { 'no-writes' },
+    callback = function(keys, args)
+        if #keys < 1 then return server.error_reply('GNODE_TOPO_VERIFY tk') end
+        local tk = keys[1]
+        if not is_constellation(tk) then return server.error_reply(tk .. ' is not a constellation topology') end
+        local ids = server.call('HKEYS', tk .. ':entities')
+        local ec = tonumber(server.call('HGET', tk .. ':meta', 'ec') or 0)
+        if ec ~= #ids then return 'ec ' .. ec .. ' != entities ' .. #ids end
+        local layer = {}
+        for _, id in ipairs(server.call('ZRANGE', tk .. ':ix:layer', 0, -1)) do layer[id] = true end
+        for _, id in ipairs(ids) do
+            if not layer[id] then return 'entity ' .. id .. ' is not in ix:layer' end
+            local rec = load_record(tk, id)
+            if not rec then return 'entity ' .. id .. ' does not decode' end
+            for axis, s in pairs(rec.q or {}) do
+                if server.call('ZSCORE', tk .. ':ix:' .. axis, id) ~= s then return 'entity ' .. id .. ' axis ' .. axis .. ' index disagrees with the record' end
+            end
+            if rec.of and server.call('HEXISTS', tk .. ':entities', rec.of) ~= 1 then return 'placement ' .. id .. ' of unknown ' .. rec.of end
+            if rec.on and server.call('HEXISTS', tk .. ':entities', rec.on) ~= 1 then return 'placement ' .. id .. ' on unknown ' .. rec.on end
+        end
+        for id in pairs(layer) do if server.call('HEXISTS', tk .. ':entities', id) ~= 1 then return 'ix:layer member ' .. id .. ' has no entity' end end
+        local edges = server.call('HKEYS', tk .. ':edges')
+        for _, e in ipairs(edges) do
+            local f, t = string.match(e, '^(.-):(.+)$')
+            local lf, lt = server.call('ZSCORE', tk .. ':ix:layer', f), server.call('ZSCORE', tk .. ':ix:layer', t)
+            if not lf or not lt then return 'edge ' .. e .. ' has an unknown end' end
+            local pf, pt = tonumber(server.call('ZSCORE', tk .. ':ix:fundamentality', f) or 0), tonumber(server.call('ZSCORE', tk .. ':ix:fundamentality', t) or 0)
+            lf, lt = math.floor(tonumber(lf) / 2 ^ 40), math.floor(tonumber(lt) / 2 ^ 40)
+            if lf < lt or (lf == lt and pf <= pt) then return 'edge ' .. e .. ' violates phi' end
+        end
+        local xc = tonumber(server.call('HGET', tk .. ':meta', 'xc') or 0)
+        if xc ~= #edges then return 'xc ' .. xc .. ' != edges ' .. #edges end
+        for _, pid in ipairs(server.call('SMEMBERS', tk .. ':placements')) do
+            local rec = load_record(tk, pid)
+            if not rec then return 'placement ' .. pid .. ' has no record' end
+            if rec.sh == '4.2' then
+                local inring = server.call('ZSCORE', tk .. ':pl:' .. rec.of, pid) ~= false
+                local should = (tonumber(rec.pd[18]) or 0) > 0 and tonumber(rec.pd[19]) == LIFECYCLE_ACTIVE
+                if inring ~= should then return 'placement ' .. pid .. ' ring membership disagrees with health/lifecycle' end
+            end
+        end
+        return 'OK'
+    end
 }
