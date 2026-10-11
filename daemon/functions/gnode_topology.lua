@@ -448,7 +448,7 @@ server.register_function{
 -- name→index map. The count alone is not enough to build a coordinate vector;
 -- the index each named capability occupies is the part that actually drifts.
 --
--- Usage: FCALL_RO GNODE_SCHEMA_GET 0 <topology_ns> [tier]
+-- Usage: FCALL_RO GNODE_SCHEMA_GET 0 <topology_ns> [tier | shape key such as 3.1]
 server.register_function{
     function_name = 'GNODE_SCHEMA_GET',
     callback = function(keys, args)
@@ -460,7 +460,13 @@ server.register_function{
         local tier = args[2]
         if not tier or tier == '' then tier = 'service' end
 
-        local key = '{' .. ns .. '}:gnode:schema:' .. tier
+        -- A shape key (`1`, `3.1`, `4.2`) reads the one-topology map; a tier name reads the legacy tier hash.
+        local key
+        if string.match(tier, '^%d[%d%.]*$') then
+            key = '{' .. ns .. '}:gnode:constellation:schema:' .. tier
+        else
+            key = '{' .. ns .. '}:gnode:schema:' .. tier
+        end
         local flat = server.call('HGETALL', key)
 
         -- Absent is a real answer, not an error: the daemon may not have

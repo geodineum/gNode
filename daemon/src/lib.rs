@@ -69,6 +69,9 @@ pub mod extensions;
 // Tool registration module for deploy-time registration of tool-tier services
 pub mod tool_registration;
 
+/// One schema for every shape of the constellation topology (SPEC-ONE-TOPOLOGY §3).
+pub mod topology_schema;
+
 /// Constellation-tier registration: a node announces its role, capacity and
 /// specialisation geometrically, so work can be steered by discovery rather
 /// than by which streams a node happens to consume.

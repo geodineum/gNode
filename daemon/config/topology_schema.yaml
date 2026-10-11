@@ -1,0 +1,104 @@
+# One topology per constellation: every shape in one width (SPEC-ONE-TOPOLOGY §3, D9-D11).
+# Slots 0-15 zone A (static, hashed, indexed) · 16-19 zone B (derived) · 20-23 storage.
+# A slot a shape does not name is "not an axis for this shape" (D10). Header slots are
+# positions; `load` is carried only by the shapes listed. Vocabularies carry over from the
+# 4.0 tier schemas where the axis survives; the log §3 names every drop, move and merge.
+schema_version: "5.0"
+width: 24
+
+header:
+  layer:
+    slot: 0
+    kind: ordered
+    static: true
+    writer: daemon
+    freeform: true
+  environment:
+    slot: 1
+    kind: colour
+    static: true
+    values: { global: 0.0, testing: 0.25, staging: 0.5, acceptance: 0.75, production: 1.0 }
+  load:
+    slot: 16
+    kind: ordered
+    writer: sampler
+    shapes: ["3.1", "3.2", "3.3", "4.2"]
+    values: { unknown: 0.0, idle: 0.2, light: 0.4, moderate: 0.6, heavy: 0.8, saturated: 1.0 }
+  health:
+    slot: 17
+    kind: ordered
+    writer: sampler
+    values: { unknown: 0.0, dead: 0.33, degraded: 0.67, healthy: 1.0 }
+  lifecycle:
+    slot: 18
+    kind: ordered
+    writer: daemon
+    values: { registering: 0.0, active: 0.25, draining: 0.5, stopped: 0.75, failed: 1.0 }
+
+bodies:
+  node:
+    2:  { name: node_role, kind: colour, static: true, values: { headless: 0.0, observer: 0.1, edge: 0.2, replica: 0.4, full_node: 0.6, master: 0.8, coordinator: 1.0 } }
+    3:  { name: valkey_mode, kind: colour, static: true, values: { none: 0.0, client_only: 0.33, replica: 0.67, primary: 1.0 } }
+    4:  { name: data_residency, kind: colour, static: true, values: { global: 0.0, na: 0.15, eu: 0.3, apac: 0.45, sa: 0.6, af: 0.75, me: 0.9 } }
+    5:  { name: availability_zone, kind: colour, static: true, values: { dr_site: 0.0, secondary: 0.5, primary: 1.0 } }
+    6:  { name: network_zone, kind: colour, static: true, values: { isolated: 0.0, vpn_only: 0.5, vpn_plus_public: 1.0 } }
+    7:  { name: cpu_tier, kind: ordered, static: true, values: { minimal: 0.0, standard: 0.33, compute: 0.67, gpu: 1.0 } }
+    8:  { name: memory_tier, kind: ordered, static: true, values: { minimal: 0.0, standard: 0.5, high_memory: 1.0 } }
+    9:  { name: bandwidth_tier, kind: ordered, static: true, values: { low: 0.0, standard: 0.33, high: 0.67, dedicated: 1.0 } }
+    10: { name: storage_tier, kind: ordered, static: true, values: { ephemeral: 0.0, ssd: 0.33, high_iops: 0.67, archival: 1.0 } }
+    11: { name: accelerator_tier, kind: ordered, static: true, values: { none: 0.0, igpu: 0.33, gpu: 0.67, multi_gpu: 1.0 } }
+    12: { name: specialization, kind: colour, static: true, values: { general: 0.0, inference: 0.25, storage: 0.5, compute: 0.75, content: 1.0 } }
+    19: { name: storage_available, kind: ordered, writer: sampler, values: { unknown: 0.0, critical: 0.2, low: 0.4, adequate: 0.6, ample: 0.8, plenty: 1.0 } }
+
+  component:
+    2:  { name: protocol, kind: colour, many: true, static: true, values: { none: 0.0, cli: 0.15, php_internal: 0.3, http_rest: 0.45, gnode_stream: 0.6, resp3_direct: 0.75, library: 0.9 } }
+    3:  { name: domain, kind: colour, many: true, static: true, values: { math: 0.05, infrastructure: 0.15, storage: 0.25, framework: 0.35, messaging: 0.45, template: 0.55, presentation: 0.65, backup: 0.75, security: 0.85, orchestration: 0.95 } }
+    4:  { name: implementation_language, kind: colour, static: true, values: { rust: 0.15, php: 0.3, lua: 0.45, bash: 0.6, c: 0.75, javascript: 0.9 } }
+    5:  { name: build_type, kind: colour, static: true, values: { none: 0.0, lua_load: 0.25, composer: 0.5, npm: 0.625, cargo_release: 0.75, apt_package: 1.0 } }
+    6:  { name: component_tier, kind: colour, static: true, values: { math: 0.0, infrastructure: 0.2, framework: 0.4, extension: 0.6, theme: 0.8, utility: 1.0 } }
+    7:  { name: license_tier, kind: colour, static: true, values: { open_source: 0.0, pro: 0.5, enterprise: 1.0 } }
+    8:  { name: requires_valkey, kind: colour, static: true, values: { "no": 0.0, "yes": 1.0 } }
+    9:  { name: systemd_managed, kind: colour, static: true, values: { "no": 0.0, "yes": 1.0 } }
+    10: { name: native_format, kind: colour, static: true, values: { none: 0.0, php_array: 0.15, json: 0.3, yaml: 0.45, resp3: 0.6, binary: 0.75, fixed_point: 0.9 } }
+    11: { name: contract_stability, kind: ordered, static: true, values: { experimental: 0.0, alpha: 0.25, beta: 0.5, stable: 0.75, frozen: 1.0 } }
+    12: { name: contract_version, kind: ordered, static: true, values: { v1: 0.2, v2: 0.4, v3: 0.6, v4: 0.8, v5: 1.0 } }
+    13: { name: fundamentality, kind: ordered, static: true, freeform: true, values: { foundation: 0.0, infrastructure: 0.3, platform: 0.5, application: 0.7, endpoint: 1.0 } }
+    19: { name: installations, kind: ordered, writer: daemon, freeform: true }
+
+  service:
+    2:  { name: protocol, kind: colour, many: true, static: true, values: { undefined: 0.0, http_rest: 0.1, graphql: 0.2, grpc: 0.3, websocket: 0.4, gnode_stream: 0.5, resp3_direct: 0.6, amqp: 0.7, kafka: 0.8, custom_tcp: 0.9 } }
+    3:  { name: auth_method, kind: colour, static: true, values: { none: 0.0, api_key: 0.2, bearer_token: 0.4, session_cookie: 0.6, mtls: 0.8, hardware_token: 1.0 } }
+    4:  { name: service_scope, kind: colour, static: true, values: { infrastructure: 0.0, daemon: 0.15, worker: 0.3, cron_scheduled: 0.45, internal_api: 0.6, bff: 0.75, client_facing: 0.9, edge: 1.0 } }
+    5:  { name: domain, kind: colour, many: true, static: true, values: { undefined: 0.0, platform: 0.05, identity: 0.1, configuration: 0.15, storage: 0.2, cache: 0.25, compute: 0.3, transform: 0.35, messaging: 0.4, workflow: 0.45, template: 0.5, content: 0.55, gateway: 0.6, integration: 0.65, analytics: 0.7, logging: 0.75, ml_inference: 0.8, search: 0.85, notification: 0.9, presentation: 0.95 } }
+    6:  { name: contract_stability, kind: ordered, static: true, values: { experimental: 0.0, alpha: 0.25, beta: 0.5, stable: 0.75, frozen: 1.0 } }
+    7:  { name: contract_version, kind: ordered, static: true, values: { undefined: 0.0, v1: 0.1, v2: 0.2, v3: 0.3, v4: 0.4, v5: 0.5 } }
+    8:  { name: throughput_tier, kind: ordered, static: true, values: { minimal: 0.0, standard: 0.25, professional: 0.5, enterprise: 0.75, hyperscale: 1.0 } }
+    9:  { name: latency_class, kind: ordered, static: true, values: { realtime: 0.0, interactive: 0.25, responsive: 0.5, patient: 0.75, batch: 1.0 } }
+    10: { name: reliability_tier, kind: ordered, static: true, values: { best_effort: 0.0, standard: 0.25, high: 0.5, critical: 0.75, ultra: 1.0 } }
+    11: { name: execution_priority, kind: ordered, static: true, values: { background: 0.0, low: 0.25, normal: 0.5, high: 0.75, critical: 1.0 } }
+    12: { name: implementation_language, kind: colour, static: true, values: { undefined: 0.0, rust: 0.15, php: 0.3, lua: 0.45, python: 0.55, go: 0.65, javascript: 0.75, bash: 0.9 } }
+    13: { name: native_format, kind: colour, static: true, values: { undefined: 0.0, plaintext: 0.1, json: 0.2, xml: 0.3, yaml: 0.4, msgpack: 0.5, protobuf: 0.6, cbor: 0.7, resp3: 0.8, custom_binary: 0.9 } }
+    14: { name: fundamentality, kind: ordered, static: true, freeform: true, values: { foundation: 0.0, daemon: 0.3, app: 0.5, site: 0.7, endpoint: 1.0 } }
+    19: { name: instances, kind: ordered, writer: daemon, freeform: true }
+
+  component_on_node:
+    2:  { name: installed_version, kind: ordered, static: true, freeform: true }
+    3:  { name: build, kind: colour, static: true, values: { source: 0.0, release: 0.5, package: 1.0 } }
+    19: { name: heartbeat_age, kind: ordered, writer: sampler, freeform: true }
+
+  service_on_node:
+    2:  { name: installed_version, kind: ordered, static: true, freeform: true }
+    3:  { name: capacity_weight, kind: ordered, static: true, freeform: true, values: { standby: 0.0 } }
+    19: { name: in_flight, kind: ordered, writer: sampler, freeform: true }
+
+shapes:
+  "1":   { name: node, body: node }
+  "2":   { name: component, body: component }
+  "3.1": { name: site, body: service, fundamentality: 0.7 }
+  "3.2": { name: app, body: service, fundamentality: 0.5 }
+  "3.3": { name: daemon, body: service, fundamentality: 0.3 }
+  "4.1": { name: component_on_node, body: component_on_node }
+  "4.2": { name: service_on_node, body: service_on_node }
+
+# D11: a component's default fundamentality is its rung on this ladder (0 = foundation).
+component_ladder: [ValKey, gMath, gNode, gNode-CMS, gNode-Client, gCore, gTemplate, gCube, Geodineum-COMMS, gFlow, gSchedule, Geodineum-BAK]

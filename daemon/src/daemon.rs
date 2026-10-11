@@ -874,6 +874,22 @@ impl GNodeDaemon {
                             Err(e) => warn!("Could not load tier schema {:?} for publishing: {}", path, e),
                         }
                     }
+
+                    // The one-topology schema beside the tier files: per-shape slot maps
+                    // on `{ns}:gnode:constellation:schema:<shape>` (SPEC-ONE-TOPOLOGY §3).
+                    match crate::topology_schema::TopologySchema::default_path(&service_path) {
+                        Some(tpath) => match crate::topology_schema::TopologySchema::load(&tpath) {
+                            Ok(ts) => if let Ok(mut conn) = self.client.get_connection() {
+                                let tk = format!("{{{}}}:gnode:constellation", self.topology_namespace);
+                                match ts.publish(&mut conn, &tk) {
+                                    Ok(()) => info!("Published topology schema {} for {} shapes at {}:schema:*", ts.version, ts.shape_keys().len(), tk),
+                                    Err(e) => warn!("Topology schema publish failed: {}", e),
+                                }
+                            },
+                            Err(e) => error!("Topology schema {:?} does not compile: {}", tpath, e),
+                        },
+                        None => warn!("No topology_schema.yaml beside {:?}", service_path),
+                    }
                 },
                 None => warn!("No tier schema found to publish; clients will use their built-in defaults"),
             }
