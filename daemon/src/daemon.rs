@@ -877,7 +877,7 @@ impl GNodeDaemon {
 
                     // The one-topology schema beside the tier files: per-shape slot maps
                     // on `{ns}:gnode:constellation:schema:<shape>` (SPEC-ONE-TOPOLOGY §3).
-                    match crate::topology_schema::TopologySchema::default_path(&service_path) {
+                    match crate::topology_schema::TopologySchema::locate().or_else(|| crate::topology_schema::TopologySchema::default_path(&service_path)) {
                         Some(tpath) => match crate::topology_schema::TopologySchema::load(&tpath) {
                             Ok(ts) => if let Ok(mut conn) = self.client.get_connection() {
                                 for c in crate::constellation::served() {
@@ -2028,8 +2028,8 @@ impl GNodeDaemon {
             // heartbeats, health from placements, one lease per constellation. Opt-in on this
             // branch (GNODE_ONE_TOPOLOGY=on) until WP3e makes it the only path.
             if std::env::var("GNODE_ONE_TOPOLOGY").map(|v| v == "on").unwrap_or(false) {
-                match crate::tool_registration::find_schema_path(None)
-                    .and_then(|sp| crate::topology_schema::TopologySchema::default_path(&sp))
+                match crate::topology_schema::TopologySchema::locate()
+                    .or_else(|| crate::tool_registration::find_schema_path(None).and_then(|sp| crate::topology_schema::TopologySchema::default_path(&sp)))
                     .map(|tp| crate::topology_schema::TopologySchema::load(&tp))
                 {
                     Some(Ok(schema)) => {

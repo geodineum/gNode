@@ -24,7 +24,7 @@ static SCHEMA: OnceLock<Option<TopologySchema>> = OnceLock::new();
 /// The compiled schema, loaded once from `topology_schema.yaml` beside the tier files.
 pub fn schema() -> Option<&'static TopologySchema> {
     SCHEMA.get_or_init(|| {
-        std::env::var("GNODE_TOPOLOGY_SCHEMA").ok().map(std::path::PathBuf::from).filter(|p| p.exists())
+        TopologySchema::locate()
             .or_else(|| crate::tool_registration::find_schema_path(None).and_then(|sp| TopologySchema::default_path(&sp)))
             .and_then(|tp| match TopologySchema::load(&tp) {
                 Ok(s) => Some(s),
@@ -386,4 +386,142 @@ mod tests {
         let d: DiscoverParams = serde_json::from_value(json!({})).unwrap();
         assert_eq!(plan_discover(&s, &d).unwrap().0, "3", "default: every service");
     }
+}
+
+// ============================================================================
+// Edges on the one topology (K7): the daemon's only edge surface once the 3-D handlers go.
+// An edge exists only if φ(from) > φ(to); the library refuses the rest (P-c).
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct EdgeParams {
+    pub from: String,
+    pub to: String,
+    #[serde(default)]
+    pub metadata: Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EdgeListParams {
+    pub id: String,
+    #[serde(default = "default_dir")]
+    pub direction: String,
+}
+
+fn default_dir() -> String { "outgoing".to_string() }
+
+fn edge_reply(from: &str, to: &str, r: redis::RedisResult<String>) -> CommandResult {
+    match r {
+        Ok(_) => CommandResult::success(json!({ "ok": true, "from": from, "to": to })),
+        Err(e) => CommandResult::error(format!("edge {} -> {} refused: {}", from, to, e)),
+    }
+}
+
+/// The potential check without the write: what `GNODE_TOPO_ADD_EDGE` would decide.
+pub fn validate_edge(conn: &mut redis::Connection, c: &Constellation, from: &str, to: &str) -> CommandResult {
+    let tk = c.key();
+    let score = |conn: &mut redis::Connection, axis: &str, id: &str| -> Option<f64> {
+        redis::cmd("ZSCORE").arg(format!("{}:ix:{}", tk, axis)).arg(id).query::<Option<f64>>(conn).ok().flatten()
+    };
+    let (Some(lf), Some(lt)) = (score(conn, "layer", from), score(conn, "layer", to)) else {
+        return CommandResult::success(json!({ "valid": false, "reason": "both ends must carry a layer" }));
+    };
+    let pf = score(conn, "fundamentality", from).unwrap_or(0.0);
+    let pt = score(conn, "fundamentality", to).unwrap_or(0.0);
+    let (tf, tt) = ((lf / 2f64.powi(40)).floor(), (lt / 2f64.powi(40)).floor());
+    let valid = from != to && (tf > tt || (tf == tt && pf > pt));
+    CommandResult::success(json!({
+        "valid": valid, "from": from, "to": to,
+        "phi_from": [tf, pf], "phi_to": [tt, pt],
+        "reason": if valid { Value::Null } else { json!("phi(from) must exceed phi(to): the top-level layer digit, then fundamentality") },
+    }))
+}
+
+pub fn edge_add(conn: &mut redis::Connection, site_id: &str, params: Value) -> CommandResult {
+    let p: EdgeParams = match serde_json::from_value(params) { Ok(p) => p, Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)) };
+    let c = crate::constellation::for_entity(conn, &p.from);
+    let meta = if p.metadata.is_object() { p.metadata.to_string() } else { "{}".to_string() };
+    edge_reply(&p.from, &p.to, fcall(&c.key(), "GNODE_TOPO_ADD_EDGE", &[&p.from, &p.to, &meta]).query(conn))
+}
+
+pub fn edge_remove(conn: &mut redis::Connection, _site_id: &str, params: Value) -> CommandResult {
+    let p: EdgeParams = match serde_json::from_value(params) { Ok(p) => p, Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)) };
+    let c = crate::constellation::for_entity(conn, &p.from);
+    edge_reply(&p.from, &p.to, fcall(&c.key(), "GNODE_TOPO_REMOVE_EDGE", &[&p.from, &p.to]).query(conn))
+}
+
+pub fn edge_list(conn: &mut redis::Connection, _site_id: &str, params: Value) -> CommandResult {
+    let p: EdgeListParams = match serde_json::from_value(params) { Ok(p) => p, Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)) };
+    let c = crate::constellation::for_entity(conn, &p.id);
+    let set = match p.direction.as_str() { "incoming" => "in", "outgoing" => "out", other => return CommandResult::error(format!("direction {} is not outgoing or incoming", other)) };
+    let ids: redis::RedisResult<Vec<String>> = redis::cmd("SMEMBERS").arg(format!("{}:{}:{}", c.key(), set, p.id)).query(conn);
+    match ids {
+        Ok(mut v) => { v.sort(); CommandResult::success(json!({ "id": p.id, "direction": p.direction, "edges": v })) }
+        Err(e) => CommandResult::error(format!("edge list failed: {}", e)),
+    }
+}
+
+pub fn edge_validate(conn: &mut redis::Connection, _site_id: &str, params: Value) -> CommandResult {
+    let p: EdgeParams = match serde_json::from_value(params) { Ok(p) => p, Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)) };
+    let c = crate::constellation::for_entity(conn, &p.from);
+    validate_edge(conn, &c, &p.from, &p.to)
+}
+
+use crate::daemon::Command;
+use crate::integration::handlers::types::{AsyncCommandHandlerFn, CommandDescriptor, CommandHandlerFn};
+use crate::GeometricTopology;
+use std::sync::{Arc, RwLock};
+
+macro_rules! sync_edge_handler {
+    ($name:ident, $f:ident) => {
+        fn $name(command: &Command, conn: &mut redis::Connection, _t: &Arc<RwLock<GeometricTopology>>, site_id: &str, _debug: bool) -> CommandResult {
+            $f(conn, site_id, command.parameters.clone())
+        }
+    };
+}
+sync_edge_handler!(h_edge_add, edge_add);
+sync_edge_handler!(h_edge_remove, edge_remove);
+sync_edge_handler!(h_edge_list, edge_list);
+sync_edge_handler!(h_edge_validate, edge_validate);
+
+/// Registers the edge commands. They write through the Lua potential check, so they run on
+/// the sync lane only: an edge decision is ordered by nature.
+pub fn register_commands(
+    handlers: &mut std::collections::HashMap<String, CommandHandlerFn>,
+    _async_handlers: &mut std::collections::HashMap<String, AsyncCommandHandlerFn>,
+    descriptors: &mut Vec<CommandDescriptor>,
+) {
+    handlers.insert("topology_edge_add".to_string(), h_edge_add as CommandHandlerFn);
+    handlers.insert("topology_edge_remove".to_string(), h_edge_remove as CommandHandlerFn);
+    handlers.insert("topology_edge_list".to_string(), h_edge_list as CommandHandlerFn);
+    handlers.insert("topology_edge_validate".to_string(), h_edge_validate as CommandHandlerFn);
+    let edge_params = json!({ "type": "object", "properties": { "from": {"type": "string"}, "to": {"type": "string"}, "metadata": {"type": "object"} }, "required": ["from", "to"] });
+    descriptors.push(CommandDescriptor {
+        name: "topology_edge_add", category: "topology",
+        description: "Add a dependency edge from -> to in the constellation; stored only if phi(from) > phi(to) (top-level layer, then fundamentality), so a cycle is impossible",
+        params_schema: edge_params.clone(),
+        returns_schema: json!({ "type": "object", "properties": { "ok": {"type": "boolean"}, "from": {"type": "string"}, "to": {"type": "string"} } }),
+        example: r#"{"cmd":"topology_edge_add","params":{"from":"nierto_com","to":"gCore"}}"#, async_capable: false, lane: crate::integration::handlers::types::Lane::Ordered,
+    });
+    descriptors.push(CommandDescriptor {
+        name: "topology_edge_remove", category: "topology",
+        description: "Remove the dependency edge from -> to",
+        params_schema: edge_params.clone(),
+        returns_schema: json!({ "type": "object", "properties": { "ok": {"type": "boolean"} } }),
+        example: r#"{"cmd":"topology_edge_remove","params":{"from":"nierto_com","to":"gCore"}}"#, async_capable: false, lane: crate::integration::handlers::types::Lane::Ordered,
+    });
+    descriptors.push(CommandDescriptor {
+        name: "topology_edge_list", category: "topology",
+        description: "The ids an entity depends on (outgoing) or that depend on it (incoming), sorted",
+        params_schema: json!({ "type": "object", "properties": { "id": {"type": "string"}, "direction": {"type": "string", "enum": ["outgoing", "incoming"]} }, "required": ["id"] }),
+        returns_schema: json!({ "type": "object", "properties": { "id": {"type": "string"}, "direction": {"type": "string"}, "edges": {"type": "array", "items": {"type": "string"}} } }),
+        example: r#"{"cmd":"topology_edge_list","params":{"id":"nierto_com","direction":"outgoing"}}"#, async_capable: false, lane: crate::integration::handlers::types::Lane::Ordered,
+    });
+    descriptors.push(CommandDescriptor {
+        name: "topology_edge_validate", category: "topology",
+        description: "Dry run of topology_edge_add: the potential of both ends and whether the edge would be stored",
+        params_schema: edge_params,
+        returns_schema: json!({ "type": "object", "properties": { "valid": {"type": "boolean"}, "phi_from": {"type": "array"}, "phi_to": {"type": "array"}, "reason": {"type": ["string", "null"]} } }),
+        example: r#"{"cmd":"topology_edge_validate","params":{"from":"gCore","to":"nierto_com"}}"#, async_capable: false, lane: crate::integration::handlers::types::Lane::Ordered,
+    });
 }

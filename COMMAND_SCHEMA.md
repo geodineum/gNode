@@ -2,8 +2,8 @@
 
 Definitive reference for all daemon commands and ValKey Lua functions.
 
-**Base daemon**: 61 commands, 24 Lua libraries (207 functions)
-**With CMS extension** (default companion; opt out with `GEODINEUM_SKIP_CMS=true`): 84 commands, 25 Lua libraries (217 functions)
+**Base daemon**: 65 commands, 24 Lua libraries (224 functions)
+**With CMS extension** (default companion; opt out with `GEODINEUM_SKIP_CMS=true`): 84 commands, 25 Lua libraries (234 functions)
 
 > Counting basis — *commands* = one canonical command per row in Part 1
 > (the uppercase / camelCase / short forms are aliases, not separate
@@ -133,7 +133,7 @@ to see exactly which lane each command takes.
 
 ### Current Ordered commands
 
-These 7 commands are the only ones in the base catalog that opt into
+These 11 commands are the only ones in the base catalog that opt into
 `Lane::Ordered`. Each declares a justification comment at its
 descriptor's call site.
 
@@ -146,6 +146,10 @@ descriptor's call site.
 | `relay_policy_set` | Routing-policy change — pending relay decisions must observe new policy. |
 | `relay_policy_remove` | Same rationale as `relay_policy_set`. |
 | `config_set` | Daemon-behaviour change — pending `config_get` reads must observe new value. |
+| `topology_edge_add` | An edge decision is a potential comparison over the stored indexes; a later edge in the batch must see it. |
+| `topology_edge_remove` | Destructive — pending reads must observe post-remove state. |
+| `topology_edge_list` | Reads edges a preceding `topology_edge_add` in the batch wrote. |
+| `topology_edge_validate` | A dry run of `topology_edge_add`; ordered with it so the answer is the one the add would give. |
 
 All other commands default to **Lane::Concurrent**.
 
@@ -226,6 +230,19 @@ function's JSON. A 3-D topology never writes the shared service snapshot.
 | `topo_validate_edge` | `TOPO_VALIDATE_EDGE` | `{topology_key: string, from_id: string, to_id: string}` | `{valid, reason, from_z, to_z, z_delta}` | Check an edge against Z-monotonicity without creating it |
 
 ---
+
+### One topology — edges (4 commands)
+
+Source: `daemon/src/integration/handlers/one_topology.rs`. The dependency edges of the constellation (SPEC-ONE-TOPOLOGY §8): an edge exists only if φ(from) > φ(to), φ = (top-level layer digit, fundamentality), so a cycle is impossible by one integer comparison. The entity's constellation is found from `from` (`for_entity`).
+
+| Command | Aliases | Parameters | Returns | Description |
+|---|---|---|---|---|
+| `topology_edge_add` | — | `{from: string, to: string, metadata?: object}` | `{ok, from, to}` | Add a dependency edge; refused with the two potentials when φ(from) ≤ φ(to) or the ends are unknown |
+| `topology_edge_remove` | — | `{from: string, to: string}` | `{ok, from, to}` | Remove an edge; refused when absent |
+| `topology_edge_list` | — | `{id: string, direction?: "outgoing"\|"incoming" = "outgoing"}` | `{id, direction, edges: [id]}` | What an entity depends on, or what depends on it; sorted |
+| `topology_edge_validate` | — | `{from: string, to: string}` | `{valid, from, to, phi_from: [layer, fundamentality], phi_to, reason}` | Dry run of `topology_edge_add` |
+
+Under `GNODE_ONE_TOPOLOGY=on`, `register_service` takes `{id, shape, environment, axes: {name: word \| [words] \| fraction}, metadata?, on?, capacity_weight?, heartbeat?, holds?, requires?, peers?, constellation?}` and `geometric_discover` / `geometric_discover_range` take `{layer?, facets?: {name: word \| [words]}, axes?: {name: [lo, hi]}, limit?}` and return records with their colour; the numeric `capabilities` and index `requirements` forms are refused by name. These become the only forms when the switch becomes the default (WP3e Phase B).
 
 ### Service (3 commands)
 
@@ -403,7 +420,7 @@ All functions use `FCALL <function_name> <numkeys> [keys...] [args...]`. The `se
 
 ---
 
-### gnode_topo — 21 functions
+### gnode_topo — 38 functions
 
 Stateless topology persistence. Daemon computes Q64.64 bucket keys and z_scores; Lua stores entities/edges/indexes.
 
@@ -433,15 +450,30 @@ Stateless topology persistence. Daemon computes Q64.64 bucket keys and z_scores;
 | `GNODE_TOPO_FIND_ENTITY_SITE` | — | entity_id, site_ids_json | `{site_id, topology_key}` or null | Find which site contains an entity |
 
 ---
+| `GNODE_ENSURE_CONSTELLATION` | tk | — | `{ok, tk, created}` | The one key of a constellation (`{c}:gnode:constellation`), created once with meta `sv=5` |
+| `GNODE_TOPO_REGISTER` | tk | id, shape_key, record_json, ordered_json `{axis: score}`, colours_json `{facet: [values]}`, preserve_csv | `{ok, eid, sh, ro, upd}` | Register an entity of a shape against the published per-shape map: layer interval, vocabularies, one-valued facets; `ro` allocated once; zone-B slots in preserve_csv kept on update; the shape's `fundamentality_default` applied when none is declared |
+| `GNODE_TOPO_PLACE` | tk | id, shape_key (4.1\|4.2), of, on, env, heartbeat_component, weight, record_json, ordered_json, colours_json [, heartbeat_env] | `{ok, eid, sh, ro, upd}` | A placement of a component (4.1) or service (4.2) on a node; a 4.2 joins the ring; weight 0 = standby |
+| `GNODE_TOPO_DEREGISTER` | tk | id | `{ok, eid, placements_removed}` | Remove an entity, its indexes, edges and placements |
+| `GNODE_TOPO_QUERY` | tk | layer_lo, layer_hi, filters_json `{axes: {name: [lo, hi]}, facets: {name: [any-of]}}` [, opts_json `{limit}`] | array of record JSON | The layer interval drives, every other constraint is one index lookup per candidate, survivors decode. `no-writes` |
+| `GNODE_TOPO_ORDER` | tk | axis [, limit, offset, desc] | ids with scores | A ranking by one indexed axis. `no-writes` |
+| `GNODE_TOPO_ROUTE` | tk | service | `[placement, node, "ring"\|"standby"]` | Exact weighted round-robin over the service's healthy active placements from one shared counter; weight 0 only when the ring is empty |
+| `GNODE_TOPO_DEPART` | tk | placement, cid, now_ms | `OK` | A relayed command left for this placement (in-flight set scored by departure) |
+| `GNODE_TOPO_ARRIVE` | tk | placement, cid | 0\|1 | Its reply arrived |
+| `GNODE_TOPO_INFLIGHT` | tk | placement, now_ms, ttl_ms | integer | In-flight count after reaping departures older than ttl |
+| `GNODE_TOPO_LABEL` | tk | id, holds_json, requires_json, peers_json | `{ok, eid, holds, requires, peers}` | REACH labels and declared same-layer peers |
+| `GNODE_TOPO_DENY` | tk | caller, target, now_ms, ttl_ms | `OK` | A TTL-bounded deny (ttl must be > 0) |
+| `GNODE_TOPO_UNDENY` | tk | caller, target | 0\|1 | Remove a deny |
+| `GNODE_TOPO_CAN_REACH` | tk | caller, target, now_ms | `[0\|1, reason]` | φ(target) < φ(caller) or declared peer; env ∈ {env(caller), global}; requires ⊆ holds; no live deny. Undeclared ⇒ 0. `no-writes` |
+| `GNODE_TOPO_HEALTH_DERIVE` | tk [, lease_key] | now_s, fresh_s [, node_id] | `[fresh, placements, entities]` | Placement health from the heartbeat key it names (dead when missing or stale, unknown when none can be named); entity health = max over placements; ring membership follows |
+| `GNODE_TOPO_VERIFY` | tk | — | `OK` or the first violation | Invariants: counts, index ↔ record agreement, placement references, φ on every edge, ring membership. `no-writes` |
 
-### gnode_topology — 4 functions
+### gnode_topology — 3 functions
 
 Dimension-schema introspection and batch load updates for the active tier schema (default service tier = 23D: 16 hashed, 19 discovery, 23 total). The dimension count is whatever the loaded schema declares. Semantic discovery, replacement finding, and custom-topology queries are **native daemon commands** (see `discover`, `custom_topology_discover` in Part 1), not Lua functions.
 
 | Function | Keys | Args | Returns | Description |
 |----------|------|------|---------|-------------|
 | `GNODE_TOPOLOGY_GET_SCHEMA` | — | — | `{total_dimensions, dimensions, values, query_types}` | Returns semantic dimension schema (active tier; service tier = 30) |
-| `GNODE_TOPOLOGY_BATCH_UPDATE_LOAD` | topology_key | updates_json | `{status, updated, not_found}` | Batch update current_load values for multiple services |
 | `GNODE_TOPOLOGY_GET_FULL_SCHEMA` | — | — | JSON full schema with valid values per dimension | Full dimension schema for developers |
 | `GNODE_SCHEMA_GET` | — | topology_ns, tier? (default `service`) | Schema hash for the tier, including `dimension_index` (name→index map) | Canonical capability-schema lookup: reads back the schema the daemon published at startup, so a caller matches against the same dimension count and indices the daemon uses. Errors (naming the key) when nothing is published yet. `no-writes` |
 
@@ -808,13 +840,14 @@ fallback chain. Mirrors the `gnode_config` precedent. Args are positional (no `K
 
 ---
 
-### gnode_analytics — 2 functions
+### gnode_analytics — 3 functions
 
 Server-side visitor analytics that run at the data. A front-end beacon posts to a gCore/gTemplate REST endpoint, which resolves site + visitor hash + bot flag server-side and calls `GNODE_ANALYTICS_HIT`; the operator dashboard reads everything back through `GNODE_ANALYTICS_SUMMARY`. All keys are hash-tagged `{site_id}:` so per-site ACLs (`~{site}:*`) can serve them, and every key carries a 90-day EXPIRE.
 
 | Function | Keys | Args | Returns | Description |
 |----------|------|------|---------|-------------|
 | `GNODE_ANALYTICS_HIT` | — | site_id, visitor_hash, page, referrer_host, is_bot, ts, ymd | `"OK"` | Record one hit atomically across the per-day bot/page/visit/visitor/referrer/transition keys |
+| `GNODE_ANALYTICS_CLICK` | — | site_id, visitor_hash, label, page, is_bot, ts, ymd | `"OK"` | Record one labelled click on a page, keyed like a hit |
 | `GNODE_ANALYTICS_SUMMARY` | — | site_id, ymd1 [, ymd2 ...] | `{pages_served, unique_visitors, avg_pages_per_visitor, human_hits, bot_hits, top_pages, top_referrers, top_paths, daily}` | Aggregate a set of days for the operator dashboard. `no-writes` |
 
 ---

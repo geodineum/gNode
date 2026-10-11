@@ -958,10 +958,19 @@ pub fn create_unified_stream_worker(
                         1000, // block_ms
                         debug_mode
                     ) {
-                        Ok((commands, health_messages, unified_message_ids, _health_message_ids, relay_replies)) => {
+                        Ok((commands, health_messages, unified_message_ids, health_message_ids, relay_replies)) => {
                             if debug_mode && (!commands.is_empty() || !health_messages.is_empty()) {
                                 debug!("Multi-stream read: {} commands, {} health updates",
                                     commands.len(), health_messages.len());
+                            }
+                            // One topology: health records are telemetry here (the sampler reads them through
+                            // its own group); acknowledge what was read so nothing pends when the lu writer goes (K3).
+                            if crate::constellation::one_topology_enabled() && !health_message_ids.is_empty() {
+                                let hs = crate::config::build_health_stream_key(&site_id_owned);
+                                let mut ack = redis::cmd("XACK");
+                                ack.arg(&hs).arg("gnode-daemon");
+                                for id in &health_message_ids { ack.arg(id); }
+                                let _: redis::RedisResult<i64> = ack.query(&mut conn);
                             }
 
                             // Carry any service reply home before anything else:
@@ -1544,10 +1553,20 @@ pub fn create_environment_stream_worker_dynamic(
                             block_ms_per_stream,
                             debug_mode
                         ) {
-                            Ok((commands, health_messages, unified_message_ids, _health_message_ids, relay_replies)) => {
+                            Ok((commands, health_messages, unified_message_ids, health_message_ids, relay_replies)) => {
                                 if debug_mode && (!commands.is_empty() || !health_messages.is_empty()) {
                                     debug!("Stream[{}] {}: {} commands, {} health updates",
                                         stream_idx, current_unified_stream, commands.len(), health_messages.len());
+                                }
+                                if crate::constellation::one_topology_enabled() && !health_message_ids.is_empty() {
+                                    let site = crate::config::site_of_stream_key(current_unified_stream).unwrap_or(&site_id_owned);
+                                    let hs = crate::config::build_health_stream_key(site);
+                                    let mut ack = redis::cmd("XACK");
+                                    ack.arg(&hs).arg("gnode-daemon");
+                                    for id in &health_message_ids { ack.arg(id); }
+                                    let _: redis::RedisResult<i64> = ack.query(&mut conn);
+                                }
+                                if false {
                                 }
 
                                 // This is the loop that sees EVERY discovered

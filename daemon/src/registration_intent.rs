@@ -149,6 +149,36 @@ pub fn reconcile(
         return Ok(report);
     }
 
+    // One topology (K9): the stored record lives in the constellation key and the bucket key is
+    // gone. Drift = the stored shape or environment differs from the declared profile and
+    // environment, or the record is absent. Report only: a re-assertion without the manifest's
+    // axes (WP5) would erase what the site declared.
+    if crate::constellation::one_topology_enabled() {
+        for intent in &intents {
+            report.examined += 1;
+            let c = crate::constellation::for_entity(conn, &intent.site);
+            let expected_shape = match intent.profile.as_str() {
+                "web" => "3.1", "headless" => "3.2", "service" | "system" => "3.3", "component" => "2", _ => "3.2",
+            };
+            let stored: redis::RedisResult<Option<String>> = redis::cmd("HGET").arg(format!("{}:entities", c.key())).arg(&intent.site).query(conn);
+            let rec = stored.ok().flatten().and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok());
+            let (sh, env) = match &rec {
+                Some(r) => (r["sh"].as_str().unwrap_or("").to_string(), r["env"].as_str().unwrap_or("").to_string()),
+                None => (String::new(), String::new()),
+            };
+            if sh == expected_shape && env == intent.environment {
+                continue;
+            }
+            report.drifted.push(intent.site.clone());
+            info!("registration drift: '{}' stored shape={} env={} declared shape={} env={} (one topology, report only)",
+                intent.site, if sh.is_empty() { "<absent>" } else { &sh }, if env.is_empty() { "<absent>" } else { &env }, expected_shape, intent.environment);
+        }
+        if report.drifted.is_empty() {
+            debug!("registration reconcile: {} intents, all in agreement (one topology)", report.examined);
+        }
+        return Ok(report);
+    }
+
     let schema_path = match find_schema_path(None) {
         Some(p) => p,
         None => {

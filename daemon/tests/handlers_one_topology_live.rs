@@ -95,3 +95,27 @@ async fn the_async_lane_runs_the_same_plan() {
     let mut sync = client.get_connection().unwrap();
     assert_eq!(c.verify(&mut sync).unwrap(), "OK");
 }
+
+#[test]
+#[ignore]
+fn edges_have_a_command_surface_and_obey_the_potential() {
+    let Some((client, c)) = setup() else { return };
+    let mut conn = client.get_connection().unwrap();
+    assert_eq!(h::register(&mut conn, "nierto_com", json!({ "id": "gCore", "shape": "component", "environment": "global", "axes": { "protocol": ["library"], "implementation_language": "php" } })).status, "ok");
+    assert_eq!(h::register(&mut conn, "nierto_com", json!({ "id": "nierto_com", "shape": "site", "axes": { "protocol": ["http_rest"] } })).status, "ok");
+    let v = h::edge_validate(&mut conn, "nierto_com", json!({ "from": "nierto_com", "to": "gCore" })).result.unwrap();
+    assert_eq!(v["valid"], true, "{v}");
+    assert_eq!(v["phi_from"][0], 3.0);
+    assert_eq!(v["phi_to"][0], 2.0);
+    let v = h::edge_validate(&mut conn, "nierto_com", json!({ "from": "gCore", "to": "nierto_com" })).result.unwrap();
+    assert_eq!(v["valid"], false, "a component cannot depend on a site");
+    assert_eq!(h::edge_add(&mut conn, "nierto_com", json!({ "from": "nierto_com", "to": "gCore" })).status, "ok");
+    assert_eq!(h::edge_add(&mut conn, "nierto_com", json!({ "from": "gCore", "to": "nierto_com" })).status, "error", "refused by the potential, so no cycle can form");
+    let l = h::edge_list(&mut conn, "nierto_com", json!({ "id": "nierto_com" })).result.unwrap();
+    assert_eq!(l["edges"], json!(["gCore"]));
+    let l = h::edge_list(&mut conn, "nierto_com", json!({ "id": "gCore", "direction": "incoming" })).result.unwrap();
+    assert_eq!(l["edges"], json!(["nierto_com"]));
+    assert_eq!(h::edge_remove(&mut conn, "nierto_com", json!({ "from": "nierto_com", "to": "gCore" })).status, "ok");
+    assert_eq!(h::edge_list(&mut conn, "nierto_com", json!({ "id": "nierto_com" })).result.unwrap()["edges"], json!([]));
+    assert_eq!(c.verify(&mut conn).unwrap(), "OK");
+}

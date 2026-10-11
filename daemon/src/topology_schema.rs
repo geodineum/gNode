@@ -151,6 +151,20 @@ impl TopologySchema {
         p.exists().then_some(p)
     }
 
+    /// Where the one schema lives, independent of the tier files (K10): `GNODE_TOPOLOGY_SCHEMA`,
+    /// then the in-tree and installed locations.
+    pub fn locate() -> Option<PathBuf> {
+        if let Some(p) = std::env::var("GNODE_TOPOLOGY_SCHEMA").ok().map(PathBuf::from).filter(|p| p.exists()) {
+            return Some(p);
+        }
+        [
+            "daemon/config/topology_schema.yaml",
+            "config/topology_schema.yaml",
+            "/opt/geodineum/gNode/daemon/config/topology_schema.yaml",
+            "/opt/gNode/daemon/config/topology_schema.yaml",
+        ].iter().map(PathBuf::from).find(|p| p.exists())
+    }
+
     fn compile(file: SchemaFile) -> std::result::Result<Self, String> {
         if file.width != WIDTH {
             return Err(format!("width must be {}, schema says {}", WIDTH, file.width));
@@ -449,6 +463,14 @@ mod tests {
         assert_eq!(s.fundamentality_default("2", "not-a-component"), None);
         assert_eq!(s.resolve("3.3", "fundamentality"), Some(14));
         assert_eq!(s.resolve("2", "fundamentality"), Some(13));
+    }
+
+    #[test]
+    fn the_lua_library_agrees_on_the_width() {
+        let lua = std::fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("functions/gnode_topo.lua")).unwrap();
+        let line = lua.lines().find(|l| l.trim_start().starts_with("local W = ")).expect("gnode_topo.lua declares local W");
+        let w: usize = line.trim().trim_start_matches("local W = ").trim().parse().unwrap();
+        assert_eq!(w, WIDTH, "gnode_topo.lua's width must be the compiler's (K15)");
     }
 
     #[test]

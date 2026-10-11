@@ -31,7 +31,13 @@ server.register_function{
         local tier = args[2]
         if not tier or tier == '' then tier = 'service' end
 
-        local key = '{' .. ns .. '}:gnode:schema:' .. tier
+        -- A shape key (`1`, `3.3`, `4.2`) reads the one-topology map; a tier name the legacy hash.
+        local key
+        if string.match(tier, '^%d[%d%.]*$') then
+            key = '{' .. ns .. '}:gnode:constellation:schema:' .. tier
+        else
+            key = '{' .. ns .. '}:gnode:schema:' .. tier
+        end
         local index_json = server.call('HGET', key, 'dimension_index')
         if not index_json then
             return server.error_reply("No schema published at " .. key)
