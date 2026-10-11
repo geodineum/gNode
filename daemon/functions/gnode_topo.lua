@@ -746,9 +746,7 @@ server.register_function{
             server.call('ZADD', topology_key .. ':z_order', z_score, entity_id)
         end
         if constellation and entity.sh == '4.2' and entity.of then
-            local healthy = (tonumber(entity.pd[18]) or 0) > 0
-            local active = tonumber(entity.pd[19]) == 0.25
-            if healthy and active then
+            if tonumber(entity.pd[18]) ~= 0.25 and tonumber(entity.pd[19]) == 0.25 then
                 server.call('ZADD', topology_key .. ':pl:' .. entity.of, entity.ro, entity_id)
             else
                 server.call('ZREM', topology_key .. ':pl:' .. entity.of, entity_id)
@@ -2041,6 +2039,8 @@ server.register_function{
 local W = 24
 local Q48 = 2 ^ 48
 local LIFECYCLE_ACTIVE = 0.25
+local HEALTH_DEAD = 0.25
+local function on_ring(h, lc) return tonumber(h) ~= HEALTH_DEAD and tonumber(lc) == LIFECYCLE_ACTIVE end
 
 local function tag_of(tk) return string.match(tk, '^(%b{})') or '' end
 local function is_constellation(tk) return server.call('HGET', tk .. ':meta', 'sv') == '5' end
@@ -2078,9 +2078,7 @@ end
 
 local function ring_sync(tk, rec)
     if rec.sh ~= '4.2' or not rec.of then return end
-    local healthy = (tonumber(rec.pd[18]) or 0) > 0
-    local active = tonumber(rec.pd[19]) == LIFECYCLE_ACTIVE
-    if healthy and active then
+    if on_ring(rec.pd[18] or 0, rec.pd[19]) then
         server.call('ZADD', tk .. ':pl:' .. rec.of, rec.ro, rec.id)
     else
         server.call('ZREM', tk .. ':pl:' .. rec.of, rec.id)
@@ -2251,7 +2249,8 @@ server.register_function{
     end
 }
 
--- GNODE_TOPO_PLACE tk | id shape of on env heartbeat_component weight record_json ordered_json colours_json
+-- GNODE_TOPO_PLACE tk | id shape of on env heartbeat_component weight record_json ordered_json colours_json [heartbeat_env]
+-- heartbeat_env is the env segment of the heartbeat key when it differs from the entity's environment (the daemon writes `all`).
 server.register_function{
     function_name = 'GNODE_TOPO_PLACE',
     callback = function(keys, args)
@@ -2269,6 +2268,7 @@ server.register_function{
         local ok1, rec = pcall(cjson.decode, args[8]); local ok2, ordered = pcall(cjson.decode, args[9]); local ok3, colours = pcall(cjson.decode, args[10])
         if not (ok1 and ok2 and ok3) then return server.error_reply('record, ordered and colours must be JSON') end
         rec.of, rec.on, rec.hb, rec.env, rec.w = of, on, hb, env, w
+        if args[11] and args[11] ~= '' then rec.hbe = args[11] end
         if sh == '4.2' and next(colours) == nil then
             for facet, vals in pairs(ofr.c or {}) do
                 local sm = shape_map(tk, '4.2')
@@ -2482,11 +2482,12 @@ server.register_function{
         for _, pid in ipairs(server.call('SMEMBERS', tk .. ':placements')) do
             local rec = load_record(tk, pid)
             if rec then
-                local hb, env = rec.hb or '', rec.env or 'production'
+                local hb, env = rec.hb or '', rec.hbe or rec.env or 'production'
                 local ofr = load_record(tk, rec.of or '')
                 if ofr and ofr.sh == '3.1' then hb, env = 'gnode-daemon', 'all' end
                 local h = 0
                 if hb ~= '' then
+                    h = HEALTH_DEAD
                     local raw = server.call('GET', hbns .. env .. ':' .. hb .. ':' .. (rec.on or ''))
                     if raw then
                         local okv, v = pcall(cjson.decode, raw)
@@ -2494,18 +2495,18 @@ server.register_function{
                     end
                 end
                 nt = nt + 1; if h == 1 then nf = nf + 1 end
-                rec.pd[18] = h; rec.pr[18] = h == 1 and '18446744073709551616' or '0'
+                rec.pd[18] = h; rec.pr[18] = sfmt(h * 2 ^ 64)
                 rec.q.health = sfmt(h * Q48); rec.m.ds = now
                 store(tk, rec); server.call('ZADD', tk .. ':ix:health', rec.q.health, pid)
                 ring_sync(tk, rec)
-                for _, e in ipairs({ rec.of, rec.on }) do if e and h > (ent[e] or -1) then ent[e] = h end end
+                for _, e in ipairs({ rec.of, rec.on }) do if e and h > (ent[e] or -1) then ent[e] = h end end  -- max over placements; unknown (0) never outranks a measured value
             end
         end
         local ne = 0
         for e, h in pairs(ent) do
             local rec = load_record(tk, e)
             if rec then
-                rec.pd[18] = h; rec.pr[18] = h == 1 and '18446744073709551616' or '0'; rec.q.health = sfmt(h * Q48); rec.m.ds = now
+                rec.pd[18] = h; rec.pr[18] = sfmt(h * 2 ^ 64); rec.q.health = sfmt(h * Q48); rec.m.ds = now
                 store(tk, rec); server.call('ZADD', tk .. ':ix:health', rec.q.health, e); ne = ne + 1
             end
         end
@@ -2552,7 +2553,7 @@ server.register_function{
             if not rec then return 'placement ' .. pid .. ' has no record' end
             if rec.sh == '4.2' then
                 local inring = server.call('ZSCORE', tk .. ':pl:' .. rec.of, pid) ~= false
-                local should = (tonumber(rec.pd[18]) or 0) > 0 and tonumber(rec.pd[19]) == LIFECYCLE_ACTIVE
+                local should = on_ring(rec.pd[18] or 0, rec.pd[19])
                 if inring ~= should then return 'placement ' .. pid .. ' ring membership disagrees with health/lifecycle' end
             end
         end

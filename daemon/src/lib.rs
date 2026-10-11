@@ -72,6 +72,9 @@ pub mod tool_registration;
 /// One schema for every shape of the constellation topology (SPEC-ONE-TOPOLOGY §3).
 pub mod topology_schema;
 
+/// The daemon's client of the one topology: encoder and typed FCALL wrappers (SPEC §4).
+pub mod constellation;
+
 /// Constellation-tier registration: a node announces its role, capacity and
 /// specialisation geometrically, so work can be steered by discovery rather
 /// than by which streams a node happens to consume.

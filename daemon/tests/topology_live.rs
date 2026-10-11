@@ -154,8 +154,8 @@ fn weighted_round_robin_with_standby_and_ring_exit() {
 
     // Health 0 on two placements and lifecycle draining on the third: the ring empties, the standby carries.
     for p in ["gflow@aesir-solutions", "gflow@squad"] {
-        let upd = r#"{"17":{"pd":0.0,"pr":"0","s":"0"}}"#;
-        let _: String = fcall(&mut conn, "GNODE_TOPO_SET_DERIVED", &[p, upd, "", "", "1", "", ""]).unwrap();
+        let upd = format!(r#"{{"17":{{"pd":0.25,"pr":"{}","s":"{}"}}}}"#, 1i128 << 62, score(0.25));
+        let _: String = fcall(&mut conn, "GNODE_TOPO_SET_DERIVED", &[p, &upd, "", "", "1", "", ""]).unwrap();
     }
     let upd = format!(r#"{{"18":{{"pd":0.5,"pr":"{}","s":"{}"}}}}"#, (0.5f64 * 2f64.powi(64)) as i128, score(0.5));
     let _: String = fcall(&mut conn, "GNODE_TOPO_SET_DERIVED", &["gflow@node-c", &upd, "", "", "1", "", ""]).unwrap();

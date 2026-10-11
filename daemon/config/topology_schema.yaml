@@ -28,7 +28,7 @@ header:
     slot: 17
     kind: ordered
     writer: sampler
-    values: { unknown: 0.0, dead: 0.33, degraded: 0.67, healthy: 1.0 }
+    values: { unknown: 0.0, dead: 0.25, degraded: 0.5, healthy: 1.0 }   # binary-exact: the health writer forms their Q64.64 in Lua
   lifecycle:
     slot: 18
     kind: ordered
