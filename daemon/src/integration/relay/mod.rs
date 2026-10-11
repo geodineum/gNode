@@ -12,7 +12,7 @@ pub mod telemetry;
 pub mod reply;
 pub mod roundtrip;
 
-pub use router::{RelayDecision, resolve_relay_target};
+pub use router::{RelayDecision, resolve_relay_target, resolve_one_topology};
 pub use translator::{TranslationResult, translate_for_relay, detect_format, convert_format};
 pub use policy::{PolicyDecision, check_relay_policy};
 pub use telemetry::{RelayMetrics, RelayTelemetry, get_relay_stats};

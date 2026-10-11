@@ -1591,6 +1591,7 @@ pub fn create_environment_stream_worker_dynamic(
                                     .partition(|(_, cmd)| cmd.relay_target.is_some());
 
                                 // Process relay commands: resolve target, forward via XADD
+                                let mut relay_locals: Vec<(String, crate::integration::processor::OptimizedCommand)> = Vec::new();
                                 if !relay_commands.is_empty() {
                                     if debug_mode {
                                         info!("Processing {} relay command(s) from {}", relay_commands.len(), current_unified_stream);
@@ -1599,29 +1600,49 @@ pub fn create_environment_stream_worker_dynamic(
                                     // Extract site_id from current stream for relay resolution
                                     let stream_site_id = crate::config::site_of_stream_key(current_unified_stream).unwrap_or(&site_id_owned);
 
-                                    for (_msg_id, cmd) in &relay_commands {
+                                    let one_topology = crate::constellation::one_topology_enabled();
+                                    let constellation = crate::constellation::Constellation::new(crate::daemon::GNodeDaemon::get_topology_namespace());
+                                    for (msg_id, cmd) in &relay_commands {
                                         let relay_target = match cmd.relay_target.as_ref() {
                                             Some(t) => t,
                                             None => continue, // skip: missing relay target
                                         };
 
-                                        let decision = crate::integration::relay::resolve_relay_target(
-                                            &mut conn,
-                                            relay_target,
-                                            stream_site_id,
-                                            current_unified_stream,
-                                            shared_discovery.as_ref(),
-                                            debug_mode,
-                                        );
+                                        // Resolved ONCE per command: under the one topology the ring counter
+                                        // advances here, so a second resolution would be a second request.
+                                        let decision = if one_topology {
+                                            crate::integration::relay::resolve_one_topology(
+                                                &mut conn, &constellation, relay_target, stream_site_id, current_unified_stream,
+                                            )
+                                        } else {
+                                            crate::integration::relay::resolve_relay_target(
+                                                &mut conn,
+                                                relay_target,
+                                                stream_site_id,
+                                                current_unified_stream,
+                                                shared_discovery.as_ref(),
+                                                debug_mode,
+                                            )
+                                        };
 
                                         match decision {
-                                            crate::integration::relay::RelayDecision::Forward { ref target_site_id, ref target_stream_key, ref target_entity_id } => {
-                                                // --- Phase 5B: ACL policy check ---
+                                            crate::integration::relay::RelayDecision::Forward { ref target_site_id, ref target_stream_key, ref target_entity_id, ref target_placement } => {
+                                                // --- Phase 5B: permission. One topology: REACH + deny list, fail closed (D8).
                                                 let ns = crate::daemon::GNodeDaemon::get_topology_namespace();
-                                                let policy = crate::integration::relay::check_relay_policy(
-                                                    &mut conn, ns, stream_site_id, target_site_id,
-                                                    &cmd.command, debug_mode,
-                                                );
+                                                let policy = if one_topology {
+                                                    let now_ms = crate::utils::current_timestamp_ms().max(0) as u64;
+                                                    let target = if target_entity_id.is_empty() { target_site_id.as_str() } else { target_entity_id.as_str() };
+                                                    match constellation.can_reach(&mut conn, stream_site_id, target, now_ms) {
+                                                        Ok(r) if r.allowed => crate::integration::relay::PolicyDecision::Allow,
+                                                        Ok(r) => crate::integration::relay::PolicyDecision::Deny(format!("{} may not reach {} ({})", stream_site_id, target, r.reason)),
+                                                        Err(e) => crate::integration::relay::PolicyDecision::Deny(format!("reach check failed, refusing: {}", e)),
+                                                    }
+                                                } else {
+                                                    crate::integration::relay::check_relay_policy(
+                                                        &mut conn, ns, stream_site_id, target_site_id,
+                                                        &cmd.command, debug_mode,
+                                                    )
+                                                };
                                                 if !policy.is_allowed() {
                                                     if let crate::integration::relay::PolicyDecision::Deny(ref reason) = policy {
                                                         warn!("Relay DENIED: {} -> {} cmd='{}': {}", stream_site_id, target_site_id, cmd.command, reason);
@@ -1705,7 +1726,13 @@ pub fn create_environment_stream_worker_dynamic(
                                                         info!("Relayed '{}' -> {} on {}", cmd.command, target_entity_id, target_stream_key);
                                                         crate::integration::relay::roundtrip::note_departure(
                                                             &mut conn, ns, &forwarded.id, &forward_entry_id,
-                                                            target_site_id, target_entity_id, &cmd.command);
+                                                            target_site_id, target_entity_id, target_placement, &cmd.command);
+                                                        if !target_placement.is_empty() {
+                                                            let now_ms = crate::utils::current_timestamp_ms().max(0) as u64;
+                                                            if let Err(e) = constellation.depart(&mut conn, target_placement, &forwarded.id, now_ms) {
+                                                                warn!("in-flight depart for {} failed: {}", target_placement, e);
+                                                            }
+                                                        }
 
                                                         // Track for response forwarding
                                                         relay_tracker.track(crate::integration::relay::PendingRelay {
@@ -1759,11 +1786,13 @@ pub fn create_environment_stream_worker_dynamic(
                                                 );
                                             },
                                             crate::integration::relay::RelayDecision::Local => {
-                                                // Target is on same site — will be processed locally below
-                                                // (handled by falling through to local_commands processing)
+                                                // Target is this site: processed locally below, from this one resolution.
                                                 if debug_mode {
                                                     debug!("Relay target '{}' resolved to local site, processing locally", relay_target);
                                                 }
+                                                let mut local_cmd = cmd.clone();
+                                                local_cmd.relay_target = None;
+                                                relay_locals.push((msg_id.clone(), local_cmd));
                                             },
                                             crate::integration::relay::RelayDecision::NotFound(ref reason) => {
                                                 warn!("Relay target not found: {} ({})", relay_target, reason);
@@ -1805,23 +1834,9 @@ pub fn create_environment_stream_worker_dynamic(
                                     }
                                 }
 
-                                // Collect any relay-local commands back into local processing
-                                // (commands where relay resolved to Local get processed normally)
+                                // Relay commands that resolved to Local join local processing (resolved once, above).
                                 let mut local_commands_final: Vec<(String, crate::integration::processor::OptimizedCommand)> = local_commands;
-                                for (msg_id, cmd) in &relay_commands {
-                                    if let Some(relay_target) = cmd.relay_target.as_ref() {
-                                        let stream_site_id = crate::config::site_of_stream_key(current_unified_stream).unwrap_or(&site_id_owned);
-                                        let decision = crate::integration::relay::resolve_relay_target(
-                                            &mut conn, relay_target, stream_site_id,
-                                            current_unified_stream, shared_discovery.as_ref(), false,
-                                        );
-                                        if matches!(decision, crate::integration::relay::RelayDecision::Local) {
-                                            let mut local_cmd = cmd.clone();
-                                            local_cmd.relay_target = None;
-                                            local_commands_final.push((msg_id.clone(), local_cmd));
-                                        }
-                                    }
-                                }
+                                local_commands_final.extend(relay_locals);
 
                                 // Process local command messages
                                 if !local_commands_final.is_empty() {

@@ -16,6 +16,18 @@ pub fn build_unified_stream_key(site_id: &str, environment: &str) -> String {
     format!("{{{}}}:gnode:unified:{}", site_id, environment)
 }
 
+/// The stream one PLACEMENT of a service reads (SPEC-ONE-TOPOLOGY §6): the site's
+/// unified stream with the node appended, so an imposed share reaches the instance
+/// it was imposed on instead of whichever consumer in a group reads first.
+pub fn build_placement_stream_key(site_id: &str, environment: &str, node: &str) -> String {
+    format!("{{{}}}:gnode:unified:{}:{}", site_id, environment, node)
+}
+
+/// The environment segment of a unified stream key, with or without a node suffix.
+pub fn env_of_stream_key(stream_key: &str) -> Option<&str> {
+    stream_key.split_once(":gnode:unified:")?.1.split(':').next().filter(|e| !e.is_empty())
+}
+
 /// Build a health stream key for a site.
 ///
 /// Canonical pattern: `{site_id}:gnode:health` — no environment suffix, because

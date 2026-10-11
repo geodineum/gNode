@@ -12,6 +12,11 @@ use crate::topology_schema::{index_score, layer_code, layer_coordinate, layer_in
 use crate::{GeometricError, Result};
 
 pub const LIFECYCLE_ACTIVE: f64 = 0.25;
+
+/// The branch runs the one-topology paths only when asked (`GNODE_ONE_TOPOLOGY=on`) until WP3e.
+pub fn one_topology_enabled() -> bool {
+    std::env::var("GNODE_ONE_TOPOLOGY").map(|v| v == "on").unwrap_or(false)
+}
 const HEALTH_SLOT: usize = 17;
 const LIFECYCLE_SLOT: usize = 18;
 

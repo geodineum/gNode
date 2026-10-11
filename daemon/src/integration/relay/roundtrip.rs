@@ -31,25 +31,28 @@ pub struct Departure {
     pub forwarded_ms: u64,
     pub target_site: String,
     pub target_entity: String,
+    /// The placement the share was imposed on (one topology); empty on the legacy path.
+    pub placement: String,
     pub command: String,
 }
 
 impl Departure {
     /// The command is last, so one containing the separator still round-trips.
     pub fn encode(&self) -> String {
-        format!("{}|{}|{}|{}", self.forwarded_ms, self.target_site, self.target_entity, self.command)
+        format!("{}|{}|{}|{}|{}", self.forwarded_ms, self.target_site, self.target_entity, self.placement, self.command)
     }
 
     pub fn decode(raw: &str) -> Option<Self> {
-        let mut parts = raw.splitn(4, '|');
+        let mut parts = raw.splitn(5, '|');
         let forwarded_ms = parts.next()?.parse::<u64>().ok()?;
         let target_site = parts.next()?.to_string();
         let target_entity = parts.next()?.to_string();
+        let placement = parts.next()?.to_string();
         let command = parts.next()?.to_string();
         if target_site.is_empty() {
             return None;
         }
-        Some(Self { forwarded_ms, target_site, target_entity, command })
+        Some(Self { forwarded_ms, target_site, target_entity, placement, command })
     }
 
     /// The entity the work is credited to. A relay addressed to a site rather
@@ -115,6 +118,7 @@ pub fn note_departure(
     forward_entry_id: &str,
     target_site: &str,
     target_entity: &str,
+    placement: &str,
     command: &str,
 ) {
     if !crate::integration::sampler::observations_enabled() || correlation_id.is_empty() {
@@ -125,6 +129,7 @@ pub fn note_departure(
         forwarded_ms,
         target_site: target_site.to_string(),
         target_entity: target_entity.to_string(),
+        placement: placement.to_string(),
         command: command.to_string(),
     };
     let _: redis::RedisResult<()> = redis::cmd("SET")
@@ -157,6 +162,14 @@ pub fn note_arrival(
         .unwrap_or(None);
     let Some(departure) = raw.as_deref().and_then(Departure::decode) else { return false };
 
+    // The reply closes the in-flight entry of the placement it was imposed on (P-k).
+    if !departure.placement.is_empty() {
+        let c = crate::constellation::Constellation::new(topology_namespace);
+        if let Err(e) = c.arrive(conn, &departure.placement, correlation_id) {
+            debug!("in-flight arrive for {} failed: {}", departure.placement, e);
+        }
+    }
+
     match settle(&departure, replier_site, reply_entry_id) {
         Settled::Observed { site, entity, command, elapsed_ms, at_ms } => {
             let cmd = crate::integration::sampler::provider_observation_cmd(
@@ -181,7 +194,7 @@ mod tests {
 
     fn dep(entity: &str) -> Departure {
         Departure { forwarded_ms: 1_000, target_site: "geodine".into(),
-                    target_entity: entity.into(), command: "infer".into() }
+                    target_entity: entity.into(), placement: String::new(), command: "infer".into() }
     }
 
     #[test]

@@ -95,7 +95,7 @@ fn a_round_trip_is_credited_to_the_target_exactly_once() {
     let Some(mut conn) = connect() else { return };
     let cid = "cid-1";
     let forward = xadd(&mut conn, &unified("gschedule"), &[("t", "c"), ("id", cid), ("c", "ping")]);
-    roundtrip::note_departure(&mut conn, NS, cid, &forward, "gschedule", "", "ping");
+    roundtrip::note_departure(&mut conn, NS, cid, &forward, "gschedule", "", "", "ping");
     assert!(departure_exists(&mut conn, cid));
 
     let reply = xadd(&mut conn, &unified("gschedule"), &[("t", "r"), ("ri", cid), ("st", "ok")]);
@@ -124,7 +124,7 @@ fn a_round_trip_is_credited_to_the_target_exactly_once() {
 fn a_named_entity_is_the_provider_on_its_sites_stream() {
     let Some(mut conn) = connect() else { return };
     let forward = xadd(&mut conn, &unified("geodine"), &[("t", "c"), ("id", "cid-2"), ("c", "infer")]);
-    roundtrip::note_departure(&mut conn, NS, "cid-2", &forward, "geodine", "pipeline-runner", "infer");
+    roundtrip::note_departure(&mut conn, NS, "cid-2", &forward, "geodine", "pipeline-runner", "", "infer");
     let reply = xadd(&mut conn, &unified("geodine"), &[("t", "r"), ("ri", "cid-2"), ("st", "error")]);
     assert!(roundtrip::note_arrival(&mut conn, NS, &unified("geodine"), &reply, &fields(&[("ri", "cid-2"), ("st", "error")]), false));
     let obs = health(&mut conn, "geodine");
@@ -138,7 +138,7 @@ fn a_named_entity_is_the_provider_on_its_sites_stream() {
 fn a_reply_from_the_wrong_site_credits_nobody_and_burns_the_departure() {
     let Some(mut conn) = connect() else { return };
     let forward = xadd(&mut conn, &unified("gschedule"), &[("t", "c"), ("id", "cid-3"), ("c", "ping")]);
-    roundtrip::note_departure(&mut conn, NS, "cid-3", &forward, "gschedule", "", "ping");
+    roundtrip::note_departure(&mut conn, NS, "cid-3", &forward, "gschedule", "", "", "ping");
     let reply = xadd(&mut conn, &unified("gflow"), &[("t", "r"), ("ri", "cid-3"), ("st", "ok")]);
     assert!(!roundtrip::note_arrival(&mut conn, NS, &unified("gflow"), &reply, &fields(&[("ri", "cid-3")]), false));
     assert!(health(&mut conn, "gschedule").is_empty());
