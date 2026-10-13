@@ -211,6 +211,10 @@ pub struct RegisterToolsArgs {
     pub environment: Option<String>,
     /// The onboarding manifest whose `gnode:` block declares the service (one topology).
     pub manifest: Option<PathBuf>,
+    /// `--tier node`: the node's role word (observer | headless | edge | replica | full_node).
+    pub node_role: Option<String>,
+    /// `--tier node`: the node's specialization word, when any.
+    pub specialization: Option<String>,
 }
 
 // ============================================================================
@@ -1005,6 +1009,7 @@ pub fn run(args: RegisterToolsArgs) -> Result<()> {
     // entities were real, just the wrong tier in the wrong shape.
     match args.tier.as_str() {
         "tool" => run_tool_tier(&args),
+        "node" => run_node_tier(&args),
         "service" => {
             if args.profile.is_some() || args.manifest.is_some() {
                 run_service_profile(&args)
@@ -1215,6 +1220,33 @@ fn run_service_profile(args: &RegisterToolsArgs) -> Result<()> {
             errors, site
         )));
     }
+    Ok(())
+}
+
+/// One topology: declare a node that runs no daemon (an observer laptop, an app box
+/// behind a tunnel) in the constellation named by --topology-namespace, so the
+/// heartbeats its services write can become placements.
+fn run_node_tier(args: &RegisterToolsArgs) -> Result<()> {
+    if !crate::constellation::one_topology_enabled() {
+        return Err(GeometricError::Other("--tier node registers on the one topology; set GNODE_ONE_TOPOLOGY=on".to_string()));
+    }
+    let node = args.site.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| GeometricError::Other("--tier node needs --site <node id>".to_string()))?;
+    let role = args.node_role.as_deref().unwrap_or("observer");
+    let schema = crate::integration::handlers::one_topology::schema()
+        .ok_or_else(|| GeometricError::Other("topology schema not found (GNODE_TOPOLOGY_SCHEMA)".to_string()))?;
+    let d = crate::constellation::declare_operator_node(node, role, args.specialization.as_deref(), 0, 0);
+    let encoded = crate::constellation::encode(schema, &d)?;
+    let c = crate::constellation::Constellation::new(&args.topology_namespace);
+    info!("Declaring node '{}' (role {}) in constellation {}", node, role, c.name);
+    if args.dry_run {
+        info!("Dry run — would register {:?}", d);
+        return Ok(());
+    }
+    let client = redis::Client::open(args.redis_url.as_str()).map_err(GeometricError::Redis)?;
+    let mut conn = client.get_connection().map_err(GeometricError::Redis)?;
+    c.ensure(&mut conn)?;
+    c.register(&mut conn, &encoded)?;
+    info!("  Node '{}' registered on {}", node, c.key());
     Ok(())
 }
 
@@ -1594,6 +1626,8 @@ mod preflight_tests {
             topology_namespace: "geodineum".into(), tier: "tool".into(),
             profile: None, environment: None,
             manifest: None,
+            node_role: None,
+            specialization: None,
         }
     }
 

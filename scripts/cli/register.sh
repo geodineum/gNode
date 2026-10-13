@@ -4,6 +4,10 @@
 #
 #   sudo geodineum topology register components                            (re)register the ecosystem components (shape 2)
 #   sudo geodineum topology register service <site> [profile] [--env <dtap>]   register <site>'s OWN entity by name
+#   sudo geodineum topology register node <id> [--role <word>] [--specialization <word>] [--constellation <c>]
+#                                                                          declare a node that runs no daemon (observer
+#                                                                          laptop, app box behind a tunnel), so its
+#                                                                          services' heartbeats become placements
 #
 #   profiles → shapes: web (default) → site 3.1 · headless → app 3.2 · service | system | component → daemon 3.3
 #
@@ -27,6 +31,7 @@ usage() {
     echo "Usage:"
     echo "  geodineum topology register components                              register the ecosystem components (shape 2)"
     echo "  geodineum topology register service <site> [profile] [--env <dtap>] register <site> from a profile (default: web → site)"
+    echo "  geodineum topology register node <id> [--role observer|headless|edge|replica|full_node] [--specialization <word>] [--constellation <c>]"
     echo
     echo "  profiles → shapes: web → site · headless → app · service | system | component → daemon"
     exit "${1:-0}"
@@ -63,6 +68,27 @@ case "$sub" in
         env_arg=(); [[ -n "$environment" ]] && env_arg=(--environment "$environment")
         echo "Registering '$site' by name from the '$profile' profile${environment:+ (env=$environment)}…"
         run_reg register-tools --tier service --site "$site" --profile "$profile" "${env_arg[@]}"
+        ;;
+    node)
+        # register node <id> [--role <word>] [--specialization <word>] [--constellation <c>]
+        node="${1:-}"; shift || true
+        role="observer"; spec=""; c="${GNODE_TOPOLOGY_NAMESPACE:-geodineum}"
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --role)            role="${2:-}"; shift 2 ;;
+                --role=*)          role="${1#*=}"; shift ;;
+                --specialization)  spec="${2:-}"; shift 2 ;;
+                --specialization=*) spec="${1#*=}"; shift ;;
+                --constellation)   c="${2:-}"; shift 2 ;;
+                --constellation=*) c="${1#*=}"; shift ;;
+                *) echo "register node: unknown option '$1'" >&2; usage 1 ;;
+            esac
+        done
+        [[ -n "$node" ]] || { echo "register node: missing <id>" >&2; usage 1; }
+        spec_arg=(); [[ -n "$spec" ]] && spec_arg=(--specialization "$spec")
+        echo "Declaring node '$node' (role $role) in constellation '$c'…"
+        VALKEY_USER=gnode_daemon GNODE_REDIS_AUTH_FILE="$DAEMON_CRED" GNODE_ONE_TOPOLOGY=on \
+            "$DAEMON_BIN" --topology-namespace "$c" register-tools --tier node --site "$node" --node-role "$role" "${spec_arg[@]}"
         ;;
     ""|-h|--help)
         usage 0 ;;

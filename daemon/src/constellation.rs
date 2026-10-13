@@ -474,6 +474,25 @@ pub struct NodeHardware {
     pub axes: BTreeMap<String, String>,
 }
 
+/// A node that runs no daemon (the founder's laptop observer, an inference box behind a
+/// tunnel): declared by the operator with its role word; ValKey mode client_only; the
+/// specialization and the tiers only when given (D13 deployment shapes).
+pub fn declare_operator_node(node_id: &str, role: &str, specialization: Option<&str>, cores: u32, max_memory_mb: u32) -> Declared {
+    let mut d = Declared::new(node_id, "1", "global")
+        .word("node_role", role)
+        .word("valkey_mode", "client_only");
+    if let Some(sp) = specialization.filter(|s| !s.is_empty()) {
+        d = d.word("specialization", sp);
+    }
+    if cores > 0 {
+        d = d.word("cpu_tier", if cores <= 2 { "minimal" } else if cores <= 8 { "standard" } else { "compute" });
+    }
+    if max_memory_mb > 0 {
+        d = d.word("memory_tier", if max_memory_mb < 4_096 { "minimal" } else if max_memory_mb < 32_768 { "standard" } else { "high_memory" });
+    }
+    d
+}
+
 /// The node entity the daemon declares for the host it runs on. Role and ValKey mode follow the
 /// master election; cpu and memory tiers follow the resources the node config reports (0 = unknown,
 /// left undeclared); the specialization is the declared node type when it is a vocabulary word.
@@ -572,6 +591,17 @@ mod tests {
         assert_eq!(e.pd[2], 0.5, "protocol's first word codes the slot");
         assert_eq!(e.pd[14], 0.3);
         assert_eq!(e.pr[14], FixedPoint::from_f64(0.3).raw().to_string());
+    }
+
+    #[test]
+    fn an_operator_node_declares_its_role_and_nothing_it_does_not_know() {
+        let s = schema();
+        let d = declare_operator_node("laptop", "observer", Some("inference"), 0, 0);
+        let e = encode(&s, &d).unwrap();
+        assert_eq!(e.shape, "1");
+        assert!(e.colours.contains("observer") && e.colours.contains("client_only") && e.colours.contains("inference"));
+        assert!(!e.colours.contains("cpu_tier"), "undeclared tiers stay undeclared");
+        assert!(encode(&s, &declare_operator_node("x", "pilot", None, 0, 0)).is_err(), "a role outside the vocabulary is refused");
     }
 
     #[test]

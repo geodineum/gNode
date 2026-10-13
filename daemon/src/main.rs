@@ -447,6 +447,16 @@ enum Commands {
         #[clap(long)]
         manifest: Option<PathBuf>,
 
+        /// --tier node: the node's role (observer | headless | edge | replica | full_node);
+        /// a node that runs no daemon, declared by the operator so its services' heartbeats
+        /// can become placements. The constellation is --topology-namespace.
+        #[clap(long)]
+        node_role: Option<String>,
+
+        /// --tier node: the node's specialization (general | inference | storage | compute | content)
+        #[clap(long)]
+        specialization: Option<String>,
+
         /// Dry run — show what would be registered without writing
         #[clap(long)]
         dry_run: bool,
@@ -677,7 +687,7 @@ fn main() -> Result<()> {
             info!("Checking daemon status...");
             check_daemon_status(&redis_url, &cli.environment, &cli.stream_prefix)?;
         },
-        Some(Commands::RegisterTools { tier, site, config, schema, profile, environment, manifest, dry_run }) => {
+        Some(Commands::RegisterTools { tier, site, config, schema, profile, environment, manifest, node_role, specialization, dry_run }) => {
             info!("Registering {} tier...", tier);
             gnode::tool_registration::run(gnode::tool_registration::RegisterToolsArgs {
                 site,
@@ -690,6 +700,8 @@ fn main() -> Result<()> {
                 profile,
                 environment,
                 manifest,
+                node_role,
+                specialization,
             })?;
         },
         Some(Commands::VerifyExtension { .. }) => {
