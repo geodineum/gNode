@@ -89,3 +89,32 @@ fn placements_services_idle_and_scale_out_are_written_to_the_constellation() {
     let done = LoadSamplerWorker::apply_one_topology(&mut conn, &c, "aesir-solutions", 1_700_000_045_000, &writes, &[], &mut demand, &services, &counters);
     assert!(done.is_empty(), "a node without the lease writes nothing: {done:?}");
 }
+
+#[test]
+#[ignore]
+fn a_node_observation_lands_on_the_node_and_the_stamp_follows_the_write() {
+    let Some((mut conn, c)) = connect() else { return };
+    let mut demand = DemandTracker::new(4);
+    let writes = vec![DerivedWrite { tier: Tier::Node, site: "geodineum".into(), entity: "aesir-solutions".into(), index: 16, pd: 0.6, zs: 600000, reason: "test".into() }];
+    let done = LoadSamplerWorker::apply_one_topology(&mut conn, &c, "aesir-solutions", 1_700_000_000_000, &writes, &[], &mut demand, &[], &HashMap::new());
+    assert_eq!(done.len(), 1);
+    let node = load_of(&mut conn, &c, "1", "aesir-solutions");
+    assert_eq!(node["pd"][16], 0.6, "the node carries the daemon's own load (M10)");
+    assert_eq!(node["m"]["ds"], 1_700_000_000, "the freshness stamp is the write's time in seconds (M9c)");
+}
+
+#[test]
+#[ignore]
+fn the_workers_group_does_not_starve_the_sampler() {
+    let Some((mut conn, _c)) = connect() else { return };
+    let health = "{gflow}:gnode:health";
+    for i in 0..6u64 {
+        let _: String = redis::cmd("XADD").arg(health).arg("*").arg("t").arg("rq").arg("by").arg("gnode").arg("si").arg("gflow@aesir-solutions").arg("cmd").arg("run").arg("lat").arg(100 + i).arg("ok").arg(1).arg("ts").arg(1_800_000_000_000u64).query(&mut conn).unwrap();
+    }
+    let _: redis::RedisResult<String> = redis::cmd("XGROUP").arg("CREATE").arg(health).arg("gnode-daemon").arg("0").arg("MKSTREAM").query(&mut conn);
+    let workers: redis::streams::StreamReadReply = redis::cmd("XREADGROUP").arg("GROUP").arg("gnode-daemon").arg("w1").arg("COUNT").arg(100).arg("STREAMS").arg(health).arg(">").query(&mut conn).unwrap();
+    assert_eq!(workers.keys.iter().map(|k| k.ids.len()).sum::<usize>(), 6, "the daemon group took everything");
+    let _: redis::RedisResult<String> = redis::cmd("XGROUP").arg("CREATE").arg(health).arg(gnode::worker::SAMPLER_GROUP).arg("0").arg("MKSTREAM").query(&mut conn);
+    let sampler: redis::streams::StreamReadReply = redis::cmd("XREADGROUP").arg("GROUP").arg(gnode::worker::SAMPLER_GROUP).arg("aesir-solutions").arg("COUNT").arg(100).arg("STREAMS").arg(health).arg(">").query(&mut conn).unwrap();
+    assert_eq!(sampler.keys.iter().map(|k| k.ids.len()).sum::<usize>(), 6, "and the sampler's own group still sees all six (M9a)");
+}

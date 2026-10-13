@@ -603,6 +603,17 @@ mod tests {
     }
 
     #[test]
+    fn a_bootstrapped_baseline_publishes_nothing_and_four_times_it_reads_heavy() {
+        let mut s = Sampler::new(SamplerConfig::default());
+        for i in 0..8 { s.observe(obs("gflow", "gflow@squad", "run", 1, 1_000 + i)); }
+        assert!(s.tick(2_000).is_empty(), "the tick that learns the baseline measures nothing (M9b)");
+        for i in 0..8 { s.observe(obs("gflow", "gflow@squad", "run", 4, 100_000 + i)); }
+        let w = s.tick(100_050);
+        assert_eq!(w.len(), 1);
+        assert_eq!(landmark(w[0].pd).1, "heavy", "I = 4 → ρ 0.75 → 0.80");
+    }
+
+    #[test]
     fn the_guard_sits_above_the_one_quantum_step() {
         assert!(guard_for(1.5, 1.0) > 2.0, "at b = 1 ms the step is 2.0; the guard must exceed it (P-l)");
         assert!((guard_for(1.5, 3.0) - 1.5).abs() < 1e-9, "at b = 3 ms the step (1.33) is below the configured guard");

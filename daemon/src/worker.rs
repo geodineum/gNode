@@ -523,7 +523,7 @@ impl LoadSamplerWorker {
 }
 
 /// The sampler's own consumer group, separate from the workers' by design.
-const SAMPLER_GROUP: &str = "gnode-sampler";
+pub const SAMPLER_GROUP: &str = "gnode-sampler";
 
 impl DaemonWorker for LoadSamplerWorker {
     fn name(&self) -> &str { "load-sampler" }

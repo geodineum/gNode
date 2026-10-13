@@ -134,3 +134,33 @@ fn endpoints_discovery_picks_services_by_the_query() {
     assert_eq!(ids.len(), 1);
     assert!(h::discover_ids(&mut conn, "nierto_com", &json!({ "capabilities": ["workflow"] })).unwrap_err().contains("by name"), "the legacy name list is refused");
 }
+
+#[test]
+#[ignore]
+fn axes_the_query_does_not_name_do_not_count() {
+    let Some((client, _c)) = setup() else { return };
+    let mut conn = client.get_connection().unwrap();
+    assert_eq!(h::register(&mut conn, "nierto_com", json!({ "id": "a", "shape": "daemon", "axes": { "protocol": ["grpc"], "latency_class": "realtime", "domain": ["search"] } })).status, "ok");
+    assert_eq!(h::register(&mut conn, "nierto_com", json!({ "id": "b", "shape": "daemon", "axes": { "protocol": ["grpc"], "latency_class": "batch", "domain": ["cache"] } })).status, "ok");
+    let v = h::discover(&mut conn, "nierto_com", json!({ "facets": { "protocol": "grpc" } })).result.unwrap();
+    assert_eq!(v["total_matches"], 2, "latency and domain were not named, so they do not count (M5)");
+    let v = h::discover(&mut conn, "nierto_com", json!({ "facets": { "protocol": "grpc" }, "axes": { "latency_class": [0.0, 0.3] } })).result.unwrap();
+    assert_eq!(v["total_matches"], 1);
+    assert_eq!(v["results"][0]["service_id"], "a");
+}
+
+#[tokio::test]
+#[ignore]
+async fn the_async_and_sync_lanes_answer_the_same_query_alike() {
+    let Some((client, _c)) = setup() else { return };
+    let mut sync = client.get_connection().unwrap();
+    for (id, cv) in [("a", "v1"), ("b", "v3"), ("c", "v5")] {
+        assert_eq!(h::register(&mut sync, "nierto_com", json!({ "id": id, "shape": "daemon", "axes": { "protocol": ["grpc"], "contract_version": cv } })).status, "ok");
+    }
+    let q = json!({ "facets": { "protocol": "grpc" }, "axes": { "contract_version": ["v2", "v5"] } });
+    let s = h::discover(&mut sync, "nierto_com", q.clone()).result.unwrap();
+    let mut a = client.get_multiplexed_async_connection().await.unwrap();
+    let r = h::discover_async(&mut a, "nierto_com", q).await.result.unwrap();
+    assert_eq!(s["total_matches"], 2, "closed range [v2, v5]: b and c (M6)");
+    assert_eq!(s["results"], r["results"], "sync equals async");
+}

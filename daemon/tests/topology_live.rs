@@ -258,3 +258,52 @@ fn query_drives_by_layer_and_verifies_by_index_at_ten_thousand() {
     let order: Vec<String> = fcall(&mut conn, "GNODE_TOPO_ORDER", &["contract_version", "3", "0", "desc"]).unwrap();
     assert_eq!(order.len(), 6, "three ids with scores");
 }
+
+fn fcall2<T: redis::FromRedisValue>(conn: &mut redis::Connection, f: &str, k2: &str, args: &[&str]) -> redis::RedisResult<T> {
+    let mut c = redis::cmd("FCALL");
+    c.arg(f).arg(2).arg(TK).arg(k2);
+    for a in args { c.arg(*a); }
+    c.query(conn)
+}
+
+#[test]
+#[ignore]
+fn registration_order_is_allocated_once_and_derived_axes_survive_a_re_registration() {
+    let Some(mut conn) = connect() else { return };
+    seed(&mut conn);
+    let first: serde_json::Value = serde_json::from_str(&fcall::<String>(&mut conn, "GNODE_TOPO_REGISTER", &["gflow", "3.3", &record("3.3", "production", 1.0, 0.25), "{}", r#"{"protocol":["gnode_stream"]}"#, "16,17"]).unwrap()).unwrap();
+    let before: String = fcall(&mut conn, "GNODE_TOPO_GET_ENTITIES", &[r#"["gflow"]"#]).unwrap();
+    let ro0 = serde_json::from_str::<serde_json::Value>(&before).unwrap()["ents"]["gflow"]["ro"].as_u64().unwrap();
+    assert_eq!(first["upd"], true, "seed registered gflow already; this is an update");
+    // A derived write on slot 16, then a re-registration preserving 16,17: the measurement survives, the declared axis changes.
+    let upd = format!(r#"{{"16":{{"pd":0.6,"pr":"{}","s":"{}"}}}}"#, (0.6f64 * 2f64.powi(64)) as i128, score(0.6));
+    let _: String = fcall(&mut conn, "GNODE_TOPO_SET_DERIVED", &["gflow", &upd, "", "", "1", "", ""]).unwrap();
+    let r: String = fcall(&mut conn, "GNODE_TOPO_REGISTER", &["gflow", "3.3", &record("3.3", "production", 1.0, 0.25), "{}", r#"{"protocol":["grpc"]}"#, "16,17"]).unwrap();
+    let r: serde_json::Value = serde_json::from_str(&r).unwrap();
+    assert_eq!(r["ro"].as_u64().unwrap(), ro0, "ro is allocated once (M1)");
+    let after: String = fcall(&mut conn, "GNODE_TOPO_GET_ENTITIES", &[r#"["gflow"]"#]).unwrap();
+    let e = serde_json::from_str::<serde_json::Value>(&after).unwrap()["ents"]["gflow"].clone();
+    assert_eq!(e["pd"][16], 0.6, "the sampler's slot survived the re-registration (M2)");
+    assert_eq!(e["q"]["load"], score(0.6));
+    assert_eq!(e["c"]["protocol"][0], "grpc", "the declared colour changed");
+    let ix: Option<String> = redis::cmd("ZSCORE").arg(format!("{TK}:ix:load")).arg("gflow").query(&mut conn).unwrap();
+    assert_eq!(ix.unwrap(), score(0.6), "the index agrees with the record");
+}
+
+#[test]
+#[ignore]
+fn the_lease_holder_alone_writes_derived_axes_and_unknown_entities_are_refused() {
+    let Some(mut conn) = connect() else { return };
+    seed(&mut conn);
+    let lease = "{geodineum}:gnode:cluster:writer";
+    let upd = format!(r#"{{"16":{{"pd":0.4,"pr":"{}","s":"{}"}}}}"#, (0.4f64 * 2f64.powi(64)) as i128, score(0.4));
+    let _: String = fcall2(&mut conn, "GNODE_TOPO_SET_DERIVED", lease, &["gflow", &upd, "", "", "1", "", "squad"]).unwrap_or_else(|e| panic!("no lease: anyone writes ({e})"));
+    let _: () = redis::cmd("SET").arg(lease).arg("aesir-solutions").query(&mut conn).unwrap();
+    let r: redis::RedisResult<String> = fcall2(&mut conn, "GNODE_TOPO_SET_DERIVED", lease, &["gflow", &upd, "", "", "1", "", "squad"]);
+    assert!(r.unwrap_err().to_string().contains("does not hold it"), "the non-holder is refused (M3)");
+    let _: String = fcall2(&mut conn, "GNODE_TOPO_SET_DERIVED", lease, &["gflow", &upd, "", "", "1", "", "aesir-solutions"]).unwrap();
+    let r: redis::RedisResult<String> = fcall2(&mut conn, "GNODE_TOPO_SET_DERIVED", lease, &["nobody", &upd, "", "", "1", "", "aesir-solutions"]);
+    assert!(r.unwrap_err().to_string().contains("not found"), "an unknown entity is refused (M4)");
+    let r: Vec<String> = fcall(&mut conn, "GNODE_TOPO_CAN_REACH", &["{gflow}", "gcore", "1"]).unwrap();
+    assert_eq!(r[1], "undeclared", "a braced caller id is nobody (M11): the router derives the bare site");
+}
