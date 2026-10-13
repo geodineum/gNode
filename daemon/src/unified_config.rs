@@ -225,12 +225,6 @@ impl UnifiedConfig {
             debug!("ENV override: identity.stream_prefix = {}", val);
             self.identity.stream_prefix = val;
         }
-        if let Ok(val) = std::env::var("GNODE_DIMENSIONS") {
-            if let Ok(v) = val.parse() {
-                debug!("ENV override: identity.dimensions = {}", v);
-                self.identity.dimensions = v;
-            }
-        }
         if let Ok(val) = std::env::var("GNODE_MASTER") {
             let v = val.to_lowercase() == "true" || val == "1";
             debug!("ENV override: identity.master = {}", v);
@@ -439,8 +433,6 @@ pub struct IdentityConfig {
     pub topology_namespace: String,
     #[serde(default = "default_stream_prefix")]
     pub stream_prefix: String,
-    #[serde(default = "default_dimensions")]
-    pub dimensions: u64,
     #[serde(default)]
     pub master: bool,
 }
@@ -455,10 +447,6 @@ fn default_node_type() -> String { "general".to_string() }
 fn default_environment() -> String { "all".to_string() }
 fn default_topology_namespace() -> String { "geodineum".to_string() }
 fn default_stream_prefix() -> String { "gnode".to_string() }
-// Default to the service-tier total_dimensions (30 = 25 discovery + 5 storage,
-// per daemon/config/service_schema.yaml). Other tiers and custom topologies
-// override this at registration time.
-fn default_dimensions() -> u64 { 30 }
 
 impl Default for IdentityConfig {
     fn default() -> Self {
@@ -468,7 +456,6 @@ impl Default for IdentityConfig {
             environment: default_environment(),
             topology_namespace: default_topology_namespace(),
             stream_prefix: default_stream_prefix(),
-            dimensions: default_dimensions(),
             master: false,
         }
     }
@@ -810,8 +797,6 @@ mod tests {
     fn test_default_config() {
         let config = UnifiedConfig::default();
         assert_eq!(config.version, "1.0.0");
-        // Service tier total_dimensions (canonical default).
-        assert_eq!(config.identity.dimensions, 30);
         assert_eq!(config.performance.batch.initial, 250);
     }
 
