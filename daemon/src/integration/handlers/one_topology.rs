@@ -584,25 +584,51 @@ pub async fn discover_ids_async(conn: &mut AsyncConnection, site_id: &str, param
 /// capability names mapped to the component body (`domain_primary` → `domain`, `api_version` →
 /// `contract_version`), `data_sensitivity` → a `requires` label, the pyramid and order axes dropped
 /// (positions the index replaces), the heartbeat name from the catalogue or the known writers.
-pub fn component_params(comp: &crate::tool_registration::ToolServiceDef) -> Value {
+/// Legacy catalogue and profile words → the one topology's axis names (the log §3
+/// renames): `domain_primary`/`domain_secondary` fold into `domain`, `api_version` is
+/// `contract_version`, clearance and sensitivity become `requires` labels, and the axes
+/// that left the vector are dropped. Words the schema does not know are refused later,
+/// by name, when the plan is encoded.
+fn words_by_name(caps: &[crate::tool_registration::CapabilityEntry]) -> (serde_json::Map<String, Value>, Vec<String>) {
     let mut axes = serde_json::Map::new();
     let mut requires: Vec<String> = Vec::new();
-    for cap in &comp.capabilities {
-        let word = match &cap.value {
-            serde_yaml::Value::String(s) => s.clone(),
-            serde_yaml::Value::Bool(b) => if *b { "yes".into() } else { "no".into() },
-            serde_yaml::Value::Number(n) => n.to_string(),
+    let mut push_domain = |axes: &mut serde_json::Map<String, Value>, w: Value| {
+        let e = axes.entry("domain").or_insert_with(|| json!([]));
+        if let Some(a) = e.as_array_mut() {
+            match w { Value::Array(ws) => a.extend(ws), v => a.push(v) }
+        }
+    };
+    for cap in caps {
+        let word: Value = match &cap.value {
+            serde_yaml::Value::String(s) => json!(s),
+            serde_yaml::Value::Bool(b) => json!(if *b { "yes" } else { "no" }),
+            serde_yaml::Value::Number(n) => json!(n.to_string()),
+            serde_yaml::Value::Sequence(seq) => json!(seq.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>()),
             _ => continue,
         };
         match cap.name.as_str() {
-            "domain_primary" => { axes.insert("domain".into(), json!([word])); }
-            "protocol" => { axes.insert("protocol".into(), json!([word])); }
-            "api_version" => { axes.insert("contract_version".into(), json!(word)); }
-            "data_sensitivity" => { if word != "public" { requires.push(word); } }
-            "pyramid_x" | "pyramid_y" | "pyramid_z" | "registration_order" | "domain_secondary" => {}
-            other => { axes.insert(other.into(), json!(word)); }
+            "domain" | "domain_primary" | "domain_secondary" => push_domain(&mut axes, word),
+            "protocol" => { axes.insert("protocol".into(), if word.is_array() { word } else { json!([word]) }); }
+            "api_version" => { axes.insert("contract_version".into(), word); }
+            "clearance_required" | "data_sensitivity" => {
+                if let Some(w) = word.as_str() {
+                    if !matches!(w, "public" | "public_data" | "none" | "undefined") && !requires.iter().any(|r| r == w) { requires.push(w.to_string()); }
+                }
+            }
+            "specialization" | "pipeline_stage" | "service_tier" | "environment" | "registration_order"
+            | "pyramid_x" | "pyramid_y" | "pyramid_z" | "user_x" | "user_y" | "user_z" => {}
+            other => { axes.insert(other.into(), word); }
         }
     }
+    (axes, requires)
+}
+
+/// `ecosystem_tools.yaml` component → `register_service` parameters by name: shape 2,
+/// environment global, the catalogue's words, its `requires` labels, `depends_on` kept in
+/// the metadata as the edge list, and the heartbeat name where the writer's differs.
+pub fn component_params(comp: &crate::tool_registration::ToolServiceDef) -> Value {
+    let (axes, mut requires) = words_by_name(&comp.capabilities);
+    for r in &comp.requires { if !requires.contains(r) { requires.push(r.clone()); } }
     let heartbeat = comp.metadata.as_ref().and_then(|m| m.heartbeat.clone()).or_else(|| match comp.id.as_str() {
         "gNode" => Some("gnode-daemon".into()), "Geodineum-COMMS" => Some("comms".into()),
         "gFlow" => Some("gflow".into()), "gSchedule" => Some("gschedule".into()), _ => None,
@@ -619,6 +645,19 @@ pub fn component_params(comp: &crate::tool_registration::ToolServiceDef) -> Valu
     p
 }
 
+/// A registration profile (`service_schema.yaml` `profiles:`) → the site's declaration by
+/// name: web is a site (3.1), headless an app (3.2), service / system / component a daemon
+/// (3.3). The environment is a header slot, never an axis word.
+pub fn profile_params(site: &str, profile: &str, caps: &[crate::tool_registration::CapabilityEntry], environment: Option<&str>) -> Value {
+    let shape = match profile { "web" => "site", "headless" => "app", _ => "daemon" };
+    let (axes, requires) = words_by_name(caps);
+    json!({
+        "id": site, "shape": shape, "environment": environment.unwrap_or("production"), "axes": axes,
+        "metadata": { "type": profile, "description": format!("{} ({} profile)", site, profile) },
+        "requires": requires,
+    })
+}
+
 #[cfg(test)]
 mod component_tests {
     use super::*;
@@ -629,10 +668,10 @@ mod component_tests {
     #[test]
     fn a_catalogue_component_registers_by_name_as_shape_two() {
         let comp = ToolServiceDef {
-            id: "Geodineum-COMMS".into(), metadata: None, site: None, depends_on: vec!["ValKey".into(), "gNode".into()],
+            id: "Geodineum-COMMS".into(), metadata: None, site: None, depends_on: vec!["ValKey".into(), "gNode".into()], requires: vec!["credentials".into()],
             capabilities: vec![cap("protocol", "gnode_stream"), cap("native_format", "json"), cap("api_version", "v2"), cap("contract_stability", "stable"),
                 cap("domain_primary", "messaging"), cap("implementation_language", "rust"), cap("build_type", "cargo_release"), cap("component_tier", "infrastructure"),
-                cap("license_tier", "open_source"), cap("requires_valkey", "yes"), cap("systemd_managed", "yes"), cap("data_sensitivity", "credentials"),
+                cap("license_tier", "open_source"), cap("requires_valkey", "yes"), cap("systemd_managed", "yes"),
                 cap("pyramid_x", "0.5"), cap("registration_order", "early")],
         };
         let p = component_params(&comp);
@@ -649,5 +688,43 @@ mod component_tests {
             &serde_json::from_value::<RegisterParams>(p).unwrap()).unwrap();
         assert_eq!(plan.entity.shape, "2");
         assert!(plan.labels.is_some());
+    }
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+    use crate::tool_registration::CapabilityEntry;
+
+    fn cap(n: &str, v: &str) -> CapabilityEntry { CapabilityEntry { name: n.into(), value: serde_yaml::Value::String(v.into()) } }
+
+    #[test]
+    fn a_web_profile_is_a_site_declared_by_name() {
+        let caps = vec![cap("protocol", "http_rest"), cap("api_version", "v1"), cap("clearance_required", "public"), cap("data_sensitivity", "internal"),
+            cap("domain_primary", "presentation"), cap("domain_secondary", "content"), cap("specialization", "generalist"), cap("pipeline_stage", "deliver"), cap("latency_class", "interactive")];
+        let p = profile_params("nierto_com", "web", &caps, Some("staging"));
+        assert_eq!(p["shape"], "site");
+        assert_eq!(p["environment"], "staging");
+        assert_eq!(p["axes"]["protocol"], json!(["http_rest"]));
+        assert_eq!(p["axes"]["contract_version"], "v1");
+        assert_eq!(p["axes"]["domain"], json!(["presentation", "content"]));
+        assert!(p["axes"].get("specialization").is_none() && p["axes"].get("pipeline_stage").is_none());
+        assert_eq!(p["requires"], json!(["internal"]), "public is no label");
+        assert_eq!(profile_params("x", "headless", &[], None)["shape"], "app");
+        assert_eq!(profile_params("x", "system", &[], None)["shape"], "daemon");
+        assert_eq!(profile_params("x", "component", &[], None)["environment"], "production");
+    }
+
+    #[test]
+    fn a_catalogue_domain_list_and_requires_pass_through() {
+        let comp = crate::tool_registration::ToolServiceDef {
+            id: "gCore".into(), metadata: None, site: None, depends_on: vec![], requires: vec!["internal".into()],
+            capabilities: vec![CapabilityEntry { name: "domain".into(), value: serde_yaml::Value::Sequence(vec!["framework".into(), "presentation".into()]) },
+                cap("contract_version", "v2"), cap("protocol", "library")],
+        };
+        let p = component_params(&comp);
+        assert_eq!(p["axes"]["domain"], json!(["framework", "presentation"]));
+        assert_eq!(p["axes"]["contract_version"], "v2");
+        assert_eq!(p["requires"], json!(["internal"]));
     }
 }

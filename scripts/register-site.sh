@@ -411,8 +411,8 @@ EOF
             # Own heartbeat key writable, shared gnode bus read-only (daemon tier
             # writes the topology); clearselectors keeps regrants idempotent.
             valkey_admin_cli ACL SETUSER "$ACL_USER" clearselectors resetkeys \
-                "~{geodineum}:gnode:heartbeat:*:${SITE_ID}:*" \
-                "%R~{geodineum}:gnode:*" \
+                "~{${TOPOLOGY_NS}}:gnode:heartbeat:*:${SITE_ID}:*" \
+                "%R~{${TOPOLOGY_NS}}:gnode:*" \
                 "${_key_grants[@]}" >/dev/null
             log_success "Keyspace patterns set (manifest-driven, ${#_key_grants[@]} grants; shared bus read-only)"
         else
@@ -440,8 +440,8 @@ EOF
                 "~{production}:gnode:*" \
                 "~{default}:gnode:*" \
                 "~{default}:gcore:*" \
-                "~{geodineum}:gnode:heartbeat:*:${SITE_ID}:*" \
-                "%R~{geodineum}:gnode:*" \
+                "~{${TOPOLOGY_NS}}:gnode:heartbeat:*:${SITE_ID}:*" \
+                "%R~{${TOPOLOGY_NS}}:gnode:*" \
                 "~gnode:*" \
                 "~gnode:routing:*" \
                 "~topology:*" \

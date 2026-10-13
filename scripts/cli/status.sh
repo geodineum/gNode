@@ -6,7 +6,7 @@
 #
 # Reads only ValKey (nodes publish everything; no SSH, no host inspection):
 # constellation entities, the heartbeat family (CONTRACTS/heartbeat.md — the
-# daemon's carries la1/cores/mem), registration intents, the tool catalogue.
+# daemon's carries la1/cores/mem), registration intents, the one topology by layer.
 # Agents don't run this: they send `constellation_status` to the unified
 # stream and the daemon serves the same JSON under its own credentials.
 
@@ -21,7 +21,7 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
 Usage: geodineum status [--json]
 
 The constellation at a glance: nodes (heartbeat age, load, memory, what runs
-where), services (profile, env, entity, heartbeat), tool count, and per-site
+where), services (shape, env, health, placements, heartbeat), components, and per-site
 visitor counters. Reads only ValKey. --json emits the same facts for machines.
 HLP
     exit 0
@@ -31,9 +31,10 @@ fi
 vk() { VALKEY_USER=gnode_daemon "$VCLI" "$@" 2>/dev/null; }
 
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-vk HGETALL "{${NS}}:gnode:constellation:entities" > "$T/ents"   || true
-vk HGETALL "{${NS}}:gnode:registrations"          > "$T/reg"    || true
-vk HLEN    "{ecosystem}:gnode:services:entities"  > "$T/tools"  || true
+TK="{${NS}}:gnode:constellation"
+# One read of the constellation: every entity of every shape, decoded by shape below.
+vk HGETALL "${TK}:entities" > "$T/ents" || true
+vk HGETALL "{${NS}}:gnode:registrations" > "$T/reg" || true
 
 # The scan must fail LOUDLY. With stderr swallowed, an ACL that denies SCAN
 # renders a confident empty table — "0 live components" — indistinguishable
@@ -48,17 +49,8 @@ fi
 while IFS= read -r k; do
     [[ -n "$k" ]] || continue
     printf '%s\t%s\n' "$k" "$(vk GET "$k" | tr -d '\n')" >> "$T/hb"
-done < "$T/hbkeys" 
-# Services = UNION of the sites registry (every onboarded site — the ten
-# WordPress sites predate the intent mechanism) and the intent hash. A site
-# IS a service; listing only intents silently hid most of production.
+done < "$T/hbkeys"
 vk SMEMBERS "gnode:sites:registry" > "$T/sites" || true
-vk HGET "{${NS}}:gnode:schema:service" dimension_values > "$T/dimvals" || true
-: > "$T/svc_ent"
-{ cat "$T/sites"; awk 'NR % 2 == 1' "$T/reg"; } | sort -u | while IFS= read -r site; do
-    [[ -n "$site" ]] || continue
-    printf '%s\t%s\n' "$site" "$(vk HGET "{${site}}:gnode:services:entities" "$site" | tr -d '\n')" >> "$T/svc_ent"
-done
 
 MODE="$MODE" NS="$NS" python3 - "$T" <<'PYEOF'
 import json, os, sys, time
@@ -70,48 +62,48 @@ def pairs(path):
     lines = [l for l in lines if l != ""]
     return dict(zip(lines[::2], lines[1::2]))
 
-nodes_reg = pairs(f"{T}/ents")           # node_id -> entity json
-intents   = pairs(f"{T}/reg")            # site   -> intent json
-svc_ent = {}                              # site -> entity json string ('' = absent)
-for line in open(f"{T}/svc_ent"):
-    if "\t" in line:
-        s, v = line.rstrip("\n").split("\t", 1); svc_ent[s] = v
-try:
-    dimvals = json.load(open(f"{T}/dimvals"))
-except Exception:
-    dimvals = {}
-env_vocab = dimvals.get("environment", {})   # label -> float, from the PUBLISHED schema
+def dec(raw):
+    try: return json.loads(raw)
+    except Exception: return {}
 
-def env_label(x):
-    if x is None: return None
-    best = min(env_vocab.items(), key=lambda kv: abs(kv[1] - x), default=None)
-    return best[0] if best and abs(best[1] - x) < 0.05 else f"{x:g}"
-try:
-    tools = int(open(f"{T}/tools").read().strip() or 0)
-except Exception:
-    tools = 0
+ents = {k: dec(v) for k, v in pairs(f"{T}/ents").items()}
+intents = {k: dec(v) for k, v in pairs(f"{T}/reg").items()}
+sites = {l.strip() for l in open(f"{T}/sites") if l.strip()} if os.path.exists(f"{T}/sites") else set()
+HEALTH = {0.0: "unknown", 0.25: "dead", 0.5: "degraded", 1.0: "healthy"}
+SHAPES = {"1": "node", "2": "component", "3.1": "site", "3.2": "app", "3.3": "daemon", "4.1": "component@node", "4.2": "service@node"}
+def slot(e, i):
+    pd = e.get("pd") or []
+    return pd[i] if len(pd) > i else None
+def health_of(e):
+    v = slot(e, 17)
+    return None if v is None else HEALTH.get(round(float(v), 4), str(v))
 
-# Heartbeats: key = {ns}:gnode:heartbeat:<env>:<comp>:<node> (flat legacy = 5 segs)
+layer = lambda e: str(e.get("sh", ""))[:1]
+nodes_reg = {k: e for k, e in ents.items() if e.get("sh") == "1"}
+components = {k: e for k, e in ents.items() if e.get("sh") == "2"}
+services = {k: e for k, e in ents.items() if layer(e) == "3"}
+placements = {k: e for k, e in ents.items() if layer(e) == "4"}
+
+# Heartbeats: key = {ns}:gnode:heartbeat:<env>:<comp>:<node>
 hb = []
 for line in open(f"{T}/hb"):
     if "\t" not in line: continue
     k, v = line.rstrip("\n").split("\t", 1)
     seg = k.split(":")
-    if len(seg) < 6: continue                       # legacy flat key — ignore
+    if len(seg) < 6: continue
     env, comp, node = seg[3], seg[4], ":".join(seg[5:])
-    try: d = json.loads(v)
-    except Exception: d = {}
+    d = dec(v)
     hb.append({"env": env, "comp": comp, "node": node,
                "age_s": max(0, now - int(d.get("ts", 0))) if d.get("ts") else None,
                "la1": d.get("la1"), "cores": d.get("cores"),
                "mem_used_mb": d.get("mem_used_mb"), "mem_total_mb": d.get("mem_total_mb")})
 
 nodes = {}
-for nid in nodes_reg:
-    nodes[nid] = {"node": nid, "hb_age_s": None, "la1": None, "cores": None,
+for nid, e in nodes_reg.items():
+    nodes[nid] = {"node": nid, "health": health_of(e), "load": slot(e, 16), "hb_age_s": None, "la1": None, "cores": None,
                   "mem_used_mb": None, "mem_total_mb": None, "runs": []}
 for h in hb:
-    n = nodes.setdefault(h["node"], {"node": h["node"], "hb_age_s": None, "la1": None,
+    n = nodes.setdefault(h["node"], {"node": h["node"], "health": None, "load": None, "hb_age_s": None, "la1": None,
                                      "cores": None, "mem_used_mb": None, "mem_total_mb": None, "runs": []})
     if h["comp"] not in n["runs"]:
         n["runs"].append(h["comp"])
@@ -121,31 +113,34 @@ for h in hb:
         for f in ("la1", "cores", "mem_used_mb", "mem_total_mb"):
             n[f] = h.get(f)
 
-services = []
-for site in sorted(set(svc_ent) | set(intents)):
-    try: it = json.loads(intents.get(site, "") or "{}")
-    except Exception: it = {}
-    ent_raw = svc_ent.get(site, "")
-    env = it.get("environment")
-    if env is None and ent_raw:
-        # Legacy site (no intent): environment from the stored entity's own
-        # capability map, labeled via the published schema vocabulary.
-        try:
-            env = env_label(json.loads(ent_raw).get("c", {}).get("environment"))
-        except Exception:
-            env = None
-    mine = [h for h in hb if h["comp"] == site and h["age_s"] is not None]
+# A service's placements (4.2, `of` = the service) carry its health per node.
+placed = {}
+for pid, p in placements.items():
+    if p.get("sh") == "4.2":
+        placed.setdefault(p.get("of"), []).append({"node": p.get("on"), "health": health_of(p), "load": slot(p, 16), "weight": p.get("w")})
+
+rows = []
+for sid in sorted(set(services) | sites | set(intents)):
+    e = services.get(sid, {})
+    it = intents.get(sid, {})
+    mine = [h for h in hb if h["comp"] == sid and h["age_s"] is not None]
     best = min(mine, key=lambda h: h["age_s"]) if mine else None
-    services.append({"service": site,
-                     "profile": it.get("profile"), "env": env,
-                     "entity": bool(ent_raw),
-                     "hb_age_s": best["age_s"] if best else None,
-                     "hb_node": best["node"] if best else None})
+    rows.append({"service": sid,
+                 "shape": SHAPES.get(str(e.get("sh")), e.get("sh")) if e else None,
+                 "profile": (e.get("m") or {}).get("type") or it.get("profile"),
+                 "env": e.get("env") or it.get("environment"),
+                 "entity": bool(e),
+                 "health": health_of(e) if e else None,
+                 "load": slot(e, 16) if e else None,
+                 "placements": placed.get(sid, []),
+                 "hb_age_s": best["age_s"] if best else None,
+                 "hb_node": best["node"] if best else None})
 
 out = {"constellation": os.environ.get("NS", "geodineum"), "ts": now,
        "nodes": sorted(nodes.values(), key=lambda n: n["node"]),
-       "services": services,
-       "tools": tools,
+       "services": rows,
+       "components": len(components),
+       "placements": len(placements),
        "components_live": sum(1 for h in hb if h["age_s"] is not None and h["age_s"] <= 120)}
 
 if os.environ.get("MODE") == "json":
@@ -158,16 +153,17 @@ def mem(u, t):
 def load(l, c): return "—" if l is None else f"{l}/{c or '?'}c"
 
 print(f"{out['constellation']} constellation · {time.strftime('%Y-%m-%d %H:%MZ', time.gmtime(now))}"
-      f" · nodes {len(out['nodes'])} · tools {tools} · live components {out['components_live']}")
-print(f"{'NODE':<17}{'HB':<6}{'LOAD':<10}{'MEM':<12}RUNS")
+      f" · nodes {len(out['nodes'])} · components {out['components']} · services {len(services)} · placements {out['placements']} · live heartbeats {out['components_live']}")
+print(f"{'NODE':<17}{'HEALTH':<9}{'HB':<6}{'LOAD':<10}{'MEM':<12}RUNS")
 for n in out["nodes"]:
-    print(f"{n['node']:<17}{age(n['hb_age_s']):<6}{load(n['la1'], n['cores']):<10}"
+    print(f"{n['node']:<17}{n['health'] or '—':<9}{age(n['hb_age_s']):<6}{load(n['la1'], n['cores']):<10}"
           f"{mem(n['mem_used_mb'], n['mem_total_mb']):<12}{' '.join(n['runs']) or '—'}")
-print(f"{'SERVICE':<20}{'PROFILE':<10}{'ENV':<12}{'ENTITY':<8}HB")
+print(f"{'SERVICE':<20}{'SHAPE':<8}{'ENV':<12}{'HEALTH':<9}{'ENTITY':<8}{'PLACED ON':<24}HB")
 for s in out["services"]:
     where = f"{age(s['hb_age_s'])}@{s['hb_node']}" if s["hb_node"] else "—"
-    print(f"{s['service']:<20}{s['profile'] or '—':<10}{s['env'] or '—':<12}"
-          f"{'✓' if s['entity'] else '✗':<8}{where}")
+    pl = " ".join(f"{p['node']}:{p['health'] or '?'}" for p in s["placements"]) or "—"
+    print(f"{s['service']:<20}{s['shape'] or '—':<8}{s['env'] or '—':<12}{s['health'] or '—':<9}"
+          f"{'✓' if s['entity'] else '✗':<8}{pl:<24}{where}")
 PYEOF
 
 # Visitor counters (beacon-fed aggregates) — the fold lives in the installer

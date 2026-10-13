@@ -365,10 +365,9 @@ else
     echo "    1. Check daemon logs: journalctl -u gnode-daemon --since '2 min ago'"
     echo "    2. Verify daemon processes source stream:"
     echo "       XINFO GROUPS $SOURCE_STREAM"
-    echo "    3. Check relay policy:"
-    echo "       Send 'relay_policy_list' command via unified stream"
-    echo "    4. Verify target site is discoverable:"
-    echo "       Check discovery-paths.conf includes target service"
+    echo "    3. Check reach: FCALL_RO GNODE_TOPO_CAN_REACH 1 '{<c>}:gnode:constellation' $SOURCE_SITE $TARGET_SITE \$(date +%s%3N)"
+    echo "       (φ(target) < φ(caller) or a declared peer, env matches, requires ⊆ holds, no live deny; sites are never targets)"
+    echo "    4. Verify the target has a placement: geodineum topology show $TARGET_SITE"
 fi
 
 echo ""

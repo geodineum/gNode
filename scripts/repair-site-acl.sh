@@ -210,7 +210,8 @@ create_or_update_user() {
         "~{production}:gnode:*" \
         "~{default}:gnode:*" \
         "~{default}:gcore:*" \
-        "~{geodineum}:gnode:*" \
+        "~{${TOPOLOGY_NS:-geodineum}}:gnode:heartbeat:*:${SITE_ID}:*" \
+        "%R~{${TOPOLOGY_NS:-geodineum}}:gnode:*" \
         "~gnode:*" \
         "~gnode:routing:*" \
         "~topology:*" \
@@ -297,12 +298,12 @@ verify_access() {
         return 1
     fi
 
-    # Test topology access
+    # Test topology access: the one topology's meta is readable, its entities are not writable
     log_info "Testing topology read access..."
-    if timeout 3 env REDISCLI_AUTH="$password" valkey-cli --user "$username" EXISTS "{default}:gnode:topology" &>/dev/null; then
-        log_success "Can access {default}:gnode:topology"
+    if timeout 3 env REDISCLI_AUTH="$password" valkey-cli --user "$username" HGET "{${TOPOLOGY_NS:-geodineum}}:gnode:constellation:meta" sv &>/dev/null; then
+        log_success "Can read {${TOPOLOGY_NS:-geodineum}}:gnode:constellation"
     else
-        log_warning "Cannot check topology (may not exist yet)"
+        log_warning "Cannot read the constellation (may not exist yet)"
     fi
 
     # Test stream access
@@ -454,7 +455,7 @@ main() {
     echo "  REDISCLI_AUTH=\"\$(cat $PASSWORD_FILE)\" valkey-cli --user $ACL_USER PING"
     echo ""
     echo "  # Test topology access"
-    echo "  REDISCLI_AUTH=\"\$(cat $PASSWORD_FILE)\" valkey-cli --user $ACL_USER GET '{default}:gnode:topology'"
+    echo "  REDISCLI_AUTH=\"\$(cat $PASSWORD_FILE)\" valkey-cli --user $ACL_USER HGET '{${TOPOLOGY_NS:-geodineum}}:gnode:constellation:meta' sv"
     echo ""
     echo "  # Test stream access"
     echo "  REDISCLI_AUTH=\"\$(cat $PASSWORD_FILE)\" valkey-cli --user $ACL_USER XINFO STREAM '{${ENVIRONMENT}}:gnode:unified:default'"

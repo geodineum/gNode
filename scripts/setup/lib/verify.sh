@@ -74,28 +74,26 @@ verify_gnode_daemon() {
     fi
     success "gNode daemon service is running"
 
-    # Check topology is registered
-    local topology_key="{default}:gnode:topology"
+    # Check the one topology exists and the node registered itself (layer 1)
+    local topology_key="{${GNODE_TOPOLOGY_NAMESPACE:-geodineum}}:gnode:constellation"
     local topology_exists=$(VALKEY_USER=gnode_daemon \
-        ${GNODE_SCRIPTS_DIR:-${GNODE_DIR:-/opt/gNode}/scripts}/valkey-cli-secure.sh EXISTS "$topology_key" 2>/dev/null || echo "0")
+        ${GNODE_SCRIPTS_DIR:-${GNODE_DIR:-/opt/gNode}/scripts}/valkey-cli-secure.sh HEXISTS "${topology_key}:meta" sv 2>/dev/null || echo "0")
 
     if [[ "$topology_exists" != "1" ]]; then
-        error "gNode topology not found in ValKey"
+        error "the constellation $topology_key is not in ValKey"
         return 1
     fi
-    success "gNode topology is registered"
+    success "the constellation is present"
 
-    # Check ORCHESTRATOR tier is registered
-    local orchestrator_services=$(VALKEY_USER=gnode_daemon \
-        ${GNODE_SCRIPTS_DIR:-${GNODE_DIR:-/opt/gNode}/scripts}/valkey-cli-secure.sh FCALL GNODE_GEOMETRIC_DISCOVER \
-        1 "$topology_key" '{"requirements":[{"name":"topology_tier","min_value":0.0,"max_value":0.0}]}' \
-        2>/dev/null || echo "[]")
+    local nodes=$(VALKEY_USER=gnode_daemon \
+        ${GNODE_SCRIPTS_DIR:-${GNODE_DIR:-/opt/gNode}/scripts}/valkey-cli-secure.sh FCALL_RO GNODE_TOPO_QUERY \
+        1 "$topology_key" 1 1 '{}' 2>/dev/null || echo "[]")
 
-    if [[ "$orchestrator_services" == "[]" ]] || [[ "$orchestrator_services" == "" ]]; then
-        error "ORCHESTRATOR tier not registered in topology"
+    if [[ "$nodes" == "[]" ]] || [[ "$nodes" == "" ]]; then
+        error "no node registered on the one topology"
         return 1
     fi
-    success "ORCHESTRATOR tier is registered"
+    success "node(s) registered: $nodes"
 
     # Check ValKey functions are loaded
     local functions_count=$(VALKEY_USER=gnode_daemon \
@@ -309,34 +307,31 @@ verify_full_system() {
 #######################################
 
 test_topology_discovery() {
-    local topology_key="{default}:gnode:topology"
+    local topology_key="{${GNODE_TOPOLOGY_NAMESPACE:-geodineum}}:gnode:constellation"
 
-    info "Testing topology discovery..."
+    info "Testing discovery on the one topology..."
 
-    # Test ORCHESTRATOR tier
-    local orchestrator=$(VALKEY_USER=gnode_daemon \
-        ${GNODE_SCRIPTS_DIR:-${GNODE_DIR:-/opt/gNode}/scripts}/valkey-cli-secure.sh FCALL GNODE_GEOMETRIC_DISCOVER \
-        1 "$topology_key" '{"requirements":[{"name":"topology_tier","min_value":0.0,"max_value":0.0}]}' \
-        2>/dev/null || echo "[]")
+    # Layer 1: the nodes
+    local nodes=$(VALKEY_USER=gnode_daemon \
+        ${GNODE_SCRIPTS_DIR:-${GNODE_DIR:-/opt/gNode}/scripts}/valkey-cli-secure.sh FCALL_RO GNODE_TOPO_QUERY \
+        1 "$topology_key" 1 1 '{}' 2>/dev/null || echo "[]")
 
-    if [[ "$orchestrator" == "[]" ]] || [[ "$orchestrator" == "" ]]; then
-        error "ORCHESTRATOR tier discovery failed"
+    if [[ "$nodes" == "[]" ]] || [[ "$nodes" == "" ]]; then
+        error "node discovery failed"
         return 1
     fi
-    success "ORCHESTRATOR tier discovery: $orchestrator"
+    success "nodes: $nodes"
 
-    # Test TOOL tier
+    # Layer 2: the components
     local tools=$(VALKEY_USER=gnode_daemon \
-        ${GNODE_SCRIPTS_DIR:-${GNODE_DIR:-/opt/gNode}/scripts}/valkey-cli-secure.sh FCALL GNODE_GEOMETRIC_DISCOVER \
-        1 "$topology_key" '{"requirements":[{"name":"topology_tier","min_value":0.1,"max_value":0.1}]}' \
-        2>/dev/null || echo "[]")
+        ${GNODE_SCRIPTS_DIR:-${GNODE_DIR:-/opt/gNode}/scripts}/valkey-cli-secure.sh FCALL_RO GNODE_TOPO_QUERY \
+        1 "$topology_key" 2 2 '{}' 2>/dev/null || echo "[]")
 
-    info "TOOL tier discovery: $tools"
+    info "components: $tools"
 
-    # Count services
+    # Count entities
     local service_count=$(VALKEY_USER=gnode_daemon \
-        ${GNODE_SCRIPTS_DIR:-${GNODE_DIR:-/opt/gNode}/scripts}/valkey-cli-secure.sh GET "$topology_key" 2>/dev/null | \
-        python3 -c "import json, sys; data=json.load(sys.stdin); print(len(data['services']))" 2>/dev/null || echo "0")
+        ${GNODE_SCRIPTS_DIR:-${GNODE_DIR:-/opt/gNode}/scripts}/valkey-cli-secure.sh HLEN "${topology_key}:entities" 2>/dev/null || echo "0")
 
     success "Total services registered: $service_count"
 

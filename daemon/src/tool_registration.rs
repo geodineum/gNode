@@ -87,6 +87,9 @@ pub struct ToolServiceDef {
     pub capabilities: Vec<CapabilityEntry>,
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// REACH labels the component requires of a caller (one topology, D8).
+    #[serde(default)]
+    pub requires: Vec<String>,
     /// The registered site this service belongs to. Discovery registers a service into
     /// this site only; absent, the site whose id equals the service id.
     #[serde(default)]
@@ -1085,6 +1088,7 @@ pub fn derive_profile_entity(
         }),
         capabilities: caps,
         depends_on: Vec::new(),
+        requires: Vec::new(),
         site: None,
     };
 
@@ -1146,6 +1150,25 @@ fn run_service_profile(args: &RegisterToolsArgs) -> Result<()> {
               env, env_dim.map(|d| d.index as i64).unwrap_or(-1), site);
     }
 
+    // One topology: the profile names a shape (web → site, headless → app, the rest →
+    // daemon) and its words register by name; the daemon codes.
+    if crate::constellation::one_topology_enabled() {
+        let p = crate::integration::handlers::one_topology::profile_params(site, profile, &caps, args.environment.as_deref());
+        info!("Registering '{}' by name as shape {} from the '{}' profile", site, p["shape"], profile);
+        if args.dry_run {
+            info!("Dry run — would register {}", p);
+            return Ok(());
+        }
+        let client = redis::Client::open(args.redis_url.as_str()).map_err(GeometricError::Redis)?;
+        let mut conn = client.get_connection().map_err(GeometricError::Redis)?;
+        let r = crate::integration::handlers::one_topology::register(&mut conn, site, p);
+        if r.status != "ok" {
+            return Err(GeometricError::Other(format!("site '{}' refused: {:?}", site, r.error)));
+        }
+        info!("  Registered '{}' on the one topology: {}", site, r.result.unwrap_or_default());
+        return Ok(());
+    }
+
     let def = ToolServiceDef {
         id: site.to_string(),
         metadata: Some(ServiceMetadata {
@@ -1159,6 +1182,7 @@ fn run_service_profile(args: &RegisterToolsArgs) -> Result<()> {
         }),
         capabilities: caps,
         depends_on: Vec::new(),
+        requires: Vec::new(),
         site: None,
     };
 

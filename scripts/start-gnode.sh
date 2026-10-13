@@ -74,7 +74,7 @@ Architecture Notes:
   - Daemon listens to ALL DTAP environments (testing, staging, acceptance, production)
   - Daemon discovers ALL registered sites from topology automatically
   - No site_id or environment needed - daemon is multi-tenant infrastructure
-  - Uses shared topology at {namespace}:gnode:topology
+  - One topology per constellation at {namespace}:gnode:constellation
 
 Examples:
   $0                           # Start in foreground (master node)

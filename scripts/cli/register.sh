@@ -1,20 +1,18 @@
 #!/bin/bash
-# geodineum topology register — register services/tools into the canonical (C) topology.
+# geodineum topology register — register components and sites on the one topology.
 # (`geodineum register`, without `topology`, is the installer's manifest generator.)
 #
-#   sudo geodineum topology register tool                                 (re)register the ecosystem tools
-#   sudo geodineum topology register service <site> [profile] [--env <dtap>]  register <site>'s OWN entity
+#   sudo geodineum topology register components                            (re)register the ecosystem components (shape 2)
+#   sudo geodineum topology register service <site> [profile] [--env <dtap>]   register <site>'s OWN entity by name
 #
-#   profiles: web (default) | headless | service | system | component
+#   profiles → shapes: web (default) → site 3.1 · headless → app 3.2 · service | system | component → daemon 3.3
 #
 # Wraps `gnode-daemon register-tools`, supplying the daemon credential + binary
 # so you never type the VALKEY_USER / GNODE_REDIS_AUTH_FILE dance. Reads the
 # daemon credential (root-only) → requires_sudo.
 #
-# Tools register ONCE globally into {ecosystem}:gnode:services. A service
-# registers its own single entity into {site}:gnode:services from the profile's
-# declared defaults (gMath computes the vector; Lua stores). The profile sets
-# only declared axes: the derived ones belong to the daemon's sampler, and a
+# Everything registers into {<constellation>}:gnode:constellation by name: the
+# daemon codes the words, the derived slots belong to its sampler, and a
 # re-registration preserves whatever it last measured.
 set -uo pipefail
 
@@ -27,10 +25,10 @@ DAEMON_CRED="${DAEMON_CRED:-${CRED_DIR}/valkey_daemon.password}"
 
 usage() {
     echo "Usage:"
-    echo "  geodineum topology register tool                                    register the ecosystem tools (global, once)"
-    echo "  geodineum topology register service <site> [profile] [--env <dtap>] register <site> from a profile (default: web)"
+    echo "  geodineum topology register components                              register the ecosystem components (shape 2)"
+    echo "  geodineum topology register service <site> [profile] [--env <dtap>] register <site> from a profile (default: web → site)"
     echo
-    echo "  profiles: web | headless | service | system | component"
+    echo "  profiles → shapes: web → site · headless → app · service | system | component → daemon"
     exit "${1:-0}"
 }
 
@@ -45,8 +43,8 @@ run_reg() { VALKEY_USER=gnode_daemon GNODE_REDIS_AUTH_FILE="$DAEMON_CRED" "$DAEM
 
 sub="${1:-}"; shift || true
 case "$sub" in
-    tool|tools)
-        echo "Registering ecosystem tools (global tool tier)…"
+    components|component|tool|tools)
+        echo "Registering ecosystem components (shape 2) on the one topology…"
         run_reg register-tools --tier tool
         ;;
     service|site)
@@ -63,7 +61,7 @@ case "$sub" in
         done
         [[ -n "$site" ]] || { echo "register service: missing <site>" >&2; usage 1; }
         env_arg=(); [[ -n "$environment" ]] && env_arg=(--environment "$environment")
-        echo "Registering '$site' as a '$profile'-profile service entity${environment:+ (env=$environment)}…"
+        echo "Registering '$site' by name from the '$profile' profile${environment:+ (env=$environment)}…"
         run_reg register-tools --tier service --site "$site" --profile "$profile" "${env_arg[@]}"
         ;;
     ""|-h|--help)

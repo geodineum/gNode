@@ -168,7 +168,7 @@ mode_install() {
     success "========================================="
     info "Next steps:"
     info "  1. Review the log: $LOG_FILE"
-    info "  2. Test topology: VALKEY_USER=gnode_daemon $SCRIPT_DIR/valkey-cli-secure.sh GET '{default}:gnode:topology'"
+    info "  2. Test topology: VALKEY_USER=gnode_daemon $SCRIPT_DIR/valkey-cli-secure.sh HGETALL '{${GNODE_TOPOLOGY_NAMESPACE:-geodineum}}:gnode:constellation:meta'"
     info "  3. Check status: $0 status"
     echo ""
 }
