@@ -25,7 +25,6 @@ static SCHEMA: OnceLock<Option<TopologySchema>> = OnceLock::new();
 pub fn schema() -> Option<&'static TopologySchema> {
     SCHEMA.get_or_init(|| {
         TopologySchema::locate()
-            .or_else(|| crate::tool_registration::find_schema_path(None).and_then(|sp| TopologySchema::default_path(&sp)))
             .and_then(|tp| match TopologySchema::load(&tp) {
                 Ok(s) => Some(s),
                 Err(e) => { warn!("topology_schema.yaml does not compile: {}", e); None }
@@ -441,7 +440,7 @@ pub fn validate_edge(conn: &mut redis::Connection, c: &Constellation, from: &str
     }))
 }
 
-pub fn edge_add(conn: &mut redis::Connection, site_id: &str, params: Value) -> CommandResult {
+pub fn edge_add(conn: &mut redis::Connection, _site_id: &str, params: Value) -> CommandResult {
     let p: EdgeParams = match serde_json::from_value(params) { Ok(p) => p, Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)) };
     let c = crate::constellation::for_entity(conn, &p.from);
     let meta = if p.metadata.is_object() { p.metadata.to_string() } else { "{}".to_string() };
@@ -596,7 +595,7 @@ pub async fn discover_ids_async(conn: &mut AsyncConnection, site_id: &str, param
 fn words_by_name(caps: &[crate::tool_registration::CapabilityEntry]) -> (serde_json::Map<String, Value>, Vec<String>) {
     let mut axes = serde_json::Map::new();
     let mut requires: Vec<String> = Vec::new();
-    let mut push_domain = |axes: &mut serde_json::Map<String, Value>, w: Value| {
+    let push_domain = |axes: &mut serde_json::Map<String, Value>, w: Value| {
         let e = axes.entry("domain").or_insert_with(|| json!([]));
         if let Some(a) = e.as_array_mut() {
             match w { Value::Array(ws) => a.extend(ws), v => a.push(v) }
@@ -683,16 +682,14 @@ pub fn manifest_params(site: &str, path: &std::path::Path, environment: Option<&
     Ok(Some(p))
 }
 
-/// A registration profile (`service_schema.yaml` `profiles:`) → the site's declaration by
+/// A registration profile (`topology_schema.yaml` `profiles:`) → the site's declaration by
 /// name: web is a site (3.1), headless an app (3.2), service / system / component a daemon
 /// (3.3). The environment is a header slot, never an axis word.
-pub fn profile_params(site: &str, profile: &str, caps: &[crate::tool_registration::CapabilityEntry], environment: Option<&str>) -> Value {
+pub fn profile_params(site: &str, profile: &str, axes: &BTreeMap<String, Value>, environment: Option<&str>) -> Value {
     let shape = match profile { "web" => "site", "headless" => "app", _ => "daemon" };
-    let (axes, requires) = words_by_name(caps);
     json!({
         "id": site, "shape": shape, "environment": environment.unwrap_or("production"), "axes": axes,
         "metadata": { "type": profile, "description": format!("{} ({} profile)", site, profile) },
-        "requires": requires,
     })
 }
 
@@ -738,19 +735,17 @@ mod profile_tests {
 
     #[test]
     fn a_web_profile_is_a_site_declared_by_name() {
-        let caps = vec![cap("protocol", "http_rest"), cap("api_version", "v1"), cap("clearance_required", "public"), cap("data_sensitivity", "internal"),
-            cap("domain_primary", "presentation"), cap("domain_secondary", "content"), cap("specialization", "generalist"), cap("pipeline_stage", "deliver"), cap("latency_class", "interactive")];
-        let p = profile_params("nierto_com", "web", &caps, Some("staging"));
+        let mut axes = BTreeMap::new();
+        axes.insert("protocol".to_string(), json!(["http_rest"]));
+        axes.insert("domain".to_string(), json!(["presentation", "content"]));
+        let p = profile_params("nierto_com", "web", &axes, Some("staging"));
         assert_eq!(p["shape"], "site");
         assert_eq!(p["environment"], "staging");
         assert_eq!(p["axes"]["protocol"], json!(["http_rest"]));
-        assert_eq!(p["axes"]["contract_version"], "v1");
-        assert_eq!(p["axes"]["domain"], json!(["presentation", "content"]));
-        assert!(p["axes"].get("specialization").is_none() && p["axes"].get("pipeline_stage").is_none());
-        assert_eq!(p["requires"], json!(["internal"]), "public is no label");
-        assert_eq!(profile_params("x", "headless", &[], None)["shape"], "app");
-        assert_eq!(profile_params("x", "system", &[], None)["shape"], "daemon");
-        assert_eq!(profile_params("x", "component", &[], None)["environment"], "production");
+        assert_eq!(p["metadata"]["type"], "web");
+        assert_eq!(profile_params("x", "headless", &axes, None)["shape"], "app");
+        assert_eq!(profile_params("x", "system", &axes, None)["shape"], "daemon");
+        assert_eq!(profile_params("x", "component", &axes, None)["environment"], "production");
     }
 
     #[test]

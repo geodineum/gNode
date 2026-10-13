@@ -859,15 +859,6 @@ pub fn create_unified_stream_worker(
 
                     // Get load manager reference for health updates
                     // P2BF003 FIX: Always warn on fallback (invariant violation)
-                    let load_manager = match crate::daemon::GNodeDaemon::get_load_metrics_manager_ref() {
-                        Some(lm) => lm,
-                        None => {
-                            // This should not happen - daemon should initialize LoadMetricsManager before workers
-                            error!("LoadMetricsManager not initialized - worker started before daemon init complete");
-                            warn!("Health metrics will be tracked in isolated instance (not shared with daemon)");
-                            std::sync::Arc::new(crate::integration::load_metrics::LoadMetricsManager::new(30))
-                        }
-                    };
 
                     // Get health stream key
                     let health_stream = crate::integration::processor::unified_stream_processor::get_health_stream(
@@ -890,9 +881,9 @@ pub fn create_unified_stream_worker(
                                 debug!("Multi-stream read: {} commands, {} health updates",
                                     commands.len(), health_messages.len());
                             }
-                            // One topology: health records are telemetry here (the sampler reads them through
-                            // its own group); acknowledge what was read so nothing pends when the lu writer goes (K3).
-                            if crate::constellation::one_topology_enabled() && !health_message_ids.is_empty() {
+                            // Health records are telemetry here (the sampler reads them through its own
+                            // group); acknowledge what was read so nothing pends.
+                            if !health_message_ids.is_empty() {
                                 let hs = crate::config::build_health_stream_key(&site_id_owned);
                                 let mut ack = redis::cmd("XACK");
                                 ack.arg(&hs).arg("gnode-daemon");
@@ -945,28 +936,6 @@ pub fn create_unified_stream_worker(
                                     Err(e) => {
                                         warn!("Error processing command batch: {}", e);
                                         state.register_error();
-                                    }
-                                }
-                            }
-
-                            // Process health messages
-                            if !health_messages.is_empty() {
-                                match crate::integration::processor::process_health_updates(
-                                    &load_manager,
-                                    health_messages,
-                                    &mut conn,
-                                    &health_stream,
-                                    "gnode-daemon",
-                                    debug_mode
-                                ) {
-                                    Ok(processed) => {
-                                        if debug_mode && processed > 0 {
-                                            debug!("Processed {} health updates successfully", processed);
-                                        }
-                                        total_processed += processed;
-                                    },
-                                    Err(e) => {
-                                        warn!("Error processing health updates: {}", e);
                                     }
                                 }
                             }
@@ -1394,15 +1363,6 @@ pub fn create_environment_stream_worker_dynamic(
 
                     // Get load manager reference for health updates
                     // P2BF003 FIX: Always warn on fallback (invariant violation)
-                    let load_manager = match crate::daemon::GNodeDaemon::get_load_metrics_manager_ref() {
-                        Some(lm) => lm,
-                        None => {
-                            // This should not happen - daemon should initialize LoadMetricsManager before workers
-                            error!("LoadMetricsManager not initialized - worker started before daemon init complete");
-                            warn!("Health metrics will be tracked in isolated instance (not shared with daemon)");
-                            std::sync::Arc::new(crate::integration::load_metrics::LoadMetricsManager::new(30))
-                        }
-                    };
 
                     // Orphan recovery runs on EVERY node. An entry whose owner
                     // stopped is not redelivered on its own, so if no live node
@@ -1485,7 +1445,7 @@ pub fn create_environment_stream_worker_dynamic(
                                     debug!("Stream[{}] {}: {} commands, {} health updates",
                                         stream_idx, current_unified_stream, commands.len(), health_messages.len());
                                 }
-                                if crate::constellation::one_topology_enabled() && !health_message_ids.is_empty() {
+                                if !health_message_ids.is_empty() {
                                     let site = crate::config::site_of_stream_key(current_unified_stream).unwrap_or(&site_id_owned);
                                     let hs = crate::config::build_health_stream_key(site);
                                     let mut ack = redis::cmd("XACK");
@@ -1493,9 +1453,6 @@ pub fn create_environment_stream_worker_dynamic(
                                     for id in &health_message_ids { ack.arg(id); }
                                     let _: redis::RedisResult<i64> = ack.query(&mut conn);
                                 }
-                                if false {
-                                }
-
                                 // This is the loop that sees EVERY discovered
                                 // site's stream, so it is where a service's
                                 // reply is most reliably caught on its way home.
@@ -1546,7 +1503,6 @@ pub fn create_environment_stream_worker_dynamic(
                                     // Extract site_id from current stream for relay resolution
                                     let stream_site_id = crate::config::site_of_stream_key(current_unified_stream).unwrap_or(&site_id_owned);
 
-                                    let one_topology = crate::constellation::one_topology_enabled();
                                     let constellation = crate::constellation::for_entity(&mut conn, stream_site_id);
                                     for (msg_id, cmd) in &relay_commands {
                                         let relay_target = match cmd.relay_target.as_ref() {
@@ -1554,28 +1510,17 @@ pub fn create_environment_stream_worker_dynamic(
                                             None => continue, // skip: missing relay target
                                         };
 
-                                        // Resolved ONCE per command: under the one topology the ring counter
-                                        // advances here, so a second resolution would be a second request.
-                                        let decision = if one_topology {
-                                            crate::integration::relay::resolve_one_topology(
-                                                &mut conn, &constellation, relay_target, stream_site_id, current_unified_stream,
-                                            )
-                                        } else {
-                                            crate::integration::relay::resolve_relay_target(
-                                                &mut conn,
-                                                relay_target,
-                                                stream_site_id,
-                                                current_unified_stream,
-                                                shared_discovery.as_ref(),
-                                                debug_mode,
-                                            )
-                                        };
+                                        // Resolved ONCE per command: the ring counter advances here, so a
+                                        // second resolution would be a second request.
+                                        let decision = crate::integration::relay::resolve_one_topology(
+                                            &mut conn, &constellation, relay_target, stream_site_id, current_unified_stream,
+                                        );
 
                                         match decision {
                                             crate::integration::relay::RelayDecision::Forward { ref target_site_id, ref target_stream_key, ref target_entity_id, ref target_placement } => {
-                                                // --- Phase 5B: permission. One topology: REACH + deny list, fail closed (D8).
                                                 let ns = crate::daemon::GNodeDaemon::get_topology_namespace();
-                                                let policy = if one_topology {
+                                                // --- Permission: REACH + deny list, fail closed (D8).
+                                                let policy = {
                                                     let now_ms = crate::utils::current_timestamp_ms().max(0) as u64;
                                                     let target = if target_entity_id.is_empty() { target_site_id.as_str() } else { target_entity_id.as_str() };
                                                     match constellation.can_reach(&mut conn, stream_site_id, target, now_ms) {
@@ -1583,11 +1528,6 @@ pub fn create_environment_stream_worker_dynamic(
                                                         Ok(r) => crate::integration::relay::PolicyDecision::Deny(format!("{} may not reach {} ({})", stream_site_id, target, r.reason)),
                                                         Err(e) => crate::integration::relay::PolicyDecision::Deny(format!("reach check failed, refusing: {}", e)),
                                                     }
-                                                } else {
-                                                    crate::integration::relay::check_relay_policy(
-                                                        &mut conn, ns, stream_site_id, target_site_id,
-                                                        &cmd.command, debug_mode,
-                                                    )
                                                 };
                                                 if !policy.is_allowed() {
                                                     if let crate::integration::relay::PolicyDecision::Deny(ref reason) = policy {
@@ -1793,28 +1733,6 @@ pub fn create_environment_stream_worker_dynamic(
                                         Err(e) => {
                                             warn!("Error processing command batch from {}: {}", current_unified_stream, e);
                                             had_any_error = true;
-                                        }
-                                    }
-                                }
-
-                                // Process health messages (all nodes process health updates)
-                                if !health_messages.is_empty() {
-                                    match crate::integration::processor::process_health_updates(
-                                        &load_manager,
-                                        health_messages,
-                                        &mut conn,
-                                        current_health_stream,
-                                        consumer_group,
-                                        debug_mode
-                                    ) {
-                                        Ok(processed) => {
-                                            if debug_mode && processed > 0 {
-                                                debug!("Processed {} health updates from {}", processed, current_health_stream);
-                                            }
-                                            stream_processed += processed;
-                                        },
-                                        Err(e) => {
-                                            warn!("Error processing health updates from {}: {}", current_health_stream, e);
                                         }
                                     }
                                 }

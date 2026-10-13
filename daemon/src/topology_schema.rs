@@ -90,6 +90,9 @@ struct SchemaFile {
     shapes: BTreeMap<String, ShapeDef>,
     #[serde(default)]
     component_ladder: Vec<String>,
+    /// Registration profiles: name → axis → word | words | fraction (the shape's vocabulary).
+    #[serde(default)]
+    profiles: BTreeMap<String, BTreeMap<String, serde_yaml::Value>>,
 }
 
 #[derive(Debug, Clone)]
@@ -134,6 +137,7 @@ pub struct TopologySchema {
     pub width: usize,
     shapes: BTreeMap<String, Shape>,
     component_ladder: Vec<String>,
+    profiles: BTreeMap<String, BTreeMap<String, serde_yaml::Value>>,
 }
 
 impl TopologySchema {
@@ -211,11 +215,20 @@ impl TopologySchema {
         if shapes.is_empty() {
             return Err("no shapes".to_string());
         }
-        Ok(Self { version: file.schema_version, width: file.width, shapes, component_ladder: file.component_ladder })
+        Ok(Self { version: file.schema_version, width: file.width, shapes, component_ladder: file.component_ladder, profiles: file.profiles })
     }
 
     pub fn shape(&self, key: &str) -> Option<&Shape> {
         self.shapes.get(key)
+    }
+
+    /// A registration profile's words (`profiles:` in the schema file), as JSON values.
+    pub fn profile(&self, name: &str) -> Option<BTreeMap<String, serde_json::Value>> {
+        let p = self.profiles.get(name)?;
+        Some(p.iter().map(|(k, v)| (k.clone(), serde_json::to_value(v).unwrap_or(serde_json::Value::Null))).collect())
+    }
+    pub fn profile_names(&self) -> Vec<&str> {
+        self.profiles.keys().map(String::as_str).collect()
     }
 
     pub fn shape_keys(&self) -> Vec<&str> {

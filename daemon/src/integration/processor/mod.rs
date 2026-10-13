@@ -16,9 +16,6 @@ pub mod format_processor;
 pub mod circuit_breakers;
 pub use circuit_breakers::InitializationState;
 
-pub mod health_processor;
-pub use health_processor::process_health_updates;
-
 pub mod broadcast_reader;
 pub use broadcast_reader::{
     BroadcastReader,

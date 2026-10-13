@@ -365,31 +365,6 @@ struct Cli {
     #[clap(long)]
     ext_path: Option<PathBuf>,
 
-    /// Enable automatic service discovery from YAML config files.
-    /// When enabled, the daemon periodically scans geometric_topology.yaml
-    /// and registers discovered services for all known sites.
-    /// Local services use discovery; remote services still use stream registration.
-    #[clap(long, default_value = "true", env = "GNODE_SERVICE_DISCOVERY")]
-    service_discovery: bool,
-
-    /// Service discovery scan interval in seconds.
-    /// How often the daemon checks config files for changes.
-    /// Only re-registers when file content actually changes (mtime-based).
-    #[clap(long, default_value = "120", env = "GNODE_DISCOVERY_INTERVAL_SECS")]
-    discovery_interval_secs: u64,
-
-    /// Additional config paths for service discovery (comma-separated).
-    /// Whitelisted directories or files containing gnode_services.yaml / geometric_topology.yaml.
-    /// Added to the default search paths (GCORE_DIR, /opt/geodineum/gCore/config/).
-    #[clap(long, env = "GNODE_DISCOVERY_CONFIG_PATHS")]
-    discovery_config_paths: Option<String>,
-
-    /// Path to discovery-paths.conf manifest file for dynamic path management.
-    /// The daemon re-reads this file on each scan cycle when its mtime changes,
-    /// allowing new service paths to be added without daemon restart.
-    /// Format: one path per line, # comments, empty lines ignored.
-    #[clap(long, env = "GNODE_DISCOVERY_PATHS_FILE")]
-    discovery_paths_file: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -809,13 +784,6 @@ fn start_daemon(redis_url: &str, dimensions: usize, environment: &str, daemon_na
     // Set node config directory if provided (uses fallback chain otherwise)
     daemon.set_node_config_dir(cli.node_config_dir.as_ref().map(|p| p.to_string_lossy().to_string()));
 
-    // Configure service discovery from CLI flags
-    daemon.set_service_discovery_config(
-        cli.service_discovery,
-        cli.discovery_interval_secs,
-        cli.discovery_config_paths.clone(),
-        cli.discovery_paths_file.clone(),
-    );
 
     // Set up signal handlers for graceful shutdown BEFORE running daemon
     setup_signal_handlers()?;

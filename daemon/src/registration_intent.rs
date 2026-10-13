@@ -40,9 +40,6 @@ use std::collections::HashMap;
 use log::{debug, info, warn};
 use serde::{Deserialize, Serialize};
 
-use crate::tool_registration::{
-    derive_profile_entity, find_schema_path, load_schema, register_services_for_site,
-};
 use crate::Result;
 
 /// What a site declared about itself. Small on purpose: anything derivable
@@ -140,7 +137,7 @@ pub struct ReconcileReport {
 pub fn reconcile(
     conn: &mut redis::Connection,
     topology_ns: &str,
-    apply: bool,
+    _apply: bool,
 ) -> Result<ReconcileReport> {
     let mut report = ReconcileReport::default();
 
@@ -149,187 +146,37 @@ pub fn reconcile(
         return Ok(report);
     }
 
-    // One topology (K9): the stored record lives in the constellation key and the bucket key is
-    // gone. Drift = the stored shape or environment differs from the declared profile and
+    // Drift = the stored shape or environment differs from the declared profile and
     // environment, or the record is absent. Report only: a re-assertion without the manifest's
-    // axes (WP5) would erase what the site declared.
-    if crate::constellation::one_topology_enabled() {
-        for intent in &intents {
-            report.examined += 1;
-            let c = crate::constellation::for_entity(conn, &intent.site);
-            let expected_shape = match intent.profile.as_str() {
-                "web" => "3.1", "headless" => "3.2", "service" | "system" => "3.3", "component" => "2", _ => "3.2",
-            };
-            let stored: redis::RedisResult<Option<String>> = redis::cmd("HGET").arg(format!("{}:entities", c.key())).arg(&intent.site).query(conn);
-            let rec = stored.ok().flatten().and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok());
-            let (sh, env) = match &rec {
-                Some(r) => (r["sh"].as_str().unwrap_or("").to_string(), r["env"].as_str().unwrap_or("").to_string()),
-                None => (String::new(), String::new()),
-            };
-            if sh == expected_shape && env == intent.environment {
-                continue;
-            }
-            report.drifted.push(intent.site.clone());
-            info!("registration drift: '{}' stored shape={} env={} declared shape={} env={} (one topology, report only)",
-                intent.site, if sh.is_empty() { "<absent>" } else { &sh }, if env.is_empty() { "<absent>" } else { &env }, expected_shape, intent.environment);
-        }
-        if report.drifted.is_empty() {
-            debug!("registration reconcile: {} intents, all in agreement (one topology)", report.examined);
-        }
-        return Ok(report);
-    }
-
-    let schema_path = match find_schema_path(None) {
-        Some(p) => p,
-        None => {
-            warn!("registration reconcile: no service schema found — skipped");
-            return Ok(report);
-        }
-    };
-    let schema = load_schema(&schema_path)?;
-
+    // axes would erase what the site declared.
     for intent in &intents {
         report.examined += 1;
-
-        let derived = match derive_profile_entity(
-            &intent.site,
-            &intent.profile,
-            Some(&intent.environment),
-            &schema,
-        ) {
-            Ok(d) => d,
-            Err(e) => {
-                warn!(
-                    "registration reconcile: cannot derive '{}' (profile={} env={}): {}",
-                    intent.site, intent.profile, intent.environment, e
-                );
-                report.errors += 1;
-                continue;
-            }
+        let c = crate::constellation::for_entity(conn, &intent.site);
+        let expected_shape = match intent.profile.as_str() {
+            "web" => "3.1", "headless" => "3.2", "service" | "system" => "3.3", "component" => "2", _ => "3.2",
         };
-
-        // The bucket key is the fingerprint: it is computed from the discovery
-        // prefix of the vector, so any dimension that moved or any value that
-        // changed shows up here. Comparing it is cheaper and stricter than
-        // comparing entity JSON, which also carries timestamps.
-        let stored: redis::RedisResult<String> = redis::cmd("HGET")
-            .arg(format!("{{{}}}:gnode:services:entities", intent.site))
-            .arg(&intent.site)
-            .query(conn);
-
-        let stored_bk = stored.ok().and_then(|j| {
-            serde_json::from_str::<serde_json::Value>(&j)
-                .ok()
-                .and_then(|v| v.get("bk").and_then(|b| b.as_str().map(String::from)))
-        });
-
-        let matches = stored_bk.as_deref() == Some(derived.bucket_key.as_str());
-        if matches {
+        let stored: redis::RedisResult<Option<String>> = redis::cmd("HGET").arg(format!("{}:entities", c.key())).arg(&intent.site).query(conn);
+        let rec = stored.ok().flatten().and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok());
+        let (sh, env) = match &rec {
+            Some(r) => (r["sh"].as_str().unwrap_or("").to_string(), r["env"].as_str().unwrap_or("").to_string()),
+            None => (String::new(), String::new()),
+        };
+        if sh == expected_shape && env == intent.environment {
             continue;
         }
-
         report.drifted.push(intent.site.clone());
-        info!(
-            "registration drift: '{}' stored bk={} derived bk={} (profile={} env={} schema={})",
-            intent.site,
-            stored_bk.as_deref().unwrap_or("<absent>"),
-            derived.bucket_key,
-            intent.profile,
-            intent.environment,
-            schema.schema_version,
-        );
-
-        if !apply {
-            continue;
-        }
-
-        match register_services_for_site(conn, &intent.site, std::slice::from_ref(&derived), "") {
-            Ok((ok, err)) => {
-                report.reasserted += ok;
-                report.errors += err;
-            }
-            Err(e) => {
-                warn!("registration reconcile: re-assert failed for '{}': {}", intent.site, e);
-                report.errors += 1;
-            }
-        }
+        info!("registration drift: '{}' stored shape={} env={} declared shape={} env={} (one topology, report only)",
+            intent.site, if sh.is_empty() { "<absent>" } else { &sh }, if env.is_empty() { "<absent>" } else { &env }, expected_shape, intent.environment);
     }
-
     if report.drifted.is_empty() {
-        debug!("registration reconcile: {} intents, all in agreement", report.examined);
-    } else if apply {
-        info!(
-            "registration reconcile: {} of {} re-asserted ({} errors)",
-            report.reasserted, report.examined, report.errors
-        );
-    } else {
-        info!(
-            "registration reconcile: {} of {} DRIFTED — reporting only, nothing written. \
-             Set GNODE_RECONCILE_REGISTRATIONS=apply to enable re-assertion. Drifted: {:?}",
-            report.drifted.len(), report.examined, report.drifted
-        );
+        debug!("registration reconcile: {} intents, all in agreement (one topology)", report.examined);
     }
-
     Ok(report)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tool_registration::load_schema;
-
-    fn schema() -> crate::tool_registration::CapabilitySchema {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        load_schema(&root.join("config/service_schema.yaml")).unwrap()
-    }
-
-    #[test]
-    fn derivation_is_deterministic() {
-        // The whole design rests on this: same inputs, same entity. If it were
-        // not, reconciliation would report drift forever and rewrite on every
-        // pass.
-        let s = schema();
-        let a = derive_profile_entity("gflow", "service", Some("production"), &s).unwrap();
-        let b = derive_profile_entity("gflow", "service", Some("production"), &s).unwrap();
-        assert_eq!(a.bucket_key, b.bucket_key);
-        assert_eq!(a.z_score, b.z_score);
-    }
-
-    #[test]
-    fn profile_changes_the_vector() {
-        // If these collided, registering a daemon as a website would be
-        // undetectable — which is the defect this whole mechanism exists to
-        // stop repeating.
-        let s = schema();
-        let web = derive_profile_entity("x", "web", Some("production"), &s).unwrap();
-        let svc = derive_profile_entity("x", "service", Some("production"), &s).unwrap();
-        assert_ne!(web.bucket_key, svc.bucket_key,
-            "web and service must not derive the same vector");
-    }
-
-    #[test]
-    fn environment_changes_the_vector() {
-        let s = schema();
-        let prod = derive_profile_entity("x", "service", Some("production"), &s).unwrap();
-        let test = derive_profile_entity("x", "service", Some("testing"), &s).unwrap();
-        assert_ne!(prod.bucket_key, test.bucket_key, "DTAP must be visible in the vector");
-    }
-
-    #[test]
-    fn an_invalid_environment_is_refused_not_coerced() {
-        let s = schema();
-        assert!(derive_profile_entity("x", "service", Some("prod"), &s).is_err());
-    }
-
-    #[test]
-    fn an_unknown_profile_is_refused_and_names_the_valid_ones() {
-        let s = schema();
-        let e = match derive_profile_entity("x", "srvice", Some("production"), &s) {
-            Err(e) => e,
-            Ok(_) => panic!("an unknown profile must not derive an entity"),
-        };
-        assert!(format!("{}", e).contains("available"), "must list valid profiles: {}", e);
-    }
 
     #[test]
     fn intent_round_trips_through_json() {
@@ -341,15 +188,5 @@ mod tests {
         assert_eq!(back.site, "gflow");
         assert_eq!(back.profile, "service");
         assert_eq!(back.environment, "production");
-    }
-
-    #[test]
-    fn a_partial_intent_still_parses() {
-        // Records written by an older version must not break reconciliation
-        // for every other site — read_all skips only the unreadable one.
-        let j = r#"{"site":"x","profile":"web","environment":"production"}"#;
-        let i: RegistrationIntent = serde_json::from_str(j).unwrap();
-        assert_eq!(i.declared_at, 0);
-        assert!(i.declared_by.is_empty());
     }
 }

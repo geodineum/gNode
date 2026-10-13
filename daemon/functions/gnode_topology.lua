@@ -372,65 +372,6 @@ local function get_topology(topology_key)
     return parse_data(topology_data)
 end
 
--- Get dimension schema (returns the dimension definitions)
-server.register_function{
-    function_name = 'GNODE_TOPOLOGY_GET_SCHEMA',
-    callback = function(keys, args)
-        return safe_json_encode({
-            total_dimensions = TOTAL_DIMENSIONS,
-            dimensions = DIMENSIONS,
-            values = VALUES,
-            query_types = QUERY_TYPES
-        })
-    end,
-    flags = {'no-writes'},
-    description = 'Returns the semantic dimension schema'
-}
-
--- List all services with their semantic coordinates
-
--- Find services that support a specific format
--- Used for format-aware service discovery (gNode as format translator)
-
--- Register service format info in topology metadata
--- Called when a service registers its format capabilities
-
--- Get the dimension schema for developers
--- Returns the full schema with dimension names, indices, and valid values
-server.register_function{
-    function_name = 'GNODE_TOPOLOGY_GET_FULL_SCHEMA',
-    callback = function(keys, args)
-        local schema = {
-            total_dimensions = TOTAL_DIMENSIONS,
-            dimensions = {},
-            query_types = QUERY_TYPES
-        }
-
-        -- Build dimension info with valid values
-        for dim_name, dim_index in pairs(DIMENSIONS) do
-            local dim_info = {
-                name = dim_name,
-                index = dim_index,
-                query_type = QUERY_TYPES[dim_name] or "equality",
-                values = {}
-            }
-
-            -- Add valid values if they exist
-            if VALUES[dim_name] then
-                for value_name, value_num in pairs(VALUES[dim_name]) do
-                    dim_info.values[value_name] = value_num
-                end
-            end
-
-            schema.dimensions[dim_name] = dim_info
-        end
-
-        return safe_json_encode(schema)
-    end,
-    flags = {'no-writes'},
-    description = 'Returns the full dimension schema with valid values for each dimension'
-}
-
 -- ---------------------------------------------------------------------------
 -- Canonical capability-schema lookup
 -- ---------------------------------------------------------------------------
@@ -448,7 +389,7 @@ server.register_function{
 -- name→index map. The count alone is not enough to build a coordinate vector;
 -- the index each named capability occupies is the part that actually drifts.
 --
--- Usage: FCALL_RO GNODE_SCHEMA_GET 0 <topology_ns> [tier | shape key such as 3.1]
+-- Usage: FCALL_RO GNODE_SCHEMA_GET 0 <topology_ns> <shape key such as 3.1>
 server.register_function{
     function_name = 'GNODE_SCHEMA_GET',
     callback = function(keys, args)
@@ -457,16 +398,12 @@ server.register_function{
         end
 
         local ns = args[1]
-        local tier = args[2]
-        if not tier or tier == '' then tier = 'service' end
-
-        -- A shape key (`1`, `3.1`, `4.2`) reads the one-topology map; a tier name reads the legacy tier hash.
-        local key
-        if string.match(tier, '^%d[%d%.]*$') then
-            key = '{' .. ns .. '}:gnode:constellation:schema:' .. tier
-        else
-            key = '{' .. ns .. '}:gnode:schema:' .. tier
+        local shape = args[2]
+        if not shape or shape == '' then shape = '3.3' end
+        if not string.match(shape, '^%d[%d%.]*$') then
+            return server.error_reply('shape key expected (1, 2, 3.1, 3.2, 3.3, 4.1, 4.2); the tier schemas are gone')
         end
+        local key = '{' .. ns .. '}:gnode:constellation:schema:' .. shape
         local flat = server.call('HGETALL', key)
 
         -- Absent is a real answer, not an error: the daemon may not have

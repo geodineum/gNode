@@ -1,11 +1,7 @@
-// Geometric Command Handlers
-//
-// Handles: geometric_discover, geometric_discover_range, geometric_store_topology,
-//          geometric_load_sequence, geometric_distance, geometric_dimensions
-// Discovery ranks the canonical (C) entities by Q64.64 distance over the axes a query
-// names; both lanes share one compute and differ only in connection type.
+//! `geometric_discover` and `geometric_discover_range`: one QUERY on the one topology
+//! (`one_topology::discover`), answered with records that carry their colour. The two
+//! names are kept for the wire; both take `{layer?, facets?, axes?, limit?}`.
 
-use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -13,587 +9,76 @@ use std::pin::Pin;
 use std::future::Future;
 use redis::Connection;
 use redis::aio::MultiplexedConnection as AsyncConnection;
-use serde::Deserialize;
 use log::debug;
-use serde_json::{Value, json};
+use serde_json::json;
 use crate::daemon::Command;
-use crate::geometric_precision::{FixedPoint, FixedVector};
 use crate::GeometricTopology;
 
-use super::types::{
-    CommandResult, CommandHandlerFn, AsyncCommandHandlerFn, CommandDescriptor,
-    parse_parameters, get_service_dimensions, DISCOVERY_DIMENSIONS, HASHED_DIMENSIONS,
-    TOTAL_DIMENSIONS, Lane,
-};
+use super::types::{CommandResult, CommandHandlerFn, AsyncCommandHandlerFn, CommandDescriptor, Lane};
 
-/// Register all geometric command handlers
 pub fn register(
     handlers: &mut HashMap<String, CommandHandlerFn>,
     async_handlers: &mut HashMap<String, AsyncCommandHandlerFn>,
     descriptors: &mut Vec<CommandDescriptor>,
 ) {
-    // Sync handlers
     handlers.insert("geometric_discover".to_string(), handle_geometric_discover as CommandHandlerFn);
-    handlers.insert("geometric_discover_range".to_string(), handle_geometric_discover_range as CommandHandlerFn);
+    handlers.insert("geometric_discover_range".to_string(), handle_geometric_discover as CommandHandlerFn);
+    for name in ["discover", "DISCOVER", "geometric_discover", "geo_disc", "geometric_discover_range", "GEOMETRIC_DISCOVER_RANGE"] {
+        async_handlers.insert(name.to_string(), handle_geometric_discover_async as AsyncCommandHandlerFn);
+    }
 
-    // Async handlers - Phase 2 hot-path
-    async_handlers.insert("discover".to_string(), handle_geometric_discover_async as AsyncCommandHandlerFn);
-    async_handlers.insert("DISCOVER".to_string(), handle_geometric_discover_async as AsyncCommandHandlerFn);
-    async_handlers.insert("geometric_discover".to_string(), handle_geometric_discover_async as AsyncCommandHandlerFn);
-    async_handlers.insert("geo_disc".to_string(), handle_geometric_discover_async as AsyncCommandHandlerFn);
-
-    // Async handlers - Phase 5 complete coverage
-    async_handlers.insert("geometric_discover_range".to_string(), handle_geometric_discover_range_async as AsyncCommandHandlerFn);
-    async_handlers.insert("GEOMETRIC_DISCOVER_RANGE".to_string(), handle_geometric_discover_range_async as AsyncCommandHandlerFn);
-
-    // Command descriptors
+    let params = json!({
+        "type": "object",
+        "properties": {
+            "layer": {"type": "string", "description": "Shape word (site, app, daemon, component, node) or layer key; '3' = every service", "default": "3"},
+            "facets": {"type": "object", "description": "axis → word, or list of words (any of); the shape's colour vocabulary", "additionalProperties": true},
+            "axes": {"type": "object", "description": "axis → [lo, hi] as words of an ordered axis or fractions in [0, 1]", "additionalProperties": true},
+            "limit": {"type": "integer", "default": 10, "description": "0 = unlimited"}
+        }
+    });
+    let returns = json!({
+        "type": "object",
+        "properties": {
+            "total_matches": {"type": "integer"},
+            "results": {"type": "array", "items": {"type": "object", "properties": {
+                "service_id": {"type": "string"}, "shape": {"type": "string"}, "environment": {"type": "string"},
+                "colour": {"type": "object"}, "metadata": {"type": "object"}
+            }}},
+            "layer": {"type": "string"},
+            "topology_key": {"type": "string"},
+            "lookup": {"type": "string", "enum": ["index"]}
+        }
+    });
     descriptors.push(CommandDescriptor {
         name: "geometric_discover",
         category: "geometric",
-        description: "Rank registered services by Q64.64 distance over the capability axes the query names; unnamed axes do not count",
-        params_schema: json!({
-            "type": "object",
-            "properties": {
-                "capabilities": {
-                    "type": "object",
-                    "description": "Service-tier discovery axis name → value in [0, 1] (names and codes: GNODE_SCHEMA_GET)",
-                    "additionalProperties": {"type": "number", "minimum": 0.0, "maximum": 1.0}
-                },
-                "limit": {"type": "integer", "default": 10, "description": "Maximum number of results"},
-                "threshold": {"type": "number", "default": 0, "description": "Drop services farther than this distance; 0 keeps all"}
-            },
-            "required": ["capabilities"]
-        }),
-        returns_schema: json!({
-            "type": "object",
-            "properties": {
-                "total_matches": {"type": "integer"},
-                "results": {
-                    "type": "array",
-                    "description": "Nearest first; equal distances by service_id",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "service_id": {"type": "string"},
-                            "distance": {"type": "number"}
-                        }
-                    }
-                },
-                "topology_key": {"type": "string"},
-                "lookup": {"type": "string", "enum": ["voxel", "scan"], "description": "voxel only when every discovery axis is named and the query's own cell is occupied; the cell's members are returned, not a global nearest set"}
-            }
-        }),
-        example: r#"{"cmd":"geometric_discover","params":{"capabilities":{"protocol":0.1,"domain_primary":0.9},"limit":5}}"#,
+        description: "One query on the one topology: entities of the layer whose colours hold every named facet and whose ordered axes fall in every named range; axes not named do not count. Records carry their colour",
+        params_schema: params.clone(),
+        returns_schema: returns.clone(),
+        example: r#"{"cmd":"geometric_discover","params":{"layer":"daemon","facets":{"domain":"workflow"},"axes":{"contract_version":["v2","v5"]},"limit":5}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
-
     descriptors.push(CommandDescriptor {
         name: "geometric_discover_range",
         category: "geometric",
-        description: "Services whose stored point satisfies every operator on every named axis",
-        params_schema: json!({
-            "type": "object",
-            "properties": {
-                "requirements": {
-                    "type": "object",
-                    "description": "Axis index as a string → operators eq, neq, gt, gte, lt, lte; all must hold",
-                    "additionalProperties": {"type": "object", "additionalProperties": {"type": "number"}}
-                }
-            },
-            "required": ["requirements"]
-        }),
-        returns_schema: json!({
-            "type": "object",
-            "properties": {
-                "services": {"type": "array", "items": {"type": "string"}, "description": "Matching service ids, sorted"},
-                "count": {"type": "integer"}
-            }
-        }),
-        example: r#"{"cmd":"geometric_discover_range","params":{"requirements":{"8":{"eq":0.9},"12":{"gte":0.0,"lte":0.25}}}}"#,
+        description: "The same query as geometric_discover (kept as a name)",
+        params_schema: params,
+        returns_schema: returns,
+        example: r#"{"cmd":"geometric_discover_range","params":{"axes":{"latency_class":["realtime","responsive"]}}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
-
-
-
-
 }
 
-// =========================================================================
-// Parameter structs
-// =========================================================================
-
-/// Parameters for the geometric_discover command
-#[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(serde::Serialize, Default))]
-struct GeometricDiscoverParams {
-    /// Discovery axis name → value in [0, 1]; only these axes take part in the match
-    capabilities: HashMap<String, f64>,
-    /// Maximum results (0 → 10)
-    #[serde(default)]
-    limit: usize,
-    /// Maximum distance; 0 keeps all
-    #[serde(default)]
-    threshold: f64,
+pub fn handle_geometric_discover(command: &Command, conn: &mut Connection, _topology: &Arc<RwLock<GeometricTopology>>, site_id: &str, debug_mode: bool) -> CommandResult {
+    if debug_mode { debug!("Handling {} command: {}", command.command, command.id); }
+    super::one_topology::discover(conn, site_id, command.parameters.clone())
 }
 
-/// Parameters for the geometric_discover_range command
-#[derive(Debug, Deserialize)]
-#[cfg_attr(test, derive(serde::Serialize, Default))]
-struct GeometricDiscoverRangeParams {
-    /// Axis index → operators, e.g. { "8": {"eq": 0.90}, "12": {"lte": 0.25} }
-    requirements: HashMap<String, HashMap<String, f64>>,
-}
-
-
-
-
-// =========================================================================
-// Discovery compute (shared by both lanes)
-// =========================================================================
-
-/// A validated discovery query: the named discovery axes, by index, in Q64.64.
-struct DiscoveryQuery {
-    axes: Vec<(usize, FixedPoint)>,
-    limit: usize,
-    threshold: f64,
-}
-
-impl DiscoveryQuery {
-    fn plan(params: &GeometricDiscoverParams) -> Result<Self, String> {
-        if params.capabilities.is_empty() {
-            return Err("capabilities must name at least one axis".to_string());
-        }
-        let dims = get_service_dimensions();
-        let mut axes = Vec::with_capacity(params.capabilities.len());
-        for (name, &value) in &params.capabilities {
-            let index = *dims.get(name).ok_or_else(|| format!("unknown capability axis '{}'", name))?;
-            if index >= DISCOVERY_DIMENSIONS {
-                return Err(format!("'{}' is storage-only and cannot be searched", name));
-            }
-            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
-                return Err(format!("capability '{}' must be a number in [0, 1], got {}", name, value));
-            }
-            axes.push((index, FixedPoint::from_f64(value)));
-        }
-        axes.sort_by_key(|(index, _)| *index);
-        if let Some(pair) = axes.windows(2).find(|w| w[0].0 == w[1].0) {
-            return Err(format!("capabilities name axis {} more than once (an alias and its axis?)", pair[0].0));
-        }
-        Ok(Self {
-            axes,
-            limit: if params.limit > 0 { params.limit } else { 10 },
-            threshold: params.threshold,
-        })
-    }
-
-    /// The query's voxel cell, only when every HASHED axis is named and no
-    /// derived axis is: a cell built from defaulted axes would describe a
-    /// request nobody made, and the derived axes are not in the key at all.
-    fn bucket_key(&self) -> Option<String> {
-        let hashed: Vec<_> = self.axes.iter().filter(|(i, _)| *i < HASHED_DIMENSIONS).collect();
-        if hashed.len() != HASHED_DIMENSIONS {
-            return None;
-        }
-        let mut point = FixedVector::new(HASHED_DIMENSIONS);
-        for (index, value) in hashed {
-            point[*index] = *value;
-        }
-        Some(GeometricTopology::point_to_bucket_key(&point, 10))
-    }
-
-    fn distance_to(&self, point_raw: &[Value]) -> Option<f64> {
-        let mut query = FixedVector::new(self.axes.len());
-        let mut entity = FixedVector::new(self.axes.len());
-        for (k, (index, value)) in self.axes.iter().enumerate() {
-            query[k] = *value;
-            entity[k] = raw_coordinate(point_raw.get(*index)?)?;
-        }
-        Some(query.distance_to(&entity).to_f64())
-    }
-
-    /// Rank a GNODE_TOPO_QUERY_VOXEL / GNODE_TOPO_GET_ENTITIES reply (`{ents:{id:{pr}}}`).
-    fn rank(&self, reply: &str) -> Result<Vec<(String, f64)>, String> {
-        let v: Value = serde_json::from_str(reply).map_err(|e| format!("unreadable topology reply: {}", e))?;
-        let mut ranked = Vec::new();
-        if let Some(ents) = v.get("ents").and_then(|e| e.as_object()) {
-            for (id, data) in ents {
-                let Some(distance) = data.get("pr").and_then(|p| p.as_array()).and_then(|pr| self.distance_to(pr)) else {
-                    continue;
-                };
-                if self.threshold <= 0.0 || distance <= self.threshold {
-                    ranked.push((id.clone(), distance));
-                }
-            }
-        }
-        ranked.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal).then_with(|| a.0.cmp(&b.0)));
-        ranked.truncate(self.limit);
-        Ok(ranked)
-    }
-}
-
-/// A `pr` coordinate: Q64.64 as a decimal string, or a legacy Q32.32 integer.
-fn raw_coordinate(v: &Value) -> Option<FixedPoint> {
-    match v {
-        Value::String(s) => s.parse::<i128>().ok().map(FixedPoint::from_raw),
-        other => other.as_i64().map(|raw| FixedPoint::from_raw((raw as i128) << 32)),
-    }
-}
-
-fn discovery_reply(ranked: Vec<(String, f64)>, topology_key: &str, lookup: &str) -> CommandResult {
-    let results: Vec<Value> = ranked
-        .into_iter()
-        .map(|(service_id, distance)| json!({"service_id": service_id, "distance": distance}))
-        .collect();
-    CommandResult::success(json!({
-        "total_matches": results.len(),
-        "results": results,
-        "topology_key": topology_key,
-        "lookup": lookup,
-    }))
-}
-
-const RANGE_OPERATORS: [&str; 6] = ["eq", "neq", "gt", "gte", "lt", "lte"];
-
-fn validate_range(reqs: &HashMap<String, HashMap<String, f64>>) -> Result<(), String> {
-    for (axis, ops) in reqs {
-        let index: usize = axis
-            .parse()
-            .map_err(|_| format!("requirement key '{}' must be an axis index", axis))?;
-        if index >= TOTAL_DIMENSIONS {
-            return Err(format!("axis {} is outside the {}-axis service tier", index, TOTAL_DIMENSIONS));
-        }
-        if ops.is_empty() {
-            return Err(format!("axis {} names no operator", index));
-        }
-        if let Some(op) = ops.keys().find(|op| !RANGE_OPERATORS.contains(&op.as_str())) {
-            return Err(format!("unknown operator '{}' on axis {} (use {})", op, index, RANGE_OPERATORS.join(", ")));
-        }
-    }
-    Ok(())
-}
-
-/// Ids of entities in a GNODE_TOPO_GET_ENTITIES reply whose `pd` satisfies every requirement.
-fn filter_entities_by_range(entities_json: &str, reqs: &HashMap<String, HashMap<String, f64>>) -> Result<Vec<String>, String> {
-    let v: Value = serde_json::from_str(entities_json).map_err(|e| format!("unreadable topology reply: {}", e))?;
-    let mut out = Vec::new();
-    let Some(ents) = v.get("ents").and_then(|e| e.as_object()) else {
-        return Ok(out);
-    };
-    for (id, data) in ents {
-        let pd = data.get("pd").and_then(|p| p.as_array());
-        let matches = reqs.iter().all(|(axis, ops)| {
-            let index: usize = axis.parse().unwrap_or(usize::MAX);
-            pd.and_then(|a| a.get(index))
-                .and_then(|x| x.as_f64())
-                .map(|val| range_op_match(ops, val))
-                .unwrap_or(false)
-        });
-        if matches {
-            out.push(id.clone());
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
-/// Every operator on the axis must hold.
-fn range_op_match(ops: &HashMap<String, f64>, val: f64) -> bool {
-    ops.iter().all(|(op, bound)| match op.as_str() {
-        "eq" => (val - bound).abs() < 1e-6,
-        "neq" => (val - bound).abs() >= 1e-6,
-        "gt" => val > *bound,
-        "gte" => val >= *bound,
-        "lt" => val < *bound,
-        "lte" => val <= *bound,
-        _ => false,
-    })
-}
-
-fn range_reply(reply: &str, reqs: &HashMap<String, HashMap<String, f64>>) -> CommandResult {
-    match filter_entities_by_range(reply, reqs) {
-        Ok(services) => {
-            let count = services.len();
-            CommandResult::success(json!({ "services": services, "count": count }))
-        }
-        Err(e) => CommandResult::error(e),
-    }
-}
-
-// =========================================================================
-// Sync handlers
-// =========================================================================
-
-/// Handle 'geometric_discover' command
-pub fn handle_geometric_discover(
-    command: &Command,
-    conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    site_id: &str,
-    debug_mode: bool
-) -> CommandResult {
-    if debug_mode {
-        debug!("Handling geometric_discover command: {}", command.id);
-    }
-    if crate::constellation::one_topology_enabled() {
-        return super::one_topology::discover(conn, site_id, command.parameters.clone());
-    }
-    let params = match parse_parameters::<GeometricDiscoverParams>(command) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(e),
-    };
-    let query = match DiscoveryQuery::plan(&params) {
-        Ok(q) => q,
-        Err(e) => return CommandResult::error(e),
-    };
-    let topology_key = GeometricTopology::get_services_topology_key(site_id);
-
-    if let Some(bucket_key) = query.bucket_key() {
-        let cell: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_QUERY_VOXEL").arg(1).arg(&topology_key).arg(&bucket_key).arg("true")
-            .query(conn);
-        match cell.map_err(|e| format!("Voxel query FCALL failed: {:?}", e)).and_then(|reply| query.rank(&reply)) {
-            Ok(ranked) if !ranked.is_empty() => return discovery_reply(ranked, &topology_key, "voxel"),
-            Ok(_) => {}
-            Err(e) => return CommandResult::error(e),
-        }
-    }
-
-    let all: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_TOPO_GET_ENTITIES").arg(1).arg(&topology_key).arg("*")
-        .query(conn);
-    match all.map_err(|e| format!("Discovery FCALL failed: {:?}", e)).and_then(|reply| query.rank(&reply)) {
-        Ok(ranked) => discovery_reply(ranked, &topology_key, "scan"),
-        Err(e) => CommandResult::error(e),
-    }
-}
-
-/// Handle 'geometric_discover_range' — STATELESS: fetch (C) entities + filter by `pd` range.
-pub fn handle_geometric_discover_range(
-    command: &Command,
-    conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    site_id: &str,
-    debug_mode: bool
-) -> CommandResult {
-    if debug_mode {
-        debug!("Handling geometric_discover_range command: {}", command.id);
-    }
-    if crate::constellation::one_topology_enabled() {
-        return super::one_topology::discover(conn, site_id, command.parameters.clone());
-    }
-    let params = match parse_parameters::<GeometricDiscoverRangeParams>(command) {
-        Ok(p) => p,
-        Err(e) => return CommandResult::error(e),
-    };
-    if let Err(e) = validate_range(&params.requirements) {
-        return CommandResult::error(e);
-    }
-    let topology_key = GeometricTopology::get_services_topology_key(site_id);
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_TOPO_GET_ENTITIES").arg(1).arg(&topology_key).arg("*")
-        .query(conn);
-    match result {
-        Ok(json) => range_reply(&json, &params.requirements),
-        Err(e) => CommandResult::error(format!("Range discovery FCALL failed: {:?}", e)),
-    }
-}
-
-// =========================================================================
-// Async handlers
-// =========================================================================
-
-/// Async version of handle_geometric_discover
-pub fn handle_geometric_discover_async<'a>(
-    command: &'a Command,
-    conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    site_id: &'a str,
-    debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
+pub fn handle_geometric_discover_async<'a>(command: &'a Command, conn: &'a mut AsyncConnection, _topology: &'a Arc<RwLock<GeometricTopology>>, site_id: &'a str, debug_mode: bool) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
-        if debug_mode {
-            debug!("Handling async geometric_discover command: {}", command.id);
-        }
-        if crate::constellation::one_topology_enabled() {
-            return super::one_topology::discover_async(conn, site_id, command.parameters.clone()).await;
-        }
-        let params: GeometricDiscoverParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-        let query = match DiscoveryQuery::plan(&params) {
-            Ok(q) => q,
-            Err(e) => return CommandResult::error(e),
-        };
-        let topology_key = GeometricTopology::get_services_topology_key(site_id);
-
-        if let Some(bucket_key) = query.bucket_key() {
-            let cell: redis::RedisResult<String> = redis::cmd("FCALL")
-                .arg("GNODE_TOPO_QUERY_VOXEL").arg(1).arg(&topology_key).arg(&bucket_key).arg("true")
-                .query_async(conn)
-                .await;
-            match cell.map_err(|e| format!("Voxel query FCALL failed: {:?}", e)).and_then(|reply| query.rank(&reply)) {
-                Ok(ranked) if !ranked.is_empty() => return discovery_reply(ranked, &topology_key, "voxel"),
-                Ok(_) => {}
-                Err(e) => return CommandResult::error(e),
-            }
-        }
-
-        let all: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_GET_ENTITIES").arg(1).arg(&topology_key).arg("*")
-            .query_async(conn)
-            .await;
-        match all.map_err(|e| format!("Discovery FCALL failed: {:?}", e)).and_then(|reply| query.rank(&reply)) {
-            Ok(ranked) => discovery_reply(ranked, &topology_key, "scan"),
-            Err(e) => CommandResult::error(e),
-        }
+        if debug_mode { debug!("Handling async {} command: {}", command.command, command.id); }
+        super::one_topology::discover_async(conn, site_id, command.parameters.clone()).await
     })
-}
-
-/// Async version of handle_geometric_discover_range
-pub fn handle_geometric_discover_range_async<'a>(
-    command: &'a Command,
-    conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    site_id: &'a str,
-    debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
-        if crate::constellation::one_topology_enabled() {
-            return super::one_topology::discover_async(conn, site_id, command.parameters.clone()).await;
-        }
-        if debug_mode {
-            debug!("Handling async geometric_discover_range command: {}", command.id);
-        }
-
-        let params: GeometricDiscoverRangeParams = match serde_json::from_value(command.parameters.clone()) {
-            Ok(p) => p,
-            Err(e) => return CommandResult::error(format!("Invalid parameters: {}", e)),
-        };
-        if let Err(e) = validate_range(&params.requirements) {
-            return CommandResult::error(e);
-        }
-        let topology_key = GeometricTopology::get_services_topology_key(site_id);
-        let result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_GET_ENTITIES").arg(1).arg(&topology_key).arg("*")
-            .query_async(conn)
-            .await;
-        match result {
-            Ok(json) => range_reply(&json, &params.requirements),
-            Err(e) => CommandResult::error(format!("Range discovery FCALL failed: {:?}", e)),
-        }
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use super::super::types::{assert_descriptor_fields, SERVICE_DIMENSION_ALIASES};
-
-    fn descriptors() -> Vec<CommandDescriptor> {
-        let (mut handlers, mut async_handlers, mut descriptors) = (HashMap::new(), HashMap::new(), Vec::new());
-        register(&mut handlers, &mut async_handlers, &mut descriptors);
-        descriptors
-    }
-
-    fn axis(name: &str) -> usize {
-        get_service_dimensions()[name]
-    }
-
-    /// A reply entity whose full `pr` is zero except the given axes.
-    fn entity(values: &[(usize, f64)]) -> Value {
-        let mut pr = vec![FixedPoint::from_f64(0.0).raw().to_string(); TOTAL_DIMENSIONS];
-        for (index, value) in values {
-            pr[*index] = FixedPoint::from_f64(*value).raw().to_string();
-        }
-        json!({ "pr": pr })
-    }
-
-    fn query(caps: Value) -> Result<DiscoveryQuery, String> {
-        let params: GeometricDiscoverParams = serde_json::from_value(json!({ "capabilities": caps })).unwrap();
-        DiscoveryQuery::plan(&params)
-    }
-
-    #[test]
-    fn descriptors_name_exactly_the_fields_the_parsers_read() {
-        let d = descriptors();
-        assert_descriptor_fields::<GeometricDiscoverParams>(&d, "geometric_discover", true);
-        assert_descriptor_fields::<GeometricDiscoverRangeParams>(&d, "geometric_discover_range", true);
-    }
-
-    #[test]
-    fn axes_the_query_does_not_name_do_not_count_against_a_provider() {
-        let q = query(json!({"protocol": 0.1, "domain_primary": 0.9})).unwrap();
-        let reply = json!({"ents": {
-            "mailer": entity(&[(axis("protocol"), 0.1), (axis("domain_primary"), 0.9), (axis("environment"), 1.0), (axis("service_tier"), 0.3)]),
-            "cache": entity(&[(axis("protocol"), 0.1), (axis("domain_primary"), 0.25)]),
-        }}).to_string();
-        let ranked = q.rank(&reply).unwrap();
-        assert_eq!(ranked[0], ("mailer".to_string(), 0.0));
-        assert_eq!(ranked[1].0, "cache");
-    }
-
-    #[test]
-    fn only_a_query_naming_every_hashed_axis_has_a_voxel_cell() {
-        assert!(query(json!({"protocol": 0.1})).unwrap().bucket_key().is_none());
-        let aliases: Vec<&str> = SERVICE_DIMENSION_ALIASES.iter().map(|(alias, _)| *alias).collect();
-        let hashed: serde_json::Map<String, Value> = get_service_dimensions()
-            .iter()
-            .filter(|(name, i)| **i < HASHED_DIMENSIONS && !aliases.contains(&name.as_str()))
-            .map(|(name, _)| (name.clone(), json!(0.5)))
-            .collect();
-        assert!(query(Value::Object(hashed.clone())).unwrap().bucket_key().is_some());
-
-        // A derived axis is queryable but never part of the cell: naming one on
-        // top of every hashed axis must not change the key, and naming it
-        // instead of a hashed axis leaves the query without one.
-        let mut with_derived = hashed.clone();
-        with_derived.insert("current_load".into(), json!(0.5));
-        assert_eq!(
-            query(Value::Object(with_derived)).unwrap().bucket_key(),
-            query(Value::Object(hashed.clone())).unwrap().bucket_key()
-        );
-        let mut missing_hashed = hashed;
-        missing_hashed.remove("protocol");
-        missing_hashed.insert("current_load".into(), json!(0.5));
-        assert!(query(Value::Object(missing_hashed)).unwrap().bucket_key().is_none());
-    }
-
-    #[test]
-    fn unknown_storage_only_out_of_range_and_empty_queries_are_refused() {
-        for caps in [json!({"compute": 0.8}), json!({"native_format": 0.5}), json!({"protocol": 2.0}), json!({}), json!({"load": 0.5, "current_load": 0.5})] {
-            assert!(query(caps.clone()).is_err(), "accepted {caps}");
-        }
-    }
-
-    #[test]
-    fn equal_distances_order_by_id_and_the_threshold_drops_far_services() {
-        let q = DiscoveryQuery { threshold: 0.3, ..query(json!({"protocol": 0.5})).unwrap() };
-        let reply = json!({"ents": {
-            "b": entity(&[(0, 0.25)]),
-            "a": entity(&[(0, 0.75)]),
-            "far": entity(&[(0, 1.0)]),
-        }}).to_string();
-        let ids: Vec<String> = q.rank(&reply).unwrap().into_iter().map(|(id, _)| id).collect();
-        assert_eq!(ids, vec!["a", "b"]);
-    }
-
-    #[test]
-    fn every_range_operator_on_an_axis_must_hold() {
-        let ops = HashMap::from([("gt".to_string(), 0.1), ("lt".to_string(), 0.5)]);
-        assert!(range_op_match(&ops, 0.3));
-        assert!(!range_op_match(&ops, 0.7));
-    }
-
-    #[test]
-    fn range_requirements_are_checked_before_the_scan() {
-        let rejected = |r: Value| validate_range(&serde_json::from_value(r).unwrap()).is_err();
-        assert!(rejected(json!({"protocol": {"eq": 0.1}})));
-        assert!(rejected(json!({"99": {"eq": 0.1}})));
-        assert!(rejected(json!({"0": {"between": 0.1}})));
-        assert!(!rejected(json!({"0": {"gte": 0.1, "lte": 0.2}})));
-    }
-
 }

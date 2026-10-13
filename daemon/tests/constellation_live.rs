@@ -119,7 +119,6 @@ fn a_service_is_registered_placed_queried_routed_and_reached() {
 #[ignore]
 fn the_daemon_reads_the_placement_streams_of_its_own_node() {
     let Some((mut conn, c, s)) = connect() else { return };
-    std::env::set_var("GNODE_ONE_TOPOLOGY", "on");
     for n in ["aesir-solutions", "squad"] {
         c.register(&mut conn, &encode(&s, &declare_node(n, &NodeHardware { node_type: "general".into(), ..Default::default() })).unwrap()).unwrap();
     }
@@ -134,5 +133,4 @@ fn the_daemon_reads_the_placement_streams_of_its_own_node() {
     assert_eq!(keys, vec!["{gflow}:gnode:unified:production:aesir-solutions", "{gschedule}:gnode:unified:staging:aesir-solutions"], "this node's placements only, each with its own environment");
     let squad: Vec<String> = gnode::integration::stream_discovery::placement_streams(&mut conn, "squad").into_iter().map(|d| d.key).collect();
     assert_eq!(squad, vec!["{gflow}:gnode:unified:production:squad"]);
-    std::env::remove_var("GNODE_ONE_TOPOLOGY");
 }

@@ -537,15 +537,10 @@ impl DaemonWorker for LoadSamplerWorker {
         let Ok(mut conn) = crate::integration::connection_manager::get_connection() else {
             return TickResult::Error;
         };
-        let one_topology = crate::constellation::one_topology_enabled();
         let served = crate::constellation::served();
         // One writer of the axis. A node that does not hold the lease does not even
         // read: the group's position would then advance on a node that cannot write.
-        let leased = if one_topology {
-            served.iter().all(|c| crate::integration::lease::hold_lease(&mut conn, &c.lease_key(), &self.node_id))
-        } else {
-            crate::integration::lease::hold_writer_lease(&mut conn, &self.node_id)
-        };
+        let leased = served.iter().all(|c| crate::integration::lease::hold_lease(&mut conn, &c.lease_key(), &self.node_id));
         if !leased {
             return TickResult::Idle;
         }
@@ -569,7 +564,7 @@ impl DaemonWorker for LoadSamplerWorker {
             self.last_saved = Instant::now();
         }
 
-        if one_topology && self.mode == SamplerMode::Write {
+        if self.mode == SamplerMode::Write {
             let now_ms = crate::utils::current_timestamp_ms().max(0) as u64;
             let suggestions = self.sampler.suggestions().to_vec();
             let mut done = Vec::new();
@@ -595,47 +590,11 @@ impl DaemonWorker for LoadSamplerWorker {
             return if observed > 0 || !done.is_empty() { TickResult::Busy } else { TickResult::Idle };
         }
 
-        if writes.is_empty() {
-            return if observed > 0 { TickResult::Busy } else { TickResult::Idle };
-        }
-
+        // Shadow mode: say what would be written, write nothing.
         for w in &writes {
-            if self.mode == SamplerMode::Shadow {
-                // Quiet by construction: a write only happens on a band change or a
-                // stamp refresh, so this is not a per-tick line.
-                info!("[load-sampler] shadow: {:?} {} in {} would read {:.4} ({})",
-                      w.tier, w.entity, w.site, w.pd, w.reason);
-                continue;
-            }
-            let updates = format!(r#"{{"{}":{{"pd":{:.4},"pr":"{}"}}}}"#,
-                w.index, w.pd,
-                crate::geometric_precision::FixedPoint::from_f64(w.pd).raw());
-            let topology_key = match w.tier {
-                crate::integration::sampler::Tier::Node =>
-                    format!("{{{}}}:gnode:constellation", self.topology_namespace),
-                crate::integration::sampler::Tier::Service =>
-                    crate::GeometricTopology::get_services_topology_key(&w.site),
-            };
-            let result: redis::RedisResult<String> = redis::cmd("FCALL")
-                .arg("GNODE_TOPO_SET_DERIVED").arg(1)
-                .arg(&topology_key)
-                .arg(&w.entity).arg(&updates).arg(w.zs)
-                .arg(format!("{{{}}}:gnode:topology:services", self.topology_namespace))
-                .arg(crate::integration::processor::stream_utils::current_timestamp())
-                .arg(crate::integration::handlers::types::HASHED_DIMENSIONS)
-                .arg(&self.node_id)
-                .query(&mut conn);
-            match result {
-                Ok(_) => info!("[load-sampler] {:?} {} in {} → {:.4} ({})",
-                               w.tier, w.entity, w.site, w.pd, w.reason),
-                // A provider can be observed before it is registered; that is the
-                // publisher's business, not a reason to stop sampling.
-                Err(e) => debug!("[load-sampler] write for {} refused: {}", w.entity, e),
-            }
+            info!("[load-sampler] shadow: {:?} {} in {} would read {:.4} ({})", w.tier, w.entity, w.site, w.pd, w.reason);
         }
-        self.save_baselines(&mut conn);
-        self.last_saved = Instant::now();
-        TickResult::Busy
+        if observed > 0 || !writes.is_empty() { TickResult::Busy } else { TickResult::Idle }
     }
 
     fn config(&self) -> WorkerConfig {
@@ -729,82 +688,6 @@ impl DaemonWorker for DiscoveryRefreshWorker {
     }
 }
 
-/// Service discovery worker — periodic scan of config files for service registration
-pub struct ServiceDiscoveryWorker {
-    service_discovery: Arc<std::sync::RwLock<crate::integration::service_discovery::ServiceDiscoveryManager>>,
-    last_tick: Instant,
-    scan_interval: Duration,
-}
-
-impl ServiceDiscoveryWorker {
-    pub fn new(
-        service_discovery: Arc<std::sync::RwLock<crate::integration::service_discovery::ServiceDiscoveryManager>>,
-        scan_interval_secs: u64,
-    ) -> Self {
-        Self {
-            service_discovery,
-            last_tick: Instant::now(),
-            scan_interval: Duration::from_secs(scan_interval_secs),
-        }
-    }
-}
-
-impl DaemonWorker for ServiceDiscoveryWorker {
-    fn name(&self) -> &str {
-        "service-discovery"
-    }
-
-    fn tick(&mut self) -> TickResult {
-        if self.last_tick.elapsed() < self.scan_interval {
-            return TickResult::Idle;
-        }
-
-        self.last_tick = Instant::now();
-
-        match crate::integration::connection_manager::get_connection() {
-            Ok(mut conn) => {
-                match self.service_discovery.write() {
-                    Ok(mut discovery) => {
-                        if discovery.needs_scan() {
-                            match discovery.discover_and_register(&mut conn) {
-                                Ok(result) => {
-                                    if !result.skipped && result.registered > 0 {
-                                        info!("[service-discovery] Registered {} services for {} sites",
-                                              result.registered, result.sites);
-                                    }
-                                    TickResult::Busy
-                                }
-                                Err(e) => {
-                                    warn!("[service-discovery] Failed: {:?}", e);
-                                    TickResult::Error
-                                }
-                            }
-                        } else {
-                            TickResult::Idle
-                        }
-                    }
-                    Err(e) => {
-                        warn!("[service-discovery] Failed to acquire lock: {}", e);
-                        TickResult::Error
-                    }
-                }
-            }
-            Err(e) => {
-                warn!("[service-discovery] Failed to get connection: {:?}", e);
-                TickResult::Error
-            }
-        }
-    }
-
-    fn config(&self) -> WorkerConfig {
-        WorkerConfig {
-            idle_interval: Duration::from_secs(10),
-            error_backoff: Duration::from_secs(10),
-            max_backoff: Duration::from_secs(60),
-            ..Default::default()
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {

@@ -87,7 +87,7 @@ case "$sub" in
         [[ -n "$node" ]] || { echo "register node: missing <id>" >&2; usage 1; }
         spec_arg=(); [[ -n "$spec" ]] && spec_arg=(--specialization "$spec")
         echo "Declaring node '$node' (role $role) in constellation '$c'…"
-        VALKEY_USER=gnode_daemon GNODE_REDIS_AUTH_FILE="$DAEMON_CRED" GNODE_ONE_TOPOLOGY=on \
+        VALKEY_USER=gnode_daemon GNODE_REDIS_AUTH_FILE="$DAEMON_CRED"  \
             "$DAEMON_BIN" --topology-namespace "$c" register-tools --tier node --site "$node" --node-role "$role" "${spec_arg[@]}"
         ;;
     ""|-h|--help)

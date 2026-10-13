@@ -37,7 +37,6 @@ pub mod geometric;
 pub mod service;
 pub mod introspection;
 pub mod direct_channel;
-pub mod relay_ops;
 /// The registration and discovery commands on the one topology (SPEC §4, §13.3).
 pub mod one_topology;
 

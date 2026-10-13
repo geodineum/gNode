@@ -20,7 +20,6 @@ use crate::integration::{
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FunctionLibrary {
     Core,
-    Geometric,
     Stream,
     Batch,
     Lock,
@@ -42,7 +41,6 @@ impl FunctionLibrary {
     pub fn to_file_name(&self) -> String {
         match self {
             FunctionLibrary::Core => "gnode_core.lua".to_string(),
-            FunctionLibrary::Geometric => "gnode_geometric.lua".to_string(),
             FunctionLibrary::Stream => "gnode_stream.lua".to_string(),
             FunctionLibrary::Batch => "gnode_batch.lua".to_string(),
             FunctionLibrary::Lock => "gnode_lock.lua".to_string(),
@@ -64,7 +62,6 @@ impl FunctionLibrary {
     pub fn from_file_name(file_name: &str) -> Self {
         match file_name {
             "gnode_core.lua" => FunctionLibrary::Core,
-            "gnode_geometric.lua" => FunctionLibrary::Geometric,
             "gnode_stream.lua" => FunctionLibrary::Stream,
             // NOT `| "gnode_batch_resp3.lua"`. Those are two DIFFERENT ValKey
             // libraries — the files declare `#!lua name=gnode_batch` and
@@ -101,7 +98,6 @@ impl FunctionLibrary {
         vec![
             FunctionLibrary::Utils,    // Utils first as others may depend on it
             FunctionLibrary::Core,     // Core functionality
-            FunctionLibrary::Geometric, // Geometric operations
             FunctionLibrary::Stream,   // Stream operations
             FunctionLibrary::Batch,    // Batch operations
             FunctionLibrary::Lock,     // Locking operations
@@ -685,7 +681,6 @@ pub fn execute_readonly_function(
                     let lib_prefix = function_name.split('_').nth(1).unwrap_or("UNKNOWN");
                     let library = match lib_prefix {
                         "CORE" => FunctionLibrary::Core,
-                        "GEOMETRIC" => FunctionLibrary::Geometric,
                         "STREAM" => FunctionLibrary::Stream,
                         "BATCH" => FunctionLibrary::Batch,
                         "LOCK" => FunctionLibrary::Lock,
@@ -794,7 +789,6 @@ pub fn execute_function(
                     let lib_prefix = function_name.split('_').nth(1).unwrap_or("UNKNOWN");
                     let library = match lib_prefix {
                         "CORE" => FunctionLibrary::Core,
-                        "GEOMETRIC" => FunctionLibrary::Geometric,
                         "STREAM" => FunctionLibrary::Stream,
                         "BATCH" => FunctionLibrary::Batch,
                         "LOCK" => FunctionLibrary::Lock,
@@ -1183,7 +1177,6 @@ pub fn sync_functions(
                                 let function_name_map: HashMap<&str, &str> = [
                                     // Add known mappings here
                                     ("GNODE_UTILS_HEALTH_CHECK", "GNODE_MONITORING_HEALTH_CHECK"),
-                                    ("GNODE_GEOMETRIC_DIMENSIONS", "GNODE_GEOMETRIC_GET_DIMENSIONS"),
                                     ("GNODE_STREAM_GROUP_INFO", "GNODE_STREAM_GROUPS_INFO"),
                                 ].iter().cloned().collect();
                                 
@@ -1465,7 +1458,6 @@ mod tests {
         
         // Check that all core libraries are included
         assert!(libraries.contains(&FunctionLibrary::Core));
-        assert!(libraries.contains(&FunctionLibrary::Geometric));
         assert!(libraries.contains(&FunctionLibrary::Stream));
     }
 

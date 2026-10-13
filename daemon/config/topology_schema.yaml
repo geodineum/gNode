@@ -102,3 +102,13 @@ shapes:
 
 # D11: a component's default fundamentality is its rung on this ladder (0 = foundation).
 component_ladder: [ValKey, gMath, gNode, gNode-CMS, gNode-Client, gCore, gTemplate, gCube, Geodineum-COMMS, gFlow, gSchedule, Geodineum-BAK]
+
+# Registration profiles: the words a site or service declares when its manifest has no
+# gnode: block (`register-tools --tier service --profile`). web is a site (3.1),
+# headless an app (3.2), service / system / component a daemon (3.3).
+profiles:
+  web:      { protocol: [http_rest],    native_format: json,  contract_version: v1, contract_stability: stable, auth_method: session_cookie, service_scope: client_facing, domain: [presentation, content], throughput_tier: standard,     latency_class: interactive, reliability_tier: standard, execution_priority: normal, implementation_language: php }
+  headless: { protocol: [http_rest],    native_format: json,  contract_version: v1, contract_stability: stable, auth_method: bearer_token,   service_scope: bff,           domain: [gateway],                throughput_tier: professional, latency_class: responsive,  reliability_tier: high,     execution_priority: normal, implementation_language: php }
+  service:  { protocol: [gnode_stream], native_format: json,  contract_version: v1, contract_stability: stable, auth_method: api_key,        service_scope: internal_api,  domain: [compute],                throughput_tier: standard,     latency_class: responsive,  reliability_tier: standard, execution_priority: normal }
+  system:   { protocol: [resp3_direct], native_format: resp3, contract_version: v1, contract_stability: stable, auth_method: mtls,           service_scope: daemon,        domain: [platform],               throughput_tier: professional, latency_class: realtime,    reliability_tier: critical, execution_priority: high }
+  component: { protocol: [gnode_stream], native_format: json, contract_version: v1, contract_stability: stable, auth_method: api_key,        service_scope: worker,        domain: [compute],                throughput_tier: standard,     latency_class: responsive,  reliability_tier: standard, execution_priority: normal }

@@ -239,12 +239,6 @@ pub use stream_discovery::{
     get_site_streams,
 };
 
-// Service discovery module (daemon-driven periodic registration from config files)
-pub mod service_discovery;
-pub use service_discovery::{
-    ServiceDiscoveryManager,
-    ServiceDiscoveryConfig,
-};
 
 /// Process node with unified stream approach
 ///

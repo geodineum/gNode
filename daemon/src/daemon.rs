@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
@@ -127,10 +126,6 @@ pub struct GNodeDaemon {
     /// Discovers registered sites and their streams from topology
     /// Replaces hardcoded site_id - daemon is now site-agnostic
     pub stream_discovery: Arc<RwLock<StreamDiscoveryManager>>,
-
-    /// Service discovery manager for periodic config-based service registration
-    /// Scans geometric_topology.yaml and registers services for all discovered sites
-    pub service_discovery: Arc<RwLock<crate::integration::service_discovery::ServiceDiscoveryManager>>,
 
     /// Worker thread handles for graceful shutdown
     /// Stores JoinHandles so we can join threads on shutdown instead of detaching
@@ -303,14 +298,6 @@ impl GNodeDaemon {
         let stream_discovery = Arc::new(RwLock::new(StreamDiscoveryManager::new(stream_discovery_config)));
         info!("StreamDiscoveryManager initialized for environment: {}", environment);
 
-        // Initialize ServiceDiscoveryManager with default config
-        // CLI flags will override via set_service_discovery_config() after construction
-        let service_discovery_config = crate::integration::service_discovery::ServiceDiscoveryConfig::default();
-        let service_discovery = Arc::new(RwLock::new(
-            crate::integration::service_discovery::ServiceDiscoveryManager::new(service_discovery_config)
-        ));
-        info!("ServiceDiscoveryManager initialized (default config, will be updated from CLI)");
-
         Ok(Self {
             client,
             topology_manager,
@@ -318,7 +305,6 @@ impl GNodeDaemon {
             format_processor: Arc::new(std::sync::Mutex::new(None)), // Will be set during run() when format system initializes
 
             stream_discovery,
-            service_discovery,
 
             // Initialize empty worker handles vec for graceful shutdown
             worker_handles: Mutex::new(Vec::new()),
@@ -385,29 +371,6 @@ impl GNodeDaemon {
         self.node_config_dir = dir;
     }
 
-    /// Configure service discovery from CLI flags
-    pub fn set_service_discovery_config(
-        &mut self,
-        enabled: bool,
-        interval_secs: u64,
-        extra_paths: Option<String>,
-        paths_file: Option<String>,
-    ) {
-        if let Ok(mut sd) = self.service_discovery.write() {
-            sd.config_mut().enabled = enabled;
-            sd.config_mut().scan_interval_secs = interval_secs;
-            if let Some(paths) = extra_paths {
-                sd.config_mut().extra_config_paths = paths
-                    .split(',')
-                    .map(|s| std::path::PathBuf::from(s.trim()))
-                    .collect();
-            }
-            if let Some(pf) = paths_file {
-                sd.config_mut().discovery_paths_file = Some(std::path::PathBuf::from(pf));
-            }
-            info!("ServiceDiscovery configured: enabled={}, interval={}s", enabled, interval_secs);
-        }
-    }
 
     /// Get the thread count based on configuration
     pub fn get_thread_count(&self) -> usize {
@@ -461,13 +424,6 @@ impl GNodeDaemon {
     /// Get the topology namespace (defaults to "geodineum" if not set)
     pub fn get_topology_namespace() -> &'static str {
         TOPOLOGY_NAMESPACE.get().map(|s| s.as_str()).unwrap_or("geodineum")
-    }
-
-    /// Global derived-snapshot hash key: `{topology_namespace}:gnode:topology:services`.
-    /// Passed to GNODE_REGISTER/DEREGISTER_CAPABILITY_VECTOR so every registration
-    /// transport maintains the PHP-facing snapshot (field=entity_id, value={point,metadata}).
-    pub fn topology_snapshot_key() -> String {
-        format!("{{{}}}:gnode:topology:services", Self::get_topology_namespace())
     }
 
     /// Get format processor reference for static access (requires "format" feature)
@@ -528,203 +484,6 @@ impl GNodeDaemon {
     }
 }
 
-/// Register gNode daemon as a discoverable geo-node service
-/// Uses semantic capability dimensions from NEW_PRACTICAL_TOPOLOGY.md
-/// NOTE: topology_namespace is used instead of site_id because daemon is infrastructure, not a site
-fn register_gnode_as_service(
-    _topology_manager: &SharedTopology,  // Kept for API compatibility
-    topology_namespace: &str,
-    node_id: &str,
-    debug_mode: bool
-) -> Result<()> {
-
-    // Service ID uses only node_id (daemon serves ALL sites via unified streams)
-    // topology_namespace is kept in metadata for reference
-    let service_id = format!("gnode-daemon-{}", node_id);
-
-    // Define gNode capabilities using semantic dimensions (see NEW_PRACTICAL_TOPOLOGY.md)
-    let mut capabilities: HashMap<String, f64> = HashMap::new();
-
-    // LAYER 1: Interface Identity
-    capabilities.insert("protocol".to_string(), 0.50);           // gnode_stream (native ValKey streams)
-    capabilities.insert("native_format".to_string(), 0.20);      // json (primary format)
-    capabilities.insert("api_version".to_string(), 0.10);        // v1.x
-    capabilities.insert("contract_stability".to_string(), 0.75); // stable
-
-    // LAYER 2: Access Control
-    capabilities.insert("clearance_required".to_string(), 0.20); // authenticated
-    capabilities.insert("auth_method".to_string(), 0.40);        // bearer_token (ACL-based)
-    capabilities.insert("data_sensitivity".to_string(), 0.25);   // internal
-
-    // LAYER 3: Service Scope
-    capabilities.insert("service_scope".to_string(), 0.00);      // infrastructure (platform-level)
-
-    // LAYER 4: Functional Domain
-    capabilities.insert("domain_primary".to_string(), 0.05);     // platform (infrastructure services)
-    capabilities.insert("domain_secondary".to_string(), 0.40);   // messaging (also acts as message broker)
-    capabilities.insert("specialization".to_string(), 0.25);     // generalist (handles many functions)
-
-    // LAYER 5: Performance Profile
-    capabilities.insert("throughput_tier".to_string(), 0.75);    // high-throughput capability tier
-    capabilities.insert("latency_class".to_string(), 0.25);      // interactive (<100ms p99)
-    capabilities.insert("reliability_tier".to_string(), 0.50);   // high (99.9% target)
-
-    // LAYER 6: Workflow Context
-    capabilities.insert("pipeline_stage".to_string(), 0.40);     // process (central router)
-    capabilities.insert("execution_priority".to_string(), 0.75); // high (critical infrastructure)
-
-    // DERIVED axes: start at the schema's unknown code. The registration
-    // primitive keeps whatever the sampler last wrote, so this only applies to
-    // a first registration.
-    capabilities.insert("current_load".to_string(), 0.00);       // unknown
-    capabilities.insert("health_status".to_string(), 0.00);      // unknown
-    capabilities.insert("lifecycle_state".to_string(), 0.25);    // active — this registration
-
-    // LAYER 8: Classification
-    capabilities.insert("service_tier".to_string(), 0.90);       // orchestrator
-    capabilities.insert("implementation_language".to_string(), 0.15); // rust
-
-    // Define service metadata for gCore integration
-    let mut metadata: HashMap<String, String> = HashMap::new();
-    metadata.insert("type".to_string(), "gnode-daemon".to_string());
-    metadata.insert("tier".to_string(), "ORCHESTRATOR".to_string());
-    metadata.insert("tier_description".to_string(), "Central orchestrator daemon".to_string());
-    metadata.insert("version".to_string(), env!("CARGO_PKG_VERSION").to_string());
-    metadata.insert("startup_time".to_string(), crate::integration::processor::stream_utils::current_timestamp().to_string());
-    metadata.insert("topology_namespace".to_string(), topology_namespace.to_string());  // Use topology_namespace, not site_id
-    metadata.insert("node_id".to_string(), node_id.to_string());
-    metadata.insert("functions_loaded".to_string(), "170".to_string());
-    metadata.insert("api_version".to_string(), "1.0".to_string());
-    metadata.insert("stream_discovery".to_string(), "dynamic".to_string());  // Daemon discovers sites dynamically
-
-    // Format system integration metadata
-    metadata.insert("native_format".to_string(), "json_v1".to_string());
-    metadata.insert("accepts_formats".to_string(), "json_v1,msgpack_v1,resp3".to_string());
-    metadata.insert("output_format".to_string(), "json_v1".to_string());
-
-    // ========================================================================
-    // STATELESS ARCHITECTURE: Register daemon via FCALL to ValKey
-    // ========================================================================
-    use crate::geometric_precision::{FixedVector, FixedPoint};
-    use crate::GeometricTopology;
-
-    // Get a synchronous connection for startup registration
-    let mut conn = match crate::integration::connection_manager::get_connection() {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("Failed to get connection for daemon registration: {:?}", e);
-            return Ok(()); // Non-fatal, continue startup
-        }
-    };
-
-    // Build the service-tier Q64.64 capability vector.
-    // Dim count comes from the canonical service-tier schema (TOTAL_DIMENSIONS
-    // = 23 = 16 declared + 3 derived + 4 storage; see
-    // daemon/config/service_schema.yaml).
-    use crate::integration::handlers::TOTAL_DIMENSIONS;
-    let mut point = FixedVector::new(TOTAL_DIMENSIONS);
-    let dims = crate::integration::command_handler::get_service_dimensions();
-
-    for (cap_name, cap_value) in &capabilities {
-        if let Some(&dim_idx) = dims.get(cap_name) {
-            if dim_idx < TOTAL_DIMENSIONS {
-                let clamped = (*cap_value).clamp(0.0, 1.0);
-                point[dim_idx] = FixedPoint::from_f64(clamped);
-            }
-        }
-    }
-
-    // Compute the bucket key over the hashed prefix (HASHED_DIMENSIONS = 16 for
-    // the service tier) using Q64.64 arithmetic. The derived axes (16-18) and
-    // the storage axes (19-22) are excluded: a coordinate that moves must not
-    // decide voxel membership.
-    let hashed = crate::integration::command_handler::hashed_point_from_full(&point);
-    let bucket_key = GeometricTopology::point_to_bucket_key(&hashed, 10);
-
-    // Compute z_score (dimension 16: current_load) for ZADD ordering
-    let z_score = GeometricTopology::compute_service_z_score(&point);
-
-    // Build point_raw (Q64.64 i128 values) for storage
-    let point_raw: Vec<String> = (0..point.len())
-        .map(|i| point[i].raw().to_string())
-        .collect();
-
-    // Build point_display (3 decimal floats) for human readability
-    let point_display: Vec<f64> = (0..point.len())
-        .map(|i| (point[i].to_f64() * 1000.0).round() / 1000.0)
-        .collect();
-
-    // Build entity JSON with abbreviated fields
-    let entity_json = serde_json::json!({
-        "pr": point_raw,        // point_raw: Q64.64 i128 (authoritative)
-        "pd": point_display,    // point_display: 3 decimal floats
-        "c": capabilities,      // original capabilities for reference
-        "m": metadata           // service metadata
-    });
-
-    // Use topology_namespace as "site_id" for services topology
-    // (daemon is infrastructure, registers in namespace topology)
-    let topology_key = GeometricTopology::get_services_topology_key(topology_namespace);
-
-    if debug_mode {
-        debug!("Daemon registration: service_id={}, topology_key={}", service_id, topology_key);
-        debug!("Daemon bucket_key: {} ({} chars)", bucket_key, bucket_key.len());
-        debug!("Daemon z_score: {}", z_score);
-    }
-
-    // Ensure services topology exists for this namespace
-    let ensure_result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_ENSURE_TOPOLOGY")
-        .arg(1)
-        .arg(topology_namespace)
-        .arg(TOTAL_DIMENSIONS)
-        .query(&mut conn);
-
-    if let Err(e) = ensure_result {
-        warn!("Failed to ensure services topology for daemon: {:?}", e);
-        return Ok(()); // Non-fatal
-    }
-
-    // Register daemon as entity via FCALL
-    let entity_json_str = entity_json.to_string();
-    let register_result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_REGISTER_CAPABILITY_VECTOR")
-        .arg(1)
-        .arg(&topology_key)
-        .arg(&service_id)
-        .arg(&entity_json_str)
-        .arg(&bucket_key)
-        .arg(z_score)
-        .arg(GNodeDaemon::topology_snapshot_key())  // args[5]: maintain (B) snapshot
-        .arg(crate::integration::handlers::types::registration_order_index(
-            crate::integration::handlers::types::get_service_dimensions()))  // args[6]
-        .arg(crate::integration::handlers::types::POINT_FRAC_BITS)  // args[7]
-        .arg(TOTAL_DIMENSIONS)  // args[8]
-        .arg(crate::integration::handlers::types::sampler_axes_csv())  // args[9]
-        .query(&mut conn);
-
-    match register_result {
-        Ok(result_json) => {
-            // Parse response to check if update or new registration
-            if let Ok(result) = serde_json::from_str::<serde_json::Value>(&result_json) {
-                let is_update = result.get("upd").and_then(|v| v.as_bool()).unwrap_or(false);
-                if is_update {
-                    info!("Daemon {} re-registered in services topology (updated)", service_id);
-                } else {
-                    info!("Daemon {} registered in services topology (new)", service_id);
-                }
-            } else {
-                info!("Daemon {} registered in services topology", service_id);
-            }
-        },
-        Err(e) => {
-            warn!("Failed to register daemon in services topology: {:?}", e);
-            // Non-fatal, continue startup
-        }
-    }
-
-    Ok(())
-}
 
 impl GNodeDaemon {
     /// Run the daemon
@@ -840,59 +599,21 @@ impl GNodeDaemon {
             Err(e) => { warn!("Cannot reach ValKey to take the writer lease: {}", e); false }
         };
         if publisher {
-            match crate::tool_registration::find_schema_path(None) {
-                Some(service_path) => {
-                    // Every tier, not just the one this daemon matches against.
-                    // A client asking about the tool tier has nowhere to ask if
-                    // only service is published, and silently falls back — the
-                    // same failure, moved to a tier nobody watches.
-                    let paths = crate::tool_registration::find_all_tier_schemas(&service_path);
-                    let fdir = crate::integration::path_resolution::find_valkey_functions_directory(false);
-
-                    for path in &paths {
-                        match crate::tool_registration::load_schema(path) {
-                            Ok(schema) => {
-                                // The Lua constants describe the SERVICE space,
-                                // so they are checked against that tier only —
-                                // asserting them against the tool tier's 16
-                                // would report a disagreement that is not one.
-                                if schema.tier.as_deref() == Some("service") {
-                                    if let Err(e) = crate::tool_registration::assert_lua_dimension_constants(
-                                        &schema, std::path::Path::new(&fdir),
-                                    ) {
-                                        error!("SCHEMA/LUA DISAGREEMENT: {}", e);
-                                    }
-                                }
-                                if let Ok(mut conn) = self.client.get_connection() {
-                                    if let Err(e) = crate::tool_registration::publish_schema(
-                                        &mut conn, &self.topology_namespace, &schema, path,
-                                    ) {
-                                        warn!("Schema publish failed for {:?} — clients will fall back to their built-in default: {}", path, e);
-                                    }
-                                }
-                            },
-                            Err(e) => warn!("Could not load tier schema {:?} for publishing: {}", path, e),
+            // The one schema: per-shape slot maps on `{c}:gnode:constellation:schema:<shape>`
+            // (SPEC-ONE-TOPOLOGY §3), for every constellation this node serves.
+            match crate::topology_schema::TopologySchema::locate() {
+                Some(tpath) => match crate::topology_schema::TopologySchema::load(&tpath) {
+                    Ok(ts) => if let Ok(mut conn) = self.client.get_connection() {
+                        for c in crate::constellation::served() {
+                            match c.publish_schema(&mut conn, &ts) {
+                                Ok(()) => info!("Published topology schema {} for {} shapes at {}:schema:*", ts.version, ts.shape_keys().len(), c.key()),
+                                Err(e) => warn!("Topology schema publish for {} failed: {}", c.name, e),
+                            }
                         }
-                    }
-
-                    // The one-topology schema beside the tier files: per-shape slot maps
-                    // on `{ns}:gnode:constellation:schema:<shape>` (SPEC-ONE-TOPOLOGY §3).
-                    match crate::topology_schema::TopologySchema::locate().or_else(|| crate::topology_schema::TopologySchema::default_path(&service_path)) {
-                        Some(tpath) => match crate::topology_schema::TopologySchema::load(&tpath) {
-                            Ok(ts) => if let Ok(mut conn) = self.client.get_connection() {
-                                for c in crate::constellation::served() {
-                                    match c.publish_schema(&mut conn, &ts) {
-                                        Ok(()) => info!("Published topology schema {} for {} shapes at {}:schema:*", ts.version, ts.shape_keys().len(), c.key()),
-                                        Err(e) => warn!("Topology schema publish for {} failed: {}", c.name, e),
-                                    }
-                                }
-                            },
-                            Err(e) => error!("Topology schema {:?} does not compile: {}", tpath, e),
-                        },
-                        None => warn!("No topology_schema.yaml beside {:?}", service_path),
-                    }
+                    },
+                    Err(e) => error!("Topology schema {:?} does not compile: {}", tpath, e),
                 },
-                None => warn!("No tier schema found to publish; clients will use their built-in defaults"),
+                None => error!("No topology_schema.yaml found (GNODE_TOPOLOGY_SCHEMA); clients cannot read the per-shape maps"),
             }
         }
 
@@ -1272,27 +993,6 @@ impl GNodeDaemon {
                     &node_config,
                 );
 
-                // …and the same node as a constellation-tier ENTITY. The call
-                // above writes flat hashes, which is a plain registry sitting
-                // beside a geometric one — it is why --node-type could be
-                // parsed, logged, and never affect where work lands.
-                //
-                // Deliberately unconditional, not master-only: every node must
-                // describe ITSELF. A master registering on behalf of workers
-                // would be guessing at their hardware.
-                let node_type = self.node_type.to_string();
-                let facts = crate::constellation_registration::NodeFacts {
-                    node_id: &self.node_id,
-                    node_type: &node_type,
-                    is_master: self.is_master,
-                    config: &node_config,
-                };
-                if let Err(e) = crate::constellation_registration::register_node_geometrically(
-                    &mut conn, &self.topology_namespace, &facts,
-                ) {
-                    warn!("Constellation registration errored: {}", e);
-                }
-
                 flat
             });
 
@@ -1407,14 +1107,6 @@ impl GNodeDaemon {
             }
         } else {
             debug!("Health cleanup worker will be registered in WorkerRegistry (single-threaded mode)");
-        }
-
-        // Register gNode daemon as geo-node service after all systems are initialized
-        // Use topology_namespace for registration (daemon is infrastructure, not a site)
-        info!("Registering gNode daemon as geo-node service");
-        if let Err(e) = register_gnode_as_service(&self.topology_manager, &self.topology_namespace, &self.node_id, self.debug) {
-            error!("Failed to register gNode as service: {:?}", e);
-            // Continue startup but log the failure - non-critical for basic operation
         }
 
         // Initialize broadcast stream (global, not per-node)
@@ -1938,43 +1630,6 @@ impl GNodeDaemon {
                 .arg(crate::integration::heartbeat::HEARTBEAT_TTL_SECS).arg(&hb_val).query(&mut conn);
         }
 
-        // ========================================
-        // Initial Service Discovery Scan
-        // Register tool-tier services for all known sites
-        // ========================================
-        {
-            let sd_enabled = self.service_discovery.read()
-                .map(|sd| sd.is_enabled())
-                .unwrap_or(false);
-
-            if sd_enabled {
-                info!("Running initial service discovery scan...");
-                match crate::integration::connection_manager::get_connection() {
-                    Ok(mut conn) => {
-                        match self.service_discovery.write() {
-                            Ok(mut sd) => {
-                                match sd.discover_and_register(&mut conn) {
-                                    Ok(result) => {
-                                        if result.skipped {
-                                            info!("  ✓ Service discovery: config unchanged, skipped");
-                                        } else {
-                                            info!("  ✓ Service discovery: registered {} services for {} sites ({} errors)",
-                                                  result.registered, result.sites, result.errors);
-                                        }
-                                    }
-                                    Err(e) => warn!("  ⚠ Initial service discovery failed: {:?}", e),
-                                }
-                            }
-                            Err(e) => warn!("  ⚠ Failed to acquire service discovery lock: {}", e),
-                        }
-                    }
-                    Err(e) => warn!("  ⚠ Failed to get connection for service discovery: {:?}", e),
-                }
-            } else {
-                info!("Service discovery disabled, skipping initial scan");
-            }
-        }
-
         // Main loop: multi-threaded vs single-threaded
         if self.single_threaded {
             // ========================================
@@ -2009,7 +1664,6 @@ impl GNodeDaemon {
             // branch (GNODE_ONE_TOPOLOGY=on) until WP3e makes it the only path.
             if std::env::var("GNODE_ONE_TOPOLOGY").map(|v| v == "on").unwrap_or(false) {
                 match crate::topology_schema::TopologySchema::locate()
-                    .or_else(|| crate::tool_registration::find_schema_path(None).and_then(|sp| crate::topology_schema::TopologySchema::default_path(&sp)))
                     .map(|tp| crate::topology_schema::TopologySchema::load(&tp))
                 {
                     Some(Ok(schema)) => {
@@ -2042,25 +1696,6 @@ impl GNodeDaemon {
             );
             registry.register(discovery_worker);
             info!("  ✓ Registered discovery refresh worker");
-
-            // Register service discovery worker (if enabled)
-            {
-                let sd_enabled = self.service_discovery.read()
-                    .map(|sd| sd.is_enabled())
-                    .unwrap_or(false);
-                let sd_interval = self.service_discovery.read()
-                    .map(|sd| sd.scan_interval_secs())
-                    .unwrap_or(120);
-
-                if sd_enabled {
-                    let sd_worker = crate::worker::ServiceDiscoveryWorker::new(
-                        Arc::clone(&self.service_discovery),
-                        sd_interval,
-                    );
-                    registry.register(sd_worker);
-                    info!("  ✓ Registered service discovery worker (interval: {}s)", sd_interval);
-                }
-            }
 
             info!("Running single-threaded main loop with {} workers", registry.worker_count());
             info!("═══════════════════════════════════════════════════════════════");
@@ -2180,29 +1815,6 @@ impl GNodeDaemon {
 
                 // Periodic service discovery scan (if enabled and due)
                 {
-                    let needs_scan = self.service_discovery.read()
-                        .map(|sd| sd.is_enabled() && sd.needs_scan())
-                        .unwrap_or(false);
-
-                    if needs_scan {
-                        if let Ok(mut conn) = crate::integration::connection_manager::get_connection() {
-                            match self.service_discovery.write() {
-                                Ok(mut sd) => {
-                                    match sd.discover_and_register(&mut conn) {
-                                        Ok(result) => {
-                                            if !result.skipped && result.registered > 0 {
-                                                info!("Service discovery: registered {} services for {} sites",
-                                                      result.registered, result.sites);
-                                            }
-                                        }
-                                        Err(e) => warn!("Service discovery scan failed: {:?}", e),
-                                    }
-                                }
-                                Err(e) => warn!("Service discovery lock poisoned: {}", e),
-                            }
-
-                        }
-                    }
                 }
             }
         }

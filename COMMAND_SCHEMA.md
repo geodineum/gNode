@@ -2,8 +2,8 @@
 
 Definitive reference for all daemon commands and ValKey Lua functions.
 
-**Base daemon**: 44 commands, 24 Lua libraries (222 functions)
-**With CMS extension** (default companion; opt out with `GEODINEUM_SKIP_CMS=true`): 63 commands, 25 Lua libraries (232 functions)
+**Base daemon**: 39 commands, 23 Lua libraries (210 functions)
+**With CMS extension** (default companion; opt out with `GEODINEUM_SKIP_CMS=true`): 58 commands, 24 Lua libraries (220 functions)
 
 > Counting basis — *commands* = one canonical command per row in Part 1
 > (the uppercase / camelCase / short forms are aliases, not separate
@@ -133,7 +133,7 @@ to see exactly which lane each command takes.
 
 ### Current Ordered commands
 
-These 9 commands are the only ones in the base catalog that opt into
+These 7 commands are the only ones in the base catalog that opt into
 `Lane::Ordered`. Each declares a justification comment at its
 descriptor's call site.
 
@@ -141,8 +141,6 @@ descriptor's call site.
 |---|---|
 | `channel_open` | Creates a stream resource subsequent inter-service sends depend on. |
 | `channel_close` | Destructive cleanup — pending sends must observe closure. |
-| `relay_policy_set` | Routing-policy change — pending relay decisions must observe new policy. |
-| `relay_policy_remove` | Same rationale as `relay_policy_set`. |
 | `config_set` | Daemon-behaviour change — pending `config_get` reads must observe new value. |
 | `topology_edge_add` | An edge decision is a potential comparison over the stored indexes; a later edge in the batch must see it. |
 | `topology_edge_remove` | Destructive — pending reads must observe post-remove state. |
@@ -169,7 +167,7 @@ Commands are sent via XADD to the unified stream. Most accept both lowercase and
 
 ---
 
-### System (11 commands)
+### System (10 commands)
 
 Source: `daemon/src/integration/handlers/system.rs`
 
@@ -182,7 +180,6 @@ Source: `daemon/src/integration/handlers/system.rs`
 | `echo` | `ECHO` | `{message: string}` | Echoed message | Echo back parameters |
 | `get_node_info` | `GET_NODE_INFO`, `node_info` | `{}` | `{node_id, node_type, environment, namespace, ...}` | Current node configuration |
 | `get_site_info` | `GET_SITE_INFO`, `site_info` | `{site_id: string}` | `{site_id, streams, environment, ...}` | Site registration info |
-| `load_update` | `LOAD_UPDATE` | `{service_id: string, load: float, cpu?: float, mem?: float, rq?: int, lat?: int, err?: float}` | `{ok: true}` | Update service load metrics |
 | `describe` | — | `{}` | Array of `{name, category, description, params_schema, returns_schema, example}` | List all available commands with schemas |
 | `extension_list` | `EXTENSION_LIST` | `{}` | Array of `{name, version, commands, lua_libraries}` | List loaded extensions |
 | `extension_info` | `EXTENSION_INFO` | `{name: string}` | `{name, version, path, commands, functions}` | Extension details |
@@ -191,12 +188,12 @@ Source: `daemon/src/integration/handlers/system.rs`
 
 ### Geometric (2 commands)
 
-Source: `daemon/src/integration/handlers/geometric.rs`
+Source: `daemon/src/integration/handlers/geometric.rs`. One query on the one topology (`GNODE_TOPO_QUERY`): the entities of a layer whose colours hold every named facet and whose ordered axes fall in every named range; axes the query does not name do not count. Records carry their colour.
 
 | Command | Aliases | Parameters | Returns | Description |
 |---------|---------|------------|---------|-------------|
-| `geometric_discover` | `discover`, `DISCOVER`, `geo_disc` | `{capabilities: {axis: value}, limit?: int = 10, threshold?: float = 0}` — discovery axes only, values in [0, 1] | `{total_matches, results: [{service_id, distance}], topology_key, lookup}` | Ranks the site's services by Q64.64 distance over the named axes only; unnamed axes do not count. Nearest first, equal distances by `service_id`; `threshold` > 0 drops farther services. `lookup` is `voxel` only when every discovery axis is named and the query's own cell is occupied — the cell's members, not a global nearest set — otherwise `scan`. Unknown, storage-only or out-of-range axes are errors |
-| `geometric_discover_range` | `GEOMETRIC_DISCOVER_RANGE` | `{requirements: {"<axis index>": {eq\|neq\|gt\|gte\|lt\|lte: float}}}` | `{services: [service_id], count}` | Services whose stored point satisfies every operator on every named axis; ids sorted. Non-index keys and unknown operators are errors |
+| `geometric_discover` | `discover`, `DISCOVER`, `geo_disc` | `{layer?: string = "3", facets?: {axis: word \| [words]}, axes?: {axis: [lo, hi]}, limit?: int = 10}` — `layer` is a shape word (site, app, daemon, component, node) or a layer key; words are the shape's vocabulary, ranges words of an ordered axis or fractions in [0, 1] | `{total_matches, results: [{service_id, shape, environment, colour, metadata}], layer, topology_key, lookup: "index"}` | Sorted by the daemon; unknown axes and words are errors |
+| `geometric_discover_range` | `GEOMETRIC_DISCOVER_RANGE` | the same | the same | The same query, kept as a name |
 
 ---
 
@@ -211,7 +208,6 @@ Source: `daemon/src/integration/handlers/one_topology.rs`. The dependency edges 
 | `topology_edge_list` | — | `{id: string, direction?: "outgoing"\|"incoming" = "outgoing"}` | `{id, direction, edges: [id]}` | What an entity depends on, or what depends on it; sorted |
 | `topology_edge_validate` | — | `{from: string, to: string}` | `{valid, from, to, phi_from: [layer, fundamentality], phi_to, reason}` | Dry run of `topology_edge_add` |
 
-Under `GNODE_ONE_TOPOLOGY=on`, `register_service` takes `{id, shape, environment, axes: {name: word \| [words] \| fraction}, metadata?, on?, capacity_weight?, heartbeat?, holds?, requires?, peers?, constellation?}` and `geometric_discover` / `geometric_discover_range` take `{layer?, facets?: {name: word \| [words]}, axes?: {name: [lo, hi]}, limit?}` and return records with their colour; the numeric `capabilities` and index `requirements` forms are refused by name. These become the only forms when the switch becomes the default (WP3e Phase B).
 
 ### Service (3 commands)
 
@@ -219,9 +215,9 @@ Source: `daemon/src/integration/handlers/service.rs`
 
 | Command | Aliases | Parameters | Returns | Description |
 |---------|---------|------------|---------|-------------|
-| `register_service` | `registerService`, `REGISTER_SERVICE` | `{id: string, capabilities: {axis: value}, metadata?: {host, port, ...}}` | `{status, service_id, registered: true, topology_key, bucket_key, z_score}` | Register a service with capability vector; axes left out are stored as 0 |
-| `deregister_service` | `deregisterService`, `DEREGISTER_SERVICE` | `{service_id: string}` (alias `id`) | `{status: "deregistered"\|"not_found", service_id}` | Remove a service registration |
-| `discover_with_endpoints` | `DISCOVER_WITH_ENDPOINTS`, `service_endpoints` | `{capabilities?: [string], endpoint_registry?: string, limit?: int = 10}` | `{count, services: [{service_id, endpoints}], endpoints_error?}` | Services holding every named capability with a value > 0, ids sorted before `limit` (0 = unlimited), each with its endpoints from `GNODE_ENDPOINT_LIST` (gNode-BROKER); `endpoints_error` gives the reason when endpoints could not be listed |
+| `register_service` | `registerService`, `REGISTER_SERVICE` | `{id: string, shape?: string = "app", environment?: string = "production", axes?: {axis: word \| [words] \| fraction}, metadata?: object, on?: string, capacity_weight?: int = 1, heartbeat?: string, holds?: [string], requires?: [string], peers?: [string], constellation?: string}` | `{status, service_id, shape, topology_key, placement?, updated}` | Declare an entity by name on the one topology (SPEC-ONE-TOPOLOGY §4): the daemon codes the words and refuses one it does not know; a number for an axis word is refused; `on` makes a 4.2 placement with `capacity_weight` (0 = standby); `holds`/`requires`/`peers` are the REACH labels |
+| `deregister_service` | `deregisterService`, `DEREGISTER_SERVICE` | `{service_id: string}` (alias `id`) | `{status: "deregistered"\|"not_found", service_id}` | Remove an entity with its indexes, edges and placements |
+| `discover_with_endpoints` | `DISCOVER_WITH_ENDPOINTS`, `service_endpoints` | `{layer?, facets?, axes?, endpoint_registry?: string, limit?: int = 10}` | `{count, services: [{service_id, endpoints}], endpoints_error?}` | The query of `geometric_discover`, each id enriched with its endpoints from `GNODE_ENDPOINT_LIST` (gNode-BROKER); `endpoints_error` gives the reason when endpoints could not be listed |
 
 ---
 
@@ -271,19 +267,6 @@ Source: `daemon/src/integration/handlers/direct_channel.rs`
 | `channel_close` | `direct_close` | `{channel_id: string}` | `{ok, deleted_keys}` | Close and clean up a channel |
 | `channel_info` | `direct_info` | `{channel_id: string}` | `{channel_id, source, target, mode, stream_info}` | Get channel metadata |
 | `channel_list` | `direct_list` | `{site_filter?: string, env_filter?: string}` | Array of channel metadata | List direct channels |
-
----
-
-### Relay (4 commands)
-
-Source: `daemon/src/integration/handlers/relay_ops.rs`
-
-| Command | Aliases | Parameters | Returns | Description |
-|---------|---------|------------|---------|-------------|
-| `topology_heatmap` | `TOPOLOGY_HEATMAP`, `relay_stats` | `{}` | `{nodes, edges, heatmap}` | Topology heatmap with relay statistics |
-| `relay_policy_set` | — | `{source: string, target: string, policy: object}` | `{ok: true}` | Set a relay routing policy |
-| `relay_policy_list` | — | `{}` | Array of relay policies | List all relay policies |
-| `relay_policy_remove` | — | `{source: string, target: string}` | `{ok: true}` | Remove a relay policy |
 
 ---
 
@@ -360,41 +343,24 @@ All functions use `FCALL <function_name> <numkeys> [keys...] [args...]`. The `se
 
 ---
 
-### gnode_geometric — 1 function
+### gnode_topo — 28 functions
 
-| Function | Keys | Args | Returns | Description |
-|----------|------|------|---------|-------------|
-| `GNODE_GEOMETRIC_GET_DIMENSIONS` | — | topology_ns? (default `geodineum`), tier? (default `service`) | JSON array of dimension names in index order | Reads `dimension_index` from the schema the daemon published at `{ns}:gnode:schema:<tier>`; errors when none is published. Custom topologies carry their own dimension map |
-
----
-
-### gnode_topo — 37 functions
-
-Stateless topology persistence. Daemon computes Q64.64 bucket keys and z_scores; Lua stores entities/edges/indexes.
+The one topology of a constellation (`{c}:gnode:constellation`, SPEC-ONE-TOPOLOGY §1–§5): one record shape for every layer, indexes and facet sets maintained by the library, placements with rings, in-flight sets, REACH labels and the deny list, derived writes under the writer lease. `GNODE_TOPO_CREATE/LIST/DELETE/STATS/EXISTS` and the entity/edge getters also serve the Pro named topologies `{c}:gnode:topo:<name>` (D16).
 
 | Function | Keys | Args | Returns | Description |
 |----------|------|------|---------|-------------|
 | `GNODE_TOPO_CREATE` | site_id | topology_key, definition_json | JSON topology metadata | Create a named topology |
-| `GNODE_ENSURE_TOPOLOGY` | site_id | width? | `{ok, tk, cr, dm_was?}` | Ensure the site's service topology exists. `width` (the tier schema's total dimensions, default = the service tier's) is stamped as meta `dm` on create, and replaces a different `dm` on an existing topology (`dm_was` reports the old value) |
-| `GNODE_REGISTER_CAPABILITY_VECTOR` | topology_key | entity_id, entity_json, bucket_key, z_score, snapshot_key?, ro_index?, frac_bits?, width?, sampler_axes? | `{ok, eid, upd, kept}` | Register/update entity (idempotent). With `width`, a point whose `pd` or `pr` has another length is refused before anything is written. Maintains the (B) snapshot when `snapshot_key` is given. Allocates the registration order atomically into `m.ro` and, when `ro_index` ≥ 0, mirrors it into `pd`/`pr` at that schema index in the point's Q-format (`frac_bits`, default 64); an update keeps a stored order and assigns one to an entity stored without. `sampler_axes` (CSV of 0-based indices, from the schema's `writer: sampler`) are NOT taken from the caller on an update: their stored coordinates, the `m.ds` stamp and the `zs` computed from them are preserved, and `kept` counts them — without it every re-registration resets the measurement to the schema's unknown code |
-| `GNODE_TOPO_SET_DERIVED` | topology_key | entity_id, updates_json, z_score?, snapshot_key?, ts?, hashed_width? | `{ok, eid, n, ds, zs}` | Write measured coordinates into a stored entity without moving it: `bk` and voxel membership are untouched, `m.ds` records the measurement time, and the `z_order` set is updated when `z_score` is given. `updates_json` is `{"<index>": {"pd": <float>, "pr": "<raw>"}}` — both scales come from the daemon, Lua has no Q64.64. An index below `hashed_width` is refused: those coordinates are the bucket key |
-| `GNODE_DEREGISTER_CAPABILITY_VECTOR` | topology_key | entity_id | `{ok, eid}` | Remove entity and its edges |
+| `GNODE_TOPO_SET_DERIVED` | tk [, lease_key] | entity_id, updates_json `{"<slot>": {"pd": float, "pr": "<raw>"}}`, "", "", ts?, "", node_id | `{ok}` | Zone-B (derived) write under the writer lease; indexes and the ring follow (the arguments kept for position: z_score, snapshot_key, hashed_width? | `{ok, eid, n, ds, zs}` | Write measured coordinates into a stored entity without moving it: `bk` and voxel membership are untouched, `m.ds` records the measurement time, and the `z_order` set is updated when `z_score` is given. `updates_json` is `{"<index>": {"pd": <float>, "pr": "<raw>"}}` — both scales come from the daemon, Lua has no Q64.64. An index below `hashed_width` is refused: those coordinates are the bucket key |
 | `GNODE_TOPO_ADD_EDGE` | topology_key | from_id, to_id, edge_json | `{ok, f, t}` | Add directed edge |
 | `GNODE_TOPO_REMOVE_EDGE` | topology_key | from_id, to_id | `{ok}` | Remove directed edge |
-| `GNODE_TOPO_QUERY_VOXEL` | topology_key | bucket_key, include_data | `{eids}` or `{ents}` | O(1) voxel bucket lookup |
-| `GNODE_TOPO_QUERY_Z_RANGE` | topology_key | min_score, max_score (Z scores or `-inf`/`+inf`), include_data, limit | `{zr, cnt, eids}`, plus `ents` with include_data | Entities within Z-score range |
-| `GNODE_TOPO_Z_ORDER` | topology_key | limit, offset, descending | `{eids, cnt}` | Entities sorted by Z (topological order) |
 | `GNODE_TOPO_GET_ENTITIES` | topology_key | entity_ids_json or `"*"`, include_edges? | `{req, fnd, mis?, ents}` | Entities by ID array, or every entity of the topology with `"*"` |
 | `GNODE_TOPO_GET_ENTITY` | topology_key | entity_id | `{id, x, y, z, bk, zs, ra, m}` | Get single entity |
 | `GNODE_TOPO_GET_EDGE` | topology_key | from_id, to_id | `{f, t, zd, m}` | Get specific edge |
 | `GNODE_TOPO_GET_EDGES` | topology_key | entity_id, direction | `{out, in}` | Get all edges for entity |
-| `GNODE_TOPO_CHAIN` | topology_key | start_id, direction, max_depth | `{ch, bd, md}` | Traverse from starting entity |
 | `GNODE_TOPO_STATS` | topology_key | — | `{entity_count, edge_count, ...}` | Topology statistics |
 | `GNODE_TOPO_LIST` | site_id | filter_type? | JSON array of topology metadata | List site topologies |
 | `GNODE_TOPO_DELETE` | site_id | topology_key, "CONFIRM" | `{ok, deleted_keys}` | Delete topology (safety flag required) |
 | `GNODE_TOPO_EXISTS` | topology_key | — | `{exists: bool}` | Check topology existence |
-| `GNODE_TOPO_UPDATE_META` | site_id | topology_key, updates_json | `{ok}` | Update topology metadata |
-| `GNODE_TOPO_FIND_ENTITY_SITE` | — | entity_id, site_ids_json | `{site_id, topology_key}` or null | Find which site contains an entity |
 
 ---
 | `GNODE_ENSURE_CONSTELLATION` | tk | — | `{ok, tk, created}` | The one key of a constellation (`{c}:gnode:constellation`), created once with meta `sv=5` |
@@ -414,15 +380,13 @@ Stateless topology persistence. Daemon computes Q64.64 bucket keys and z_scores;
 | `GNODE_TOPO_HEALTH_DERIVE` | tk [, lease_key] | now_s, fresh_s [, node_id] | `[fresh, placements, entities]` | Placement health from the heartbeat key it names (dead when missing or stale, unknown when none can be named); entity health = max over placements; ring membership follows |
 | `GNODE_TOPO_VERIFY` | tk | — | `OK` or the first violation | Invariants: counts, index ↔ record agreement, placement references, φ on every edge, ring membership. `no-writes` |
 
-### gnode_topology — 3 functions
+### gnode_topology — 1 function
 
-Dimension-schema introspection and batch load updates for the active tier schema (default service tier = 23D: 16 hashed, 19 discovery, 23 total). The dimension count is whatever the loaded schema declares. Semantic discovery, replacement finding, and custom-topology queries are **native daemon commands** (see `discover`, `custom_topology_discover` in Part 1), not Lua functions.
+The per-shape schema the daemon published at start (`{c}:gnode:constellation:schema:<shape>`), read back by clients.
 
 | Function | Keys | Args | Returns | Description |
 |----------|------|------|---------|-------------|
-| `GNODE_TOPOLOGY_GET_SCHEMA` | — | — | `{total_dimensions, dimensions, values, query_types}` | Returns semantic dimension schema (active tier; service tier = 30) |
-| `GNODE_TOPOLOGY_GET_FULL_SCHEMA` | — | — | JSON full schema with valid values per dimension | Full dimension schema for developers |
-| `GNODE_SCHEMA_GET` | — | topology_ns, tier? (default `service`) | Schema hash for the tier, including `dimension_index` (name→index map) | Canonical capability-schema lookup: reads back the schema the daemon published at startup, so a caller matches against the same dimension count and indices the daemon uses. Errors (naming the key) when nothing is published yet. `no-writes` |
+| `GNODE_SCHEMA_GET` | — | topology_ns, shape key (`1`, `2`, `3.1`, `3.2`, `3.3`, `4.1`, `4.2`; default `3.3`) | the shape's published hash: `schema_version, shape, name, width, layer_code, layer_hi, slots, dimension_index, dimension_values, fundamentality_default` | Read-only; an absent shape is an error that names the key it looked for |
 
 ---
 

@@ -2,7 +2,7 @@
 //
 // Handles: service_describe
 // Provides detailed information about a registered service entity including
-// capabilities, metadata, tier classification, edges, and health status.
+// colour words, metadata, shape, derived slots, edges.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,8 +17,7 @@ use crate::daemon::Command;
 use crate::GeometricTopology;
 
 use super::types::{
-    CommandResult, CommandHandlerFn, AsyncCommandHandlerFn, CommandDescriptor,
-    TOTAL_DIMENSIONS, Lane,
+    CommandResult, CommandHandlerFn, AsyncCommandHandlerFn, CommandDescriptor, Lane,
 };
 
 /// Register all introspection command handlers
@@ -59,7 +58,7 @@ pub fn register(
     descriptors.push(CommandDescriptor {
         name: "service_describe",
         category: "service",
-        description: "Get detailed description of a registered service entity including capabilities, tier, edges, and health",
+        description: "The stored record of an entity on the one topology: shape, environment, colour words, metadata, derived load / health / lifecycle, point and edges",
         params_schema: json!({
             "type": "object",
             "properties": {
@@ -72,7 +71,10 @@ pub fn register(
             "type": "object",
             "properties": {
                 "id": {"type": "string"},
-                "tier": {"type": "string", "enum": ["TOOL", "SERVICE", "PIPELINE", "INFRASTRUCTURE", "ORCHESTRATOR", "UNKNOWN"]},
+                "shape": {"type": "string", "description": "1 | 2 | 3.1 | 3.2 | 3.3 | 4.1 | 4.2"},
+                "shape_name": {"type": "string"},
+                "environment": {"type": "string"},
+                "derived": {"type": "object", "properties": {"load": {"type": "number"}, "health": {"type": "string"}, "lifecycle": {"type": "string"}}},
                 "registered_at": {"type": "number"},
                 "capabilities": {"type": "object"},
                 "metadata": {"type": "object"},
@@ -88,140 +90,63 @@ pub fn register(
 }
 
 // =========================================================================
-// Tier classification
+// The record → a description
 // =========================================================================
 
-/// Map service_tier dimension value to tier name.
-/// Tier values: TOOL=0.10, SERVICE=0.30, PIPELINE=0.50, INFRASTRUCTURE=0.70, ORCHESTRATOR=0.90
-fn classify_tier(service_tier_value: f64) -> &'static str {
-    if service_tier_value <= 0.15 {
-        "TOOL"
-    } else if service_tier_value <= 0.40 {
-        "SERVICE"
-    } else if service_tier_value <= 0.60 {
-        "PIPELINE"
-    } else if service_tier_value <= 0.80 {
-        "INFRASTRUCTURE"
-    } else if service_tier_value <= 1.0 {
-        "ORCHESTRATOR"
-    } else {
-        "UNKNOWN"
+const HEALTH_WORDS: [(f64, &str); 4] = [(0.0, "unknown"), (0.25, "dead"), (0.5, "degraded"), (1.0, "healthy")];
+const LIFECYCLE_WORDS: [(f64, &str); 5] = [(0.0, "registering"), (0.25, "active"), (0.5, "draining"), (0.75, "stopped"), (1.0, "failed")];
+const SHAPE_NAMES: [(&str, &str); 7] = [("1", "node"), ("2", "component"), ("3.1", "site"), ("3.2", "app"), ("3.3", "daemon"), ("4.1", "component@node"), ("4.2", "service@node")];
+
+fn word_of(table: &[(f64, &str)], v: Option<f64>) -> Value {
+    match v {
+        Some(x) => table.iter().find(|(c, _)| (c - x).abs() < 1e-9).map(|(_, w)| json!(w)).unwrap_or(json!(x)),
+        None => Value::Null,
     }
 }
 
-/// Build a reverse mapping from dimension index to canonical capability name.
-/// Derived from the one axis list: this used to be a hand-written 23-D table, so
-/// service_describe labelled dims 17-22 with the names of other axes and left
-/// everything above 22 unnamed.
-fn build_index_to_name() -> HashMap<usize, String> {
-    super::types::SERVICE_AXES
-        .iter()
-        .enumerate()
-        .map(|(index, name)| (index, name.to_string()))
-        .collect()
-}
-
-/// Enrich entity JSON from GNODE_TOPO_GET_ENTITY into a service_describe response.
-fn build_describe_response(entity_id: &str, entity: &Value, _site_id: &str) -> Value {
-    let index_to_name = build_index_to_name();
-
-    // Extract point_display (pd) — array of f64 display values
+/// The stored record of the one topology (`sh`, `env`, `c`, `m`, `pd`, `pr`, `q`, placement
+/// facts) → the `service_describe` answer: shape and its name, environment, colour, metadata,
+/// derived load / health / lifecycle, the point, the edges.
+fn build_describe_response(entity_id: &str, entity: &Value, edges_out: Value, edges_in: Value) -> Value {
+    let sh = entity.get("sh").and_then(|v| v.as_str()).unwrap_or("");
     let pd = entity.get("pd").and_then(|v| v.as_array());
-
-    // Build human-readable capabilities from pd
-    let mut capabilities = json!({});
-    if let Some(pd_arr) = pd {
-        if let Some(cap_obj) = capabilities.as_object_mut() {
-            for (idx, val) in pd_arr.iter().enumerate() {
-                if idx >= TOTAL_DIMENSIONS { break; }
-                if let Some(f) = val.as_f64() {
-                    if f != 0.0 {
-                        if let Some(name) = index_to_name.get(&idx) {
-                            cap_obj.insert(name.clone(), json!(f));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    // Determine tier from dimension 17 (service_tier)
-    let service_tier_val = pd.and_then(|arr| arr.get(17))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    let tier = classify_tier(service_tier_val);
-
-    // Extract registered_at (ra)
-    let registered_at = entity.get("ra").and_then(|v| v.as_i64()).unwrap_or(0);
-
-    // Extract metadata (m)
-    let metadata = entity.get("m").cloned().unwrap_or(json!({}));
-
-    // Extract original capabilities if present (c)
-    let original_caps = entity.get("c");
-    // If original caps exist, prefer them for the response
-    let final_capabilities = if let Some(c) = original_caps {
-        c.clone()
-    } else {
-        capabilities
-    };
-
-    // Coordinates
-    let bucket_key = entity.get("bk").and_then(|v| v.as_str()).unwrap_or("");
-    let z_score = entity.get("zs");
-    let point_display = entity.get("pd").cloned().unwrap_or(json!([]));
-    let point_raw = entity.get("pr").cloned().unwrap_or(json!([]));
-
-    // Edges
-    let outgoing = entity.get("out").cloned().unwrap_or(json!([]));
-    let incoming = entity.get("in").cloned().unwrap_or(json!([]));
-
-    // Health: check LoadMetricsManager
-    let health = if tier != "TOOL" {
-        if let Some(load_manager) = crate::daemon::GNodeDaemon::get_load_metrics_manager_ref() {
-            if let Some(metrics) = load_manager.get(entity_id) {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as i64;
-                let status = if metrics.is_stale(now_ms) { "stale" } else { "active" };
-                json!({
-                    "status": status,
-                    "load": metrics.load_factor,
-                    "last_update": metrics.last_update,
-                    "cpu": metrics.cpu_usage,
-                    "memory": metrics.memory_usage,
-                    "error_rate": metrics.error_rate
-                })
-            } else {
-                json!({"status": "unknown"})
-            }
-        } else {
-            json!({"status": "unknown"})
-        }
-    } else {
-        // TOOLs don't have health metrics — they run at deploy-time only
-        json!({"status": "n/a", "reason": "tool-tier entities have no runtime health"})
-    };
-
-    json!({
+    let slot = |i: usize| pd.and_then(|a| a.get(i)).and_then(|v| v.as_f64());
+    let shape_name = SHAPE_NAMES.iter().find(|(k, _)| *k == sh).map(|(_, n)| *n).unwrap_or(sh);
+    let mut out = json!({
         "id": entity_id,
-        "tier": tier,
-        "registered_at": registered_at,
-        "capabilities": final_capabilities,
-        "metadata": metadata,
+        "shape": sh,
+        "shape_name": shape_name,
+        "environment": entity.get("env").cloned().unwrap_or(Value::Null),
+        "registered_at": entity.get("ra").cloned().unwrap_or(Value::Null),
+        "registered_order": entity.get("ro").cloned().unwrap_or(Value::Null),
+        "capabilities": entity.get("c").cloned().unwrap_or(json!({})),
+        "ordered": entity.get("q").cloned().unwrap_or(json!({})),
+        "metadata": entity.get("m").cloned().unwrap_or(json!({})),
         "coordinates": {
-            "display": point_display,
-            "raw": point_raw,
-            "bucket_key": bucket_key,
-            "z_score": z_score
+            "display": entity.get("pd").cloned().unwrap_or(json!([])),
+            "raw": entity.get("pr").cloned().unwrap_or(json!([]))
         },
-        "edges": {
-            "outgoing": outgoing,
-            "incoming": incoming
+        "derived": {
+            "load": slot(16),
+            "health": word_of(&HEALTH_WORDS, slot(17)),
+            "lifecycle": word_of(&LIFECYCLE_WORDS, slot(18))
         },
-        "health": health
-    })
+        "edges": { "outgoing": edges_out, "incoming": edges_in }
+    });
+    for (k, name) in [("of", "of"), ("on", "on"), ("w", "capacity_weight"), ("hb", "heartbeat"), ("hbe", "heartbeat_env")] {
+        if let Some(v) = entity.get(k) { out[name] = v.clone(); }
+    }
+    out
+}
+
+fn describe_from(entity_id: &str, raw: Option<String>, out: Vec<String>, inc: Vec<String>, tk: &str) -> CommandResult {
+    match raw {
+        None => CommandResult::error(format!("Entity '{}' not found in {}", entity_id, tk)),
+        Some(json_str) => match serde_json::from_str::<Value>(&json_str) {
+            Ok(entity) => CommandResult::success(build_describe_response(entity_id, &entity, json!(out), json!(inc))),
+            Err(e) => CommandResult::error(format!("Failed to parse entity data: {}", e)),
+        },
+    }
 }
 
 // =========================================================================
@@ -232,13 +157,12 @@ pub fn handle_service_describe(
     command: &Command,
     conn: &mut Connection,
     _topology: &Arc<RwLock<GeometricTopology>>,
-    site_id: &str,
+    _site_id: &str,
     debug_mode: bool,
 ) -> CommandResult {
     if debug_mode {
         debug!("Handling service_describe command: {}", command.id);
     }
-
     let entity_id = match command.parameters.get("entity_id")
         .or_else(|| command.parameters.get("id"))
         .or_else(|| command.parameters.get("service_id"))
@@ -247,43 +171,12 @@ pub fn handle_service_describe(
         Some(id) if !id.is_empty() => id.to_string(),
         _ => return CommandResult::error("Missing or empty entity_id parameter"),
     };
-
-    let topology_key = match command.parameters.get("topology_key").and_then(|v| v.as_str()) {
-        Some(k) if !k.is_empty() => k.to_string(),
-        _ => GeometricTopology::get_services_topology_key(site_id),
-    };
-
-    if debug_mode {
-        debug!("service_describe: entity={}, topology={}", entity_id, topology_key);
-    }
-
-    // FCALL GNODE_TOPO_GET_ENTITY to get entity with edges
-    let result: redis::RedisResult<String> = redis::cmd("FCALL")
-        .arg("GNODE_TOPO_GET_ENTITY")
-        .arg(1)
-        .arg(&topology_key)
-        .arg(&entity_id)
-        .query(conn);
-
-    match result {
-        Ok(json_str) => {
-            match serde_json::from_str::<Value>(&json_str) {
-                Ok(entity) => {
-                    let response = build_describe_response(&entity_id, &entity, site_id);
-                    CommandResult::success(response)
-                },
-                Err(e) => CommandResult::error(format!("Failed to parse entity data: {}", e)),
-            }
-        },
-        Err(e) => {
-            let err_str = format!("{}", e);
-            if err_str.contains("Entity not found") {
-                CommandResult::error(format!("Entity '{}' not found in topology '{}'", entity_id, topology_key))
-            } else {
-                CommandResult::error(format!("service_describe failed: {}", e))
-            }
-        }
-    }
+    let c = crate::constellation::for_entity(conn, &entity_id);
+    let tk = c.key();
+    let raw: Option<String> = redis::cmd("HGET").arg(format!("{}:entities", tk)).arg(&entity_id).query(conn).unwrap_or(None);
+    let out: Vec<String> = redis::cmd("SMEMBERS").arg(format!("{}:out:{}", tk, entity_id)).query(conn).unwrap_or_default();
+    let inc: Vec<String> = redis::cmd("SMEMBERS").arg(format!("{}:in:{}", tk, entity_id)).query(conn).unwrap_or_default();
+    describe_from(&entity_id, raw, out, inc, &tk)
 }
 
 // =========================================================================
@@ -294,14 +187,13 @@ pub fn handle_service_describe_async<'a>(
     command: &'a Command,
     conn: &'a mut AsyncConnection,
     _topology: &'a Arc<RwLock<GeometricTopology>>,
-    site_id: &'a str,
+    _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
         if debug_mode {
-            debug!("[STATELESS] Handling async service_describe command: {}", command.id);
+            debug!("Handling async service_describe command: {}", command.id);
         }
-
         let entity_id = match command.parameters.get("entity_id")
             .or_else(|| command.parameters.get("id"))
             .or_else(|| command.parameters.get("service_id"))
@@ -310,44 +202,12 @@ pub fn handle_service_describe_async<'a>(
             Some(id) if !id.is_empty() => id.to_string(),
             _ => return CommandResult::error("Missing or empty entity_id parameter"),
         };
-
-        let topology_key = match command.parameters.get("topology_key").and_then(|v| v.as_str()) {
-            Some(k) if !k.is_empty() => k.to_string(),
-            _ => GeometricTopology::get_services_topology_key(site_id),
-        };
-
-        if debug_mode {
-            debug!("service_describe: entity={}, topology={}", entity_id, topology_key);
-        }
-
-        // FCALL GNODE_TOPO_GET_ENTITY to get entity with edges
-        let result: redis::RedisResult<String> = redis::cmd("FCALL")
-            .arg("GNODE_TOPO_GET_ENTITY")
-            .arg(1)
-            .arg(&topology_key)
-            .arg(&entity_id)
-            .query_async(conn)
-            .await;
-
-        match result {
-            Ok(json_str) => {
-                match serde_json::from_str::<Value>(&json_str) {
-                    Ok(entity) => {
-                        let response = build_describe_response(&entity_id, &entity, site_id);
-                        CommandResult::success(response)
-                    },
-                    Err(e) => CommandResult::error(format!("Failed to parse entity data: {}", e)),
-                }
-            },
-            Err(e) => {
-                let err_str = format!("{}", e);
-                if err_str.contains("Entity not found") {
-                    CommandResult::error(format!("Entity '{}' not found in topology '{}'", entity_id, topology_key))
-                } else {
-                    CommandResult::error(format!("service_describe failed: {}", e))
-                }
-            }
-        }
+        let c = crate::constellation::for_entity_async(conn, &entity_id).await;
+        let tk = c.key();
+        let raw: Option<String> = redis::cmd("HGET").arg(format!("{}:entities", tk)).arg(&entity_id).query_async(conn).await.unwrap_or(None);
+        let out: Vec<String> = redis::cmd("SMEMBERS").arg(format!("{}:out:{}", tk, entity_id)).query_async(conn).await.unwrap_or_default();
+        let inc: Vec<String> = redis::cmd("SMEMBERS").arg(format!("{}:in:{}", tk, entity_id)).query_async(conn).await.unwrap_or_default();
+        describe_from(&entity_id, raw, out, inc, &tk)
     })
 }
 

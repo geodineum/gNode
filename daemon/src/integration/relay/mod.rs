@@ -7,14 +7,22 @@
 
 pub mod router;
 pub mod translator;
-pub mod policy;
 pub mod telemetry;
 pub mod reply;
 pub mod roundtrip;
 
-pub use router::{RelayDecision, resolve_relay_target, resolve_one_topology};
+pub use router::{RelayDecision, resolve_one_topology};
 pub use translator::{TranslationResult, translate_for_relay, detect_format, convert_format};
-pub use policy::{PolicyDecision, check_relay_policy};
+/// The relay's permission verdict: REACH + the deny list (D8), decided once per relayed command.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PolicyDecision {
+    Allow,
+    Deny(String),
+}
+
+impl PolicyDecision {
+    pub fn is_allowed(&self) -> bool { matches!(self, PolicyDecision::Allow) }
+}
 pub use telemetry::{RelayMetrics, RelayTelemetry, get_relay_stats};
 pub use reply::{deliver_service_reply, is_relayed_service_reply, carry_correlation_id};
 

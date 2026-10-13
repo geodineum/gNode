@@ -1,6 +1,6 @@
 // System Command Handlers
 //
-// Handles: ping, health, version, echo, status, load_update, node_info, site_info
+// Handles: ping, health, version, echo, status, node_info, site_info
 // These are the core operational commands for daemon health and introspection.
 
 use std::collections::HashMap;
@@ -43,7 +43,6 @@ pub fn register(
     handlers.insert("GET_NODE_INFO".to_string(), handle_node_info as CommandHandlerFn);
     handlers.insert("get_site_info".to_string(), handle_site_info as CommandHandlerFn);
     handlers.insert("GET_SITE_INFO".to_string(), handle_site_info as CommandHandlerFn);
-    handlers.insert("load_update".to_string(), handle_load_update as CommandHandlerFn);
     handlers.insert("describe".to_string(), handle_describe as CommandHandlerFn);
     handlers.insert("extension_list".to_string(), handle_extension_list as CommandHandlerFn);
     handlers.insert("extension_info".to_string(), handle_extension_info as CommandHandlerFn);
@@ -61,8 +60,6 @@ pub fn register(
     async_handlers.insert("STATUS".to_string(), handle_status_async as AsyncCommandHandlerFn);
     async_handlers.insert("info".to_string(), handle_status_async as AsyncCommandHandlerFn);
     async_handlers.insert("INFO".to_string(), handle_status_async as AsyncCommandHandlerFn);
-    async_handlers.insert("load_update".to_string(), handle_load_update_async as AsyncCommandHandlerFn);
-    async_handlers.insert("LOAD_UPDATE".to_string(), handle_load_update_async as AsyncCommandHandlerFn);
     async_handlers.insert("get_node_info".to_string(), handle_node_info_async as AsyncCommandHandlerFn);
     async_handlers.insert("GET_NODE_INFO".to_string(), handle_node_info_async as AsyncCommandHandlerFn);
     async_handlers.insert("node_info".to_string(), handle_node_info_async as AsyncCommandHandlerFn);
@@ -143,24 +140,6 @@ pub fn register(
         params_schema: json!({"type": "object", "properties": {}}),
         returns_schema: json!({"type": "object", "description": "Site registration metadata from ValKey"}),
         example: r#"{"cmd":"get_site_info","params":{}}"#,
-        async_capable: true,
-        lane: Lane::Concurrent,
-    });
-    descriptors.push(CommandDescriptor {
-        name: "load_update",
-        category: "system",
-        description: "Update load metrics for a service (used by health monitoring)",
-        params_schema: json!({"type": "object", "required": ["service_id", "load_factor"], "properties": {
-            "service_id": {"type": "string"},
-            "load_factor": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-            "cpu_usage": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-            "memory_usage": {"type": "number", "minimum": 0.0, "maximum": 1.0},
-            "active_requests": {"type": "integer", "minimum": 0},
-            "avg_latency_ms": {"type": "integer", "minimum": 0},
-            "error_rate": {"type": "number", "minimum": 0.0, "maximum": 1.0}
-        }}),
-        returns_schema: json!({"type": "object", "properties": {"service_id": {"type": "string"}, "load_factor": {"type": "number"}, "score": {"type": "number"}, "updated": {"type": "boolean"}}}),
-        example: r#"{"cmd":"load_update","params":{"service_id":"web1","load_factor":0.4}}"#,
         async_capable: true,
         lane: Lane::Concurrent,
     });
@@ -490,68 +469,6 @@ pub fn handle_site_info(
     }
 }
 
-pub fn handle_load_update(
-    command: &Command,
-    _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
-    _site_id: &str,
-    debug_mode: bool
-) -> CommandResult {
-    if debug_mode {
-        debug!("Handling load_update command: {}", command.id);
-    }
-
-    let service_id = match command.parameters.get("service_id").and_then(|v| v.as_str()) {
-        Some(id) if !id.is_empty() => id.to_string(),
-        _ => {
-            return CommandResult::error("Missing or empty service_id parameter");
-        }
-    };
-
-    let load_factor = match command.parameters.get("load_factor").and_then(|v| v.as_f64()) {
-        Some(l) if (0.0..=1.0).contains(&l) => l,
-        _ => {
-            return CommandResult::error("Missing or invalid load_factor parameter (must be 0.0-1.0)");
-        }
-    };
-
-    let cpu_usage = command.parameters.get("cpu_usage").and_then(|v| v.as_f64());
-    let memory_usage = command.parameters.get("memory_usage").and_then(|v| v.as_f64());
-    let active_requests = command.parameters.get("active_requests").and_then(|v| v.as_u64()).map(|v| v as u32);
-    let avg_latency_ms = command.parameters.get("avg_latency_ms").and_then(|v| v.as_u64());
-    let error_rate = command.parameters.get("error_rate").and_then(|v| v.as_f64());
-
-    let metrics = crate::integration::load_metrics::LoadMetrics {
-        service_id: service_id.clone(),
-        load_factor,
-        cpu_usage,
-        memory_usage,
-        active_requests,
-        avg_latency_ms,
-        error_rate,
-        last_update: crate::utils::current_timestamp_ms(),
-        ttl_seconds: 30,
-    };
-
-    if let Some(load_manager) = crate::daemon::GNodeDaemon::get_load_metrics_manager_ref() {
-        load_manager.update(metrics.clone());
-
-        if debug_mode {
-            debug!("Updated load metrics for service {}: load={:.2}, score={:.2}",
-                service_id, load_factor, metrics.score());
-        }
-
-        CommandResult::success(json!({
-            "service_id": service_id,
-            "load_factor": load_factor,
-            "score": metrics.score(),
-            "updated": true
-        }))
-    } else {
-        CommandResult::error("Load metrics manager not initialized")
-    }
-}
-
 pub fn handle_describe(
     command: &Command,
     _conn: &mut Connection,
@@ -802,71 +719,6 @@ pub fn handle_status_async<'a>(
         });
 
         CommandResult::success(status)
-    })
-}
-
-pub fn handle_load_update_async<'a>(
-    command: &'a Command,
-    _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
-    _site_id: &'a str,
-    debug_mode: bool,
-) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
-    Box::pin(async move {
-        if debug_mode {
-            debug!("Handling async load_update command: {}", command.id);
-        }
-
-        let service_id = match command.parameters.get("service_id").and_then(|v| v.as_str()) {
-            Some(id) if !id.is_empty() => id.to_string(),
-            _ => {
-                return CommandResult::error("Missing or empty service_id parameter");
-            }
-        };
-
-        let load_factor = match command.parameters.get("load_factor").and_then(|v| v.as_f64()) {
-            Some(l) if (0.0..=1.0).contains(&l) => l,
-            _ => {
-                return CommandResult::error("Missing or invalid load_factor parameter (must be 0.0-1.0)");
-            }
-        };
-
-        let cpu_usage = command.parameters.get("cpu_usage").and_then(|v| v.as_f64());
-        let memory_usage = command.parameters.get("memory_usage").and_then(|v| v.as_f64());
-        let active_requests = command.parameters.get("active_requests").and_then(|v| v.as_u64()).map(|v| v as u32);
-        let avg_latency_ms = command.parameters.get("avg_latency_ms").and_then(|v| v.as_u64());
-        let error_rate = command.parameters.get("error_rate").and_then(|v| v.as_f64());
-
-        let metrics = crate::integration::load_metrics::LoadMetrics {
-            service_id: service_id.clone(),
-            load_factor,
-            cpu_usage,
-            memory_usage,
-            active_requests,
-            avg_latency_ms,
-            error_rate,
-            last_update: crate::utils::current_timestamp_ms(),
-            ttl_seconds: 30,
-        };
-
-        if let Some(load_manager) = crate::daemon::GNodeDaemon::get_load_metrics_manager_ref() {
-            load_manager.update(metrics.clone());
-
-            if debug_mode {
-                debug!("Updated load metrics for service {}: load={:.2}, score={:.2}",
-                    service_id, load_factor, metrics.score());
-            }
-
-            CommandResult::success(json!({
-                "service_id": service_id,
-                "load_factor": load_factor,
-                "score": metrics.score(),
-                "updated": true,
-                "async": true
-            }))
-        } else {
-            CommandResult::error("Load metrics manager not initialized")
-        }
     })
 }
 

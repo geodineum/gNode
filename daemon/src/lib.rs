@@ -74,10 +74,6 @@ pub mod constellation;
 /// Placements from heartbeats and the health tick, under one lease per constellation (SPEC §5).
 pub mod constellation_worker;
 
-/// Constellation-tier registration: a node announces its role, capacity and
-/// specialisation geometrically, so work can be steered by discovery rather
-/// than by which streams a node happens to consume.
-pub mod constellation_registration;
 
 /// Registration intent: a site declares what it is once, and its capability
 /// vector is DERIVED from that intent times the current schema — so a schema

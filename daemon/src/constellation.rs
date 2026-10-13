@@ -13,11 +13,6 @@ use crate::{GeometricError, Result};
 
 pub const LIFECYCLE_ACTIVE: f64 = 0.25;
 
-/// The branch runs the one-topology paths only when asked (`GNODE_ONE_TOPOLOGY=on`) until WP3e.
-pub fn one_topology_enabled() -> bool {
-    std::env::var("GNODE_ONE_TOPOLOGY").map(|v| v == "on").unwrap_or(false)
-}
-
 /// The constellations this daemon serves (SPEC §10a): `GNODE_CONSTELLATIONS`, comma separated,
 /// else the topology namespace alone. The first is the default for anything not yet placed.
 pub fn served() -> Vec<Constellation> {
@@ -90,9 +85,6 @@ impl Constellation {
         format!("{{{}}}:gnode:cluster:writer", self.name)
     }
 
-    pub fn snapshot_key(&self) -> String {
-        format!("{{{}}}:gnode:topology:services", self.name)
-    }
 
     pub fn heartbeat_key(&self, env: &str, component: &str, node: &str) -> String {
         format!("{{{}}}:gnode:heartbeat:{}:{}:{}", self.name, env, component, node)
@@ -207,14 +199,14 @@ impl Constellation {
             upd.insert(slot.to_string(), serde_json::json!({ "pd": value, "pr": fp.raw().to_string(), "s": index_score(&fp).to_string() }));
         }
         let updates = serde_json::Value::Object(upd).to_string();
-        let _: String = self.fcall_leased(conn, "GNODE_TOPO_SET_DERIVED", &[id, &updates, "", &self.snapshot_key(), &ts.to_string(), "", node_id])?;
+        let _: String = self.fcall_leased(conn, "GNODE_TOPO_SET_DERIVED", &[id, &updates, "", "", &ts.to_string(), "", node_id])?;
         Ok(())
     }
 
     /// Lease holder only: a derived fact beside the point (`m.scale_out`, `m.share`), merged.
     pub fn set_meta(&self, conn: &mut redis::Connection, id: &str, meta: serde_json::Value, ts: u64, node_id: &str) -> Result<()> {
         let updates = serde_json::json!({ "m": meta }).to_string();
-        let _: String = self.fcall_leased(conn, "GNODE_TOPO_SET_DERIVED", &[id, &updates, "", &self.snapshot_key(), &ts.to_string(), "", node_id])?;
+        let _: String = self.fcall_leased(conn, "GNODE_TOPO_SET_DERIVED", &[id, &updates, "", "", &ts.to_string(), "", node_id])?;
         Ok(())
     }
 

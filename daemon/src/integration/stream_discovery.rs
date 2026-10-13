@@ -174,9 +174,6 @@ pub struct StreamDiscoveryManager {
 /// The relay addresses a placement's stream (SPEC §6); the daemon reads it so daemon-handled commands
 /// relayed to a service on this node are answered.
 pub fn placement_streams(conn: &mut Connection, node_id: &str) -> Vec<DiscoveredStream> {
-    if !crate::constellation::one_topology_enabled() {
-        return Vec::new();
-    }
     let mut out = Vec::new();
     for c in crate::constellation::served() {
         let Ok(placements) = c.query(conn, "4.2", &crate::constellation::Filters::default(), 0) else { continue };
