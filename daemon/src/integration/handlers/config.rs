@@ -4,8 +4,6 @@
 // These provide runtime configuration introspection and modification.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::RwLock;
 use std::pin::Pin;
 use std::future::Future;
 use redis::Connection;
@@ -14,7 +12,6 @@ use serde::Deserialize;
 use log::debug;
 use serde_json::json;
 use crate::daemon::Command;
-use crate::GeometricTopology;
 
 use super::types::{CommandResult, CommandDescriptor, CommandHandlerFn, AsyncCommandHandlerFn, parse_parameters, Lane};
 
@@ -80,7 +77,6 @@ pub fn register(
 pub fn handle_config_get(
     command: &Command,
     _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -117,7 +113,6 @@ pub fn handle_config_get(
 pub fn handle_config_set(
     command: &Command,
     _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -147,7 +142,6 @@ pub fn handle_config_set(
 pub fn handle_config_list(
     command: &Command,
     _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -185,7 +179,6 @@ pub fn handle_config_list(
 pub fn handle_config_get_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -219,7 +212,6 @@ pub fn handle_config_get_async<'a>(
 pub fn handle_config_set_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -246,7 +238,6 @@ pub fn handle_config_set_async<'a>(
 pub fn handle_config_list_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {

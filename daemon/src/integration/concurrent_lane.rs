@@ -39,8 +39,6 @@ use redis::Client;
 use tokio::runtime::Runtime;
 
 use crate::daemon::Command;
-use crate::GeometricTopology;
-use std::sync::RwLock;
 
 /// The Concurrent-lane runtime. Initialized once at daemon startup via `init()`.
 static CONCURRENT_LANE_RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -133,7 +131,6 @@ where
 pub async fn dispatch(
     command: Command,
     site_id: String,
-    topology: Arc<RwLock<GeometricTopology>>,
     environment: Option<String>,
     debug_mode: bool,
 ) {
@@ -167,7 +164,7 @@ pub async fn dispatch(
                     command.command, command.id, site_id
                 );
             }
-            handler(&command, &mut conn, &topology, &site_id, debug_mode).await
+            handler(&command, &mut conn, &site_id, debug_mode).await
         }
         None => {
             // Defensive: try_spawn_concurrent should only be reached after

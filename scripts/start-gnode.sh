@@ -38,7 +38,6 @@ TOPOLOGY_NAMESPACE="${GNODE_TOPOLOGY_NAMESPACE:-geodineum}"
 NODE_ID="${GNODE_NODE_ID:-master}"
 NODE_TYPE="${GNODE_NODE_TYPE:-general}"
 STREAM_PREFIX="${GNODE_STREAM_PREFIX:-gnode}"
-DIMENSIONS="${GNODE_DIMENSIONS:-17}"
 LOG_LEVEL="${GNODE_LOG_LEVEL:-info}"
 
 # Parse command line arguments
@@ -58,14 +57,12 @@ Options:
   --node-id ID        Set node ID (default: master)
   --node-type TYPE    Set node type: general|inference|gpu_compute|all (default: general)
   --topology-namespace NS  Set topology namespace (default: geodineum)
-  --dimensions N      Set number of dimensions (default: 17)
   --help, -h          Show this help message
 
 Environment Variables (can be set in .env):
   GNODE_TOPOLOGY_NAMESPACE  Topology namespace (default: geodineum)
   GNODE_NODE_ID             Node identifier (default: master)
   GNODE_NODE_TYPE           Node type for routing (default: general)
-  GNODE_DIMENSIONS          Number of topology dimensions (default: 17)
   GNODE_LOG_LEVEL           Log level: error|warn|info|debug|trace (default: info)
   VALKEY_HOST             ValKey host (default: 127.0.0.1)
   VALKEY_PORT             ValKey port (default: 47445)
@@ -112,10 +109,6 @@ while [[ $# -gt 0 ]]; do
             ;;
         --topology-namespace)
             TOPOLOGY_NAMESPACE="$2"
-            shift 2
-            ;;
-        --dimensions)
-            DIMENSIONS="$2"
             shift 2
             ;;
         --help|-h)
@@ -176,7 +169,6 @@ DAEMON_CMD=(
     --node-id "$NODE_ID"
     --node-type "$NODE_TYPE"
     --stream-prefix "$STREAM_PREFIX"
-    --dimensions "$DIMENSIONS"
     --threads auto
     --max-threads 16
     --log-level "$LOG_LEVEL"
@@ -201,7 +193,6 @@ echo "=============================================="
 echo "  Topology Namespace: $TOPOLOGY_NAMESPACE"
 echo "  Node ID:            $NODE_ID"
 echo "  Node Type:          $NODE_TYPE"
-echo "  Dimensions:         $DIMENSIONS"
 echo "  Log Level:          $LOG_LEVEL"
 echo "  ValKey:             $VALKEY_HOST:$VALKEY_PORT"
 echo "  Environment:        ALL (multi-tenant)"

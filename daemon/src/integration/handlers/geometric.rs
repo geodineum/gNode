@@ -3,8 +3,6 @@
 //! names are kept for the wire; both take `{layer?, facets?, axes?, limit?}`.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::RwLock;
 use std::pin::Pin;
 use std::future::Future;
 use redis::Connection;
@@ -12,7 +10,6 @@ use redis::aio::MultiplexedConnection as AsyncConnection;
 use log::debug;
 use serde_json::json;
 use crate::daemon::Command;
-use crate::GeometricTopology;
 
 use super::types::{CommandResult, CommandHandlerFn, AsyncCommandHandlerFn, CommandDescriptor, Lane};
 
@@ -71,12 +68,12 @@ pub fn register(
     });
 }
 
-pub fn handle_geometric_discover(command: &Command, conn: &mut Connection, _topology: &Arc<RwLock<GeometricTopology>>, site_id: &str, debug_mode: bool) -> CommandResult {
+pub fn handle_geometric_discover(command: &Command, conn: &mut Connection, site_id: &str, debug_mode: bool) -> CommandResult {
     if debug_mode { debug!("Handling {} command: {}", command.command, command.id); }
     super::one_topology::discover(conn, site_id, command.parameters.clone())
 }
 
-pub fn handle_geometric_discover_async<'a>(command: &'a Command, conn: &'a mut AsyncConnection, _topology: &'a Arc<RwLock<GeometricTopology>>, site_id: &'a str, debug_mode: bool) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
+pub fn handle_geometric_discover_async<'a>(command: &'a Command, conn: &'a mut AsyncConnection, site_id: &'a str, debug_mode: bool) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
         if debug_mode { debug!("Handling async {} command: {}", command.command, command.id); }
         super::one_topology::discover_async(conn, site_id, command.parameters.clone()).await

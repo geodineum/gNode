@@ -56,24 +56,6 @@ include!(concat!(env!("OUT_DIR"), "/ext_handlers.rs"));
 
 // Re-export core types used by the rest of the codebase
 pub use types::{
-    // Constants (service tier defaults)
-    DISCOVERY_DIMENSIONS,
-    HASHED_DIMENSIONS,
-    TOTAL_DIMENSIONS,
-    SERVICE_DIMENSIONS,
-    SERVICE_AXES,
-
-    // Schema-driven generic functions (multi-tier; pass dim count + dim map)
-    build_capability_vector,
-    discovery_point,
-
-    // Service tier convenience wrappers
-    get_service_dimensions,
-    build_service_capability_vector,
-    discovery_point_from_full,
-    hashed_point_from_full,
-    sampler_axes_csv,
-
     // Core types
     CommandResult,
     CommandDescriptor,
@@ -84,6 +66,4 @@ pub use types::{
     parse_parameters,
     default_group,
     get_memory_usage_kb,
-    calculate_euclidean_distance,
-    fixed_vector_to_capabilities,
 };

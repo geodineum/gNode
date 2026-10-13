@@ -14,13 +14,10 @@
 // for retrieving and executing the appropriate handler for a given command.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::RwLock;
 use redis::Connection;
 use log::{debug, warn};
 
 use crate::daemon::Command;
-use crate::GeometricTopology;
 use crate::integration::IntegrationResult;
 use crate::integration::send_response_with_routing;
 
@@ -245,7 +242,6 @@ pub fn get_command_registry() -> &'static CommandHandlerRegistry {
 pub fn process_command_with_registry(
     command: &Command,
     conn: &mut Connection,
-    topology: &Arc<RwLock<GeometricTopology>>,
     site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -257,7 +253,7 @@ pub fn process_command_with_registry(
             if debug_mode {
                 debug!("Executing handler for command: {}", command.command);
             }
-            handler(command, conn, topology, site_id, debug_mode)
+            handler(command, conn, site_id, debug_mode)
         },
         None => {
             unknown_command_error(&command.command)
@@ -277,13 +273,12 @@ pub fn unknown_command_error(command_name: &str) -> CommandResult {
 /// to the unified stream.
 pub fn process_command_unified_stream(
     conn: &mut Connection,
-    topology: &Arc<RwLock<GeometricTopology>>,
     command: &Command,
     stream_key: &str,
     site_id: &str,
     debug_mode: bool
 ) -> IntegrationResult<String> {
-    let result = process_command_with_registry(command, conn, topology, site_id, debug_mode);
+    let result = process_command_with_registry(command, conn, site_id, debug_mode);
     let response = result.to_response(&command.id);
 
     send_response_with_routing(

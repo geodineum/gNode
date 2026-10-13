@@ -112,12 +112,6 @@ entries:
     mutable: true
     description: Stream trim target (XADD MAXLEN ~).
 
-  - key: GNODE_DIMENSIONS
-    type: string
-    default: "1"
-    mutable: false
-    description: Comma-separated dimension IDs this node participates in.
-
   - key: GNODE_RATELIMIT_CAPACITY
     type: int
     default: 100

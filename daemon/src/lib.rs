@@ -1,11 +1,6 @@
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 use serde_json::Value;
 use redis::{FromRedisValue, RedisResult, Value as RedisValue};
 use thiserror::Error;
-
-// Import FixedPoint/FixedVector for Q64.64 operations (via g_math)
-use crate::geometric_precision::{FixedPoint, FixedVector};
 
 // Re-export daemon module
 pub mod daemon;
@@ -186,108 +181,6 @@ pub enum GeometricError {
 }
 
 pub type Result<T> = std::result::Result<T, GeometricError>;
-
-// Basic types
-
-/// What remains of the in-memory topology engine (WP3e K12): a handle the handler
-/// signatures and the daemon still thread, plus the Q64.64 helpers the legacy registration
-/// paths call until Phase B removes them. The engine's state, discovery and storage left
-/// with the custom-topology and 3-D handlers; the one topology lives in ValKey and is read
-/// through `constellation.rs`.
-#[derive(Debug, Clone, Default)]
-pub struct GeometricTopology {
-    pub dimensions: usize,
-    pub services: HashMap<String, Value>,
-    pub capability_dimensions: HashMap<String, usize>,
-}
-
-impl GeometricTopology {
-    pub fn new(dimensions: usize) -> Self {
-        Self { dimensions, ..Self::default() }
-    }
-
-    /// A point's grid cell as a fixed-width string, Q64.64 multiply then integer truncation:
-    /// identical on every node. Legacy registration keeps writing it until Phase B.
-    pub fn point_to_bucket_key(point: &FixedVector, grid_size: usize) -> String {
-        let grid_fp = FixedPoint::from_int(grid_size as i32);
-        let mut key = String::with_capacity(point.len() * 4);
-        for i in 0..point.len() {
-            key.push_str(&format!("{:04}", (point[i] * grid_fp).to_int()));
-        }
-        key
-    }
-
-    /// The same cell as integers, for a consumer that composes its own key.
-    pub fn point_to_bucket_key_raw(point: &FixedVector, grid_size: usize) -> Vec<i64> {
-        let grid_fp = FixedPoint::from_int(grid_size as i32);
-        (0..point.len()).map(|i| (point[i] * grid_fp).to_int() as i64).collect()
-    }
-
-    /// The legacy z-order score: axis 16 (load) scaled to [0, 1_000_000]; axis 0 for a short point.
-    pub fn compute_service_z_score(point: &FixedVector) -> i64 {
-        let scale = FixedPoint::from_int(1_000_000);
-        if point.len() > 16 {
-            (point[16] * scale).to_int() as i64
-        } else if !point.is_empty() {
-            (point[0] * scale).to_int() as i64
-        } else {
-            0
-        }
-    }
-
-    /// The legacy per-site topology key, `{site}:gnode:services`; retires with Phase B.
-    pub fn get_services_topology_key(site_id: &str) -> String {
-        format!("{{{}}}:gnode:services", site_id)
-    }
-}
-
-/// The shared handle the daemon constructs and the handlers receive.
-#[derive(Clone)]
-pub struct SharedTopology {
-    inner: Arc<RwLock<GeometricTopology>>,
-}
-
-impl SharedTopology {
-    pub fn new(dimensions: usize) -> Self {
-        Self { inner: Arc::new(RwLock::new(GeometricTopology::new(dimensions))) }
-    }
-
-    /// Kept for the daemon's constructor; the storage arguments no longer mean anything.
-    pub fn with_storage(dimensions: usize, _redis_url: &str, _site_id: &str, _prefix: &str) -> Result<Self> {
-        Ok(Self::new(dimensions))
-    }
-
-    pub fn get_topology_ref(&self) -> Arc<RwLock<GeometricTopology>> {
-        Arc::clone(&self.inner)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn bucket_keys_are_deterministic_and_the_raw_form_agrees() {
-        let p = FixedVector::from_slice(&[FixedPoint::from_f64(0.35), FixedPoint::from_f64(0.9), FixedPoint::from_f64(0.0)]);
-        assert_eq!(GeometricTopology::point_to_bucket_key(&p, 10), "000300090000");
-        assert_eq!(GeometricTopology::point_to_bucket_key(&p, 10), GeometricTopology::point_to_bucket_key(&p, 10));
-        assert_eq!(GeometricTopology::point_to_bucket_key_raw(&p, 10), vec![3, 9, 0]);
-    }
-
-    #[test]
-    fn the_legacy_z_score_reads_axis_sixteen() {
-        let mut v = vec![FixedPoint::from_f64(0.0); 23];
-        v[16] = FixedPoint::from_f64(0.75);
-        assert_eq!(GeometricTopology::compute_service_z_score(&FixedVector::from_slice(&v)), 750_000, "a binary-exact value: the legacy score truncates");
-        assert_eq!(GeometricTopology::compute_service_z_score(&FixedVector::from_slice(&[FixedPoint::from_f64(0.5)])), 500_000);
-        assert_eq!(GeometricTopology::compute_service_z_score(&FixedVector::new(0)), 0);
-    }
-
-    #[test]
-    fn the_legacy_key_is_per_site() {
-        assert_eq!(GeometricTopology::get_services_topology_key("nierto_com"), "{nierto_com}:gnode:services");
-    }
-}
 
 /// Serialises tests that mutate process-global environment variables.
 ///

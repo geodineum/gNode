@@ -310,7 +310,7 @@ fn validate_template_id(id: &str) -> Result<(), TemplateError> {
 
 /// Register a template for runtime rendering with topology integration
 ///
-/// Templates are registered as services in the GeometricTopology with:
+/// Templates are registered as services with:
 /// - Service ID: `template:{template_id}`
 /// - Zero capabilities (not used for discovery)
 /// - Dependencies: Stored in topology.dependencies for DAG tracking
@@ -618,7 +618,7 @@ pub fn delete_template(id: &str, _config: &GNodeSettings) -> IntegrationResult<(
 
 /// Invalidate a template and all templates that depend on it (transitive closure)
 ///
-/// Uses GeometricTopology's dependency graph to find all templates that transitively
+/// Uses the template dependency graph to find all templates that transitively
 /// include the specified template. All found templates are removed from the Tera engine
 /// and their cached output is purged from ValKey.
 ///

@@ -31,7 +31,6 @@ use crate::daemon::Command;
 use crate::integration::command_handler::{CommandHandlerRegistry, CommandResult};
 use crate::integration::stream_discovery::StreamDiscoveryManager;
 use crate::config::{build_request_key, build_response_key};
-use crate::GeometricTopology;
 use std::sync::RwLock;
 
 /// Request received from KeyBasedClient (PHP)
@@ -90,7 +89,6 @@ pub struct ComputeHandler {
     /// Node ID for consumer naming
     node_id: String,
     command_registry: Arc<CommandHandlerRegistry>,
-    topology: Arc<RwLock<GeometricTopology>>,
     /// SHARED stream discovery manager from daemon - single source of truth
     /// Uses std::sync::RwLock for compatibility with daemon's synchronous discovery
     shared_discovery: Arc<RwLock<StreamDiscoveryManager>>,
@@ -111,13 +109,11 @@ impl ComputeHandler {
     /// # Arguments
     /// * `redis_client` - ValKey client for connections
     /// * `node_id` - Unique node identifier for consumer naming
-    /// * `topology` - Shared topology reference
     /// * `shared_discovery` - SHARED StreamDiscoveryManager from daemon (single source of truth)
     /// * `debug` - Enable debug logging
     pub fn new(
         redis_client: Client,
         node_id: String,
-        topology: Arc<RwLock<GeometricTopology>>,
         shared_discovery: Arc<RwLock<StreamDiscoveryManager>>,
         debug: bool,
     ) -> Self {
@@ -125,7 +121,6 @@ impl ComputeHandler {
             redis_client,
             node_id,
             command_registry: Arc::new(CommandHandlerRegistry::new()),
-            topology,
             shared_discovery,
             active_streams: Arc::new(TokioRwLock::new(HashSet::new())),
             debug,
@@ -448,7 +443,6 @@ impl ComputeHandler {
     fn spawn_request_handler(&self, site_id: &str, request_id: &str) {
         let redis_client = self.redis_client.clone();
         let command_registry = self.command_registry.clone();
-        let topology = self.topology.clone();
         let debug = self.debug;
         let site = site_id.to_string();
         let req_id = request_id.to_string();
@@ -457,7 +451,6 @@ impl ComputeHandler {
             if let Err(e) = Self::handle_compute_request_static(
                 &redis_client,
                 &command_registry,
-                &topology,
                 &site,
                 &req_id,
                 debug
@@ -471,7 +464,6 @@ impl ComputeHandler {
     async fn handle_compute_request_static(
         redis_client: &Client,
         command_registry: &Arc<CommandHandlerRegistry>,
-        topology: &Arc<RwLock<GeometricTopology>>,
         site_id: &str,
         request_id: &str,
         debug_mode: bool,
@@ -505,7 +497,7 @@ impl ComputeHandler {
         debug!("📥 KeyBased: Processing command '{}' for request {}", request.command, request_id);
 
         // 3. Execute command using existing command handler registry
-        let result = Self::execute_command_static(redis_client, command_registry, topology, &request, request_id, site_id, debug_mode).await;
+        let result = Self::execute_command_static(redis_client, command_registry, &request, request_id, site_id, debug_mode).await;
 
         let compute_time_ms = start.elapsed().as_millis() as u64;
 
@@ -551,7 +543,6 @@ impl ComputeHandler {
     async fn execute_command_static(
         redis_client: &Client,
         command_registry: &Arc<CommandHandlerRegistry>,
-        topology: &Arc<RwLock<GeometricTopology>>,
         request: &ComputeRequest,
         request_id: &str,
         site_id: &str,
@@ -571,7 +562,7 @@ impl ComputeHandler {
         if let Some(async_handler) = command_registry.get_async_handler(&request.command) {
             debug!("⚡ KeyBased: Using async handler for '{}'", request.command);
             let mut conn = redis_client.get_multiplexed_async_connection().await?;
-            let result = async_handler(&command, &mut conn, topology, site_id, debug_mode).await;
+            let result = async_handler(&command, &mut conn, site_id, debug_mode).await;
             return Ok(result);
         }
 
@@ -583,7 +574,7 @@ impl ComputeHandler {
         // NOTE: This still blocks but it's unavoidable without rewriting all command handlers
         // However, the GET/SET operations are now async which is the main bottleneck
         let mut conn = redis_client.get_connection()?;
-        let result = handler(&command, &mut conn, topology, site_id, debug_mode);
+        let result = handler(&command, &mut conn, site_id, debug_mode);
 
         Ok(result)
     }

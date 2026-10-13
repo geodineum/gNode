@@ -281,13 +281,10 @@ pub fn process_node_unified_stream(
         config.base_backoff_ms
     );
     
-    // Get topology reference
-    let topology = crate::daemon::GNodeDaemon::get_topology_ref();
     
     // Process commands
     command_processor::process_commands(
         conn,
-        &topology,
         &stream_key,
         "gnode-daemon",
         &consumer_name,

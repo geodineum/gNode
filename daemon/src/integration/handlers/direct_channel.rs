@@ -9,8 +9,6 @@
 //   persistent — no TTL, explicit close only
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::RwLock;
 use std::pin::Pin;
 use std::future::Future;
 use redis::Connection;
@@ -18,7 +16,6 @@ use redis::aio::MultiplexedConnection as AsyncConnection;
 use log::debug;
 use serde_json::json;
 use crate::daemon::{Command, GNodeDaemon};
-use crate::GeometricTopology;
 
 use super::types::{CommandResult, CommandDescriptor, CommandHandlerFn, AsyncCommandHandlerFn, Lane};
 
@@ -151,7 +148,6 @@ pub fn register(
 pub fn handle_channel_open(
     command: &Command,
     conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     site_id: &str,
     debug_mode: bool,
 ) -> CommandResult {
@@ -226,7 +222,6 @@ pub fn handle_channel_open(
 pub fn handle_channel_close(
     command: &Command,
     conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool,
 ) -> CommandResult {
@@ -276,7 +271,6 @@ pub fn handle_channel_close(
 pub fn handle_channel_info(
     command: &Command,
     conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool,
 ) -> CommandResult {
@@ -303,7 +297,6 @@ pub fn handle_channel_info(
 pub fn handle_channel_list(
     command: &Command,
     conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool,
 ) -> CommandResult {
@@ -333,7 +326,6 @@ pub fn handle_channel_list(
 pub fn handle_channel_open_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -342,7 +334,7 @@ pub fn handle_channel_open_async<'a>(
         // Get a sync connection from the pool for the FCALL call.
         match crate::integration::connection_manager::get_connection() {
             Ok(mut sync_conn) => {
-                handle_channel_open(command, &mut sync_conn, &GNodeDaemon::get_topology_ref(), site_id, debug_mode)
+                handle_channel_open(command, &mut sync_conn, site_id, debug_mode)
             },
             Err(e) => CommandResult::error(format!("Failed to get connection: {}", e)),
         }
@@ -352,14 +344,13 @@ pub fn handle_channel_open_async<'a>(
 pub fn handle_channel_close_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
         match crate::integration::connection_manager::get_connection() {
             Ok(mut sync_conn) => {
-                handle_channel_close(command, &mut sync_conn, &GNodeDaemon::get_topology_ref(), site_id, debug_mode)
+                handle_channel_close(command, &mut sync_conn, site_id, debug_mode)
             },
             Err(e) => CommandResult::error(format!("Failed to get connection: {}", e)),
         }
@@ -369,14 +360,13 @@ pub fn handle_channel_close_async<'a>(
 pub fn handle_channel_info_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
         match crate::integration::connection_manager::get_connection() {
             Ok(mut sync_conn) => {
-                handle_channel_info(command, &mut sync_conn, &GNodeDaemon::get_topology_ref(), site_id, debug_mode)
+                handle_channel_info(command, &mut sync_conn, site_id, debug_mode)
             },
             Err(e) => CommandResult::error(format!("Failed to get connection: {}", e)),
         }
@@ -386,14 +376,13 @@ pub fn handle_channel_info_async<'a>(
 pub fn handle_channel_list_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
         match crate::integration::connection_manager::get_connection() {
             Ok(mut sync_conn) => {
-                handle_channel_list(command, &mut sync_conn, &GNodeDaemon::get_topology_ref(), site_id, debug_mode)
+                handle_channel_list(command, &mut sync_conn, site_id, debug_mode)
             },
             Err(e) => CommandResult::error(format!("Failed to get connection: {}", e)),
         }

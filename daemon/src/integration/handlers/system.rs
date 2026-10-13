@@ -4,8 +4,6 @@
 // These are the core operational commands for daemon health and introspection.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::RwLock;
 use std::pin::Pin;
 use std::future::Future;
 use redis::Connection;
@@ -14,7 +12,6 @@ use serde::Deserialize;
 use log::debug;
 use serde_json::{Value, json};
 use crate::daemon::Command;
-use crate::GeometricTopology;
 use crate::integration::valkey_functions::execute_function;
 use crate::integration::processor::stream_utils::current_timestamp;
 
@@ -214,7 +211,6 @@ fn default_detail() -> String {
 pub fn handle_ping(
     command: &Command,
     _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -234,7 +230,6 @@ pub fn handle_ping(
 pub fn handle_status(
     command: &Command,
     conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -344,7 +339,6 @@ pub fn handle_status(
 pub fn handle_health(
     command: &Command,
     conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -374,7 +368,6 @@ pub fn handle_health(
 pub fn handle_version(
     command: &Command,
     _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -397,7 +390,6 @@ pub fn handle_version(
 pub fn handle_echo(
     command: &Command,
     _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -415,7 +407,6 @@ pub fn handle_echo(
 pub fn handle_node_info(
     command: &Command,
     conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -446,7 +437,6 @@ pub fn handle_node_info(
 pub fn handle_site_info(
     command: &Command,
     conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -472,7 +462,6 @@ pub fn handle_site_info(
 pub fn handle_describe(
     command: &Command,
     _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -520,7 +509,6 @@ pub fn handle_describe(
 pub fn handle_extension_list(
     command: &Command,
     _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -559,7 +547,6 @@ pub fn handle_extension_list(
 pub fn handle_extension_info(
     command: &Command,
     _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -597,7 +584,6 @@ pub fn handle_extension_info(
 pub fn handle_ping_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -619,7 +605,6 @@ pub fn handle_ping_async<'a>(
 pub fn handle_health_async<'a>(
     command: &'a Command,
     conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -654,7 +639,6 @@ pub fn handle_health_async<'a>(
 pub fn handle_version_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -679,7 +663,6 @@ pub fn handle_version_async<'a>(
 pub fn handle_echo_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -699,7 +682,6 @@ pub fn handle_echo_async<'a>(
 pub fn handle_status_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -725,7 +707,6 @@ pub fn handle_status_async<'a>(
 pub fn handle_node_info_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -752,7 +733,6 @@ pub fn handle_node_info_async<'a>(
 pub fn handle_site_info_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    topology: &'a Arc<RwLock<GeometricTopology>>,
     site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -761,10 +741,7 @@ pub fn handle_site_info_async<'a>(
             debug!("Handling async site_info command: {}", command.id);
         }
 
-        let services_count = match topology.read() {
-            Ok(t) => t.services.len(),
-            Err(_) => 0,
-        };
+        let services_count = 0usize;
 
         CommandResult::success(json!({
             "site_id": site_id,
@@ -780,7 +757,6 @@ pub fn handle_site_info_async<'a>(
 pub fn handle_describe_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -828,7 +804,6 @@ pub fn handle_describe_async<'a>(
 pub fn handle_extension_list_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -871,7 +846,6 @@ pub fn handle_extension_list_async<'a>(
 pub fn handle_extension_info_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {

@@ -253,16 +253,6 @@ struct Cli {
     #[clap(long, default_value = "general")]
     node_type: String,
 
-    /// Number of dimensions in the SERVICE TIER capability space.
-    /// Defaults to the compiled service-tier width, so this flag cannot print a
-    /// layout the daemon does not have. Zones are index ranges, both cuts being
-    /// prefix truncations: declared and hashed, then derived (measured, ranked,
-    /// never hashed), then storage — see daemon/config/service_schema.yaml.
-    /// Other tiers (tool/constellation) and custom topologies (created via
-    /// topo_create / gNode-TOPO) load their own dim count from their tier schema.
-    #[clap(long, default_value_t = gnode::integration::handlers::TOTAL_DIMENSIONS)]
-    dimensions: usize,
-    
     /// Number of worker threads per stream processor
     /// Use "auto" for automatic CPU-based configuration, or a specific number
     #[clap(long, default_value = "auto")]
@@ -605,7 +595,6 @@ fn main() -> Result<()> {
     info!("  Master mode: {} {}", is_master, if cli.master { "(--master flag)" } else if is_master { "(--daemon-name=master)" } else { "" });
     info!("  Node Type: {} (declared identity — NOT enforced; every node processes every entry on the streams it consumes)", cli.node_type);
     info!("  Stream prefix: {}", cli.stream_prefix);
-    info!("  Dimensions: {}", cli.dimensions);
     info!("  Debug mode: {}", cli.debug);
     info!("  Log level: {}", cli.log_level);
     info!("  Single-threaded mode: {}", cli.single_threaded);
@@ -652,7 +641,7 @@ fn main() -> Result<()> {
     match cli.command {
         Some(Commands::Start) => {
             info!("Starting daemon...");
-            start_daemon(&redis_url, cli.dimensions, &cli.environment, &cli.daemon_name, &cli.node_type, &cli.stream_prefix, &cli.threads, cli.max_threads, cli.debug, &cli.log_level, is_master, &cli)?;
+            start_daemon(&redis_url, &cli.environment, &cli.daemon_name, &cli.node_type, &cli.stream_prefix, &cli.threads, cli.max_threads, cli.debug, &cli.log_level, is_master, &cli)?;
         },
         Some(Commands::Stop) => {
             info!("Stopping daemon...");
@@ -690,7 +679,7 @@ fn main() -> Result<()> {
         None => {
             // Default command is to start the daemon
             info!("Starting daemon (default command)...");
-            start_daemon(&redis_url, cli.dimensions, &cli.environment, &cli.daemon_name, &cli.node_type, &cli.stream_prefix, &cli.threads, cli.max_threads, cli.debug, &cli.log_level, is_master, &cli)?;
+            start_daemon(&redis_url, &cli.environment, &cli.daemon_name, &cli.node_type, &cli.stream_prefix, &cli.threads, cli.max_threads, cli.debug, &cli.log_level, is_master, &cli)?;
         }
     }
     
@@ -699,7 +688,7 @@ fn main() -> Result<()> {
 
 // Function to start the daemon
 #[allow(clippy::too_many_arguments)]
-fn start_daemon(redis_url: &str, dimensions: usize, environment: &str, daemon_name: &str, node_type: &str, stream_prefix: &str, threads: &str, max_threads: usize, debug: bool, log_level: &str, is_master: bool, cli: &Cli) -> Result<()> {
+fn start_daemon(redis_url: &str, environment: &str, daemon_name: &str, node_type: &str, stream_prefix: &str, threads: &str, max_threads: usize, debug: bool, log_level: &str, is_master: bool, cli: &Cli) -> Result<()> {
     // Parse thread configuration
     let thread_config = match threads {
         "auto" => {
@@ -763,7 +752,6 @@ fn start_daemon(redis_url: &str, dimensions: usize, environment: &str, daemon_na
     // Site streams are discovered dynamically via StreamDiscoveryManager
     let mut daemon = GNodeDaemon::new_with_config(
         redis_url,
-        dimensions,
         cli.topology_namespace.clone(),  // Shared topology namespace (all services register here)
         environment.to_string(),
         daemon_name.to_string(),  // daemon_name used as node_id internally

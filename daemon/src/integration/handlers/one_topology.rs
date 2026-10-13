@@ -472,12 +472,10 @@ pub fn edge_validate(conn: &mut redis::Connection, _site_id: &str, params: Value
 
 use crate::daemon::Command;
 use crate::integration::handlers::types::{AsyncCommandHandlerFn, CommandDescriptor, CommandHandlerFn};
-use crate::GeometricTopology;
-use std::sync::{Arc, RwLock};
 
 macro_rules! sync_edge_handler {
     ($name:ident, $f:ident) => {
-        fn $name(command: &Command, conn: &mut redis::Connection, _t: &Arc<RwLock<GeometricTopology>>, site_id: &str, _debug: bool) -> CommandResult {
+        fn $name(command: &Command, conn: &mut redis::Connection, site_id: &str, _debug: bool) -> CommandResult {
             $f(conn, site_id, command.parameters.clone())
         }
     };

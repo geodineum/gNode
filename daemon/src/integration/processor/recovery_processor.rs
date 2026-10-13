@@ -6,7 +6,6 @@
 use log::{info, warn, debug, error};
 use redis::{Connection, RedisResult};
 use crate::integration::processor::stream_utils::current_timestamp;
-use crate::daemon::GNodeDaemon;
 use crate::integration::{
     IntegrationResult,
     error_handlings::IntegrationError,
@@ -105,13 +104,11 @@ pub fn recover_from_restart(
     }
     
     // Process pending messages
-    let topology = GNodeDaemon::get_topology_ref();
     let registry = crate::integration::command_handler::get_command_registry();
     
     // Process all pending messages with no time limit (0 ms idle time)
     let processed = process_pending_commands(
         conn,
-        &topology,
         stream_key,
         group_name,
         consumer_name,
@@ -320,7 +317,6 @@ pub fn repair_orphaned_groups(
                             // Process the pending messages with a dedicated consumer
                             let processed = super::pending_processor::process_pending_commands(
                                 conn,
-                                &GNodeDaemon::get_topology_ref(),
                                 stream_key,
                                 &name,
                                 &recovery_consumer,

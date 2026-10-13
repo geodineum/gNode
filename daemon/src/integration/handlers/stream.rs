@@ -4,8 +4,6 @@
 // These provide ValKey stream introspection capabilities.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::RwLock;
 use std::pin::Pin;
 use std::future::Future;
 use redis::Connection;
@@ -14,7 +12,6 @@ use serde::Deserialize;
 use log::debug;
 use serde_json::{Value, json};
 use crate::daemon::Command;
-use crate::GeometricTopology;
 use crate::{json_redis_cmd, json_redis_cmd_async};
 
 use super::types::{CommandResult, CommandDescriptor, CommandHandlerFn, AsyncCommandHandlerFn, parse_parameters, default_group, Lane};
@@ -129,7 +126,6 @@ struct StreamPendingParams {
 pub fn handle_stream_info(
     command: &Command,
     conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -157,7 +153,6 @@ pub fn handle_stream_info(
 pub fn handle_stream_group_info(
     command: &Command,
     conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -185,7 +180,6 @@ pub fn handle_stream_group_info(
 pub fn handle_stream_consumer_info(
     command: &Command,
     conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -213,7 +207,6 @@ pub fn handle_stream_consumer_info(
 pub fn handle_stream_pending(
     command: &Command,
     conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -265,7 +258,6 @@ pub fn handle_stream_pending(
 pub fn handle_stream_info_async<'a>(
     command: &'a Command,
     conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -294,7 +286,6 @@ pub fn handle_stream_info_async<'a>(
 pub fn handle_stream_group_info_async<'a>(
     command: &'a Command,
     conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -323,7 +314,6 @@ pub fn handle_stream_group_info_async<'a>(
 pub fn handle_stream_consumer_info_async<'a>(
     command: &'a Command,
     conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -359,7 +349,6 @@ pub fn handle_stream_consumer_info_async<'a>(
 pub fn handle_stream_pending_async<'a>(
     command: &'a Command,
     conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {

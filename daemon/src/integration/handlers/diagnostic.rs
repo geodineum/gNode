@@ -5,8 +5,6 @@
 // These provide system introspection and monitoring capabilities.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::RwLock;
 use std::pin::Pin;
 use std::future::Future;
 use redis::Connection;
@@ -14,7 +12,6 @@ use redis::aio::MultiplexedConnection as AsyncConnection;
 use log::debug;
 use serde_json::json;
 use crate::daemon::Command;
-use crate::GeometricTopology;
 
 use super::types::{CommandResult, CommandDescriptor, CommandHandlerFn, AsyncCommandHandlerFn, get_memory_usage_kb, Lane};
 
@@ -129,7 +126,6 @@ pub fn register(
 pub fn handle_debug_info(
     command: &Command,
     _conn: &mut Connection,
-    topology: &Arc<RwLock<GeometricTopology>>,
     site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -137,10 +133,8 @@ pub fn handle_debug_info(
         debug!("Handling debug_info command: {}", command.id);
     }
 
-    let (services_count, caps_count, dims) = match topology.read() {
-        Ok(t) => (t.services.len(), t.capability_dimensions.len(), t.dimensions),
-        Err(_) => return CommandResult::error("Failed to acquire topology read lock"),
-    };
+    let services_count = 0usize;
+    let caps_count = 0usize;
 
     CommandResult::success(json!({
         "debug_info": {
@@ -148,8 +142,7 @@ pub fn handle_debug_info(
             "debug_mode": debug_mode,
             "topology": {
                 "services_count": services_count,
-                "capabilities_count": caps_count,
-                "dimensions": dims
+                "capabilities_count": caps_count
             },
             "system": {
                 "threads": std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1),
@@ -163,7 +156,6 @@ pub fn handle_debug_info(
 pub fn handle_memory_stats(
     command: &Command,
     _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -183,7 +175,6 @@ pub fn handle_memory_stats(
 pub fn handle_thread_status(
     command: &Command,
     _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -204,7 +195,6 @@ pub fn handle_thread_status(
 pub fn handle_connection_status(
     command: &Command,
     _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -226,7 +216,6 @@ pub fn handle_connection_status(
 pub fn handle_performance_metrics(
     command: &Command,
     _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -251,7 +240,6 @@ pub fn handle_performance_metrics(
 pub fn handle_security_status(
     command: &Command,
     _conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -273,7 +261,6 @@ pub fn handle_security_status(
 pub fn handle_topology_status(
     command: &Command,
     _conn: &mut Connection,
-    topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool
 ) -> CommandResult {
@@ -281,16 +268,13 @@ pub fn handle_topology_status(
         debug!("Handling topology_status command: {}", command.id);
     }
 
-    let (services, caps, dims) = match topology.read() {
-        Ok(t) => (t.services.len(), t.capability_dimensions.len(), t.dimensions),
-        Err(_) => return CommandResult::error("Failed to acquire topology read lock"),
-    };
+    let services = 0usize;
+    let caps = 0usize;
 
     CommandResult::success(json!({
         "topology_status": {
             "services_registered": services,
             "capabilities_defined": caps,
-            "dimensions": dims,
             "load_order_calculated": false,
             "topology_health": "operational"
         }
@@ -304,7 +288,6 @@ pub fn handle_topology_status(
 pub fn handle_debug_info_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    topology: &'a Arc<RwLock<GeometricTopology>>,
     site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -313,10 +296,8 @@ pub fn handle_debug_info_async<'a>(
             debug!("Handling async debug_info command: {}", command.id);
         }
 
-        let (services_count, caps_count, dims) = match topology.read() {
-            Ok(t) => (t.services.len(), t.capability_dimensions.len(), t.dimensions),
-            Err(_) => (0, 0, 8),
-        };
+        let services_count = 0usize;
+        let caps_count = 0usize;
 
         CommandResult::success(json!({
             "debug_info": {
@@ -324,9 +305,8 @@ pub fn handle_debug_info_async<'a>(
                 "debug_mode": debug_mode,
                 "topology": {
                     "services_count": services_count,
-                    "capabilities_count": caps_count,
-                    "dimensions": dims
-                },
+                    "capabilities_count": caps_count
+                    },
                 "system": {
                     "threads": std::thread::available_parallelism().map(|p| p.get()).unwrap_or(1),
                     "memory_used_kb": get_memory_usage_kb(),
@@ -341,7 +321,6 @@ pub fn handle_debug_info_async<'a>(
 pub fn handle_memory_stats_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -365,7 +344,6 @@ pub fn handle_memory_stats_async<'a>(
 pub fn handle_thread_status_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -389,7 +367,6 @@ pub fn handle_thread_status_async<'a>(
 pub fn handle_connection_status_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -414,7 +391,6 @@ pub fn handle_connection_status_async<'a>(
 pub fn handle_performance_metrics_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -442,7 +418,6 @@ pub fn handle_performance_metrics_async<'a>(
 pub fn handle_security_status_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -467,7 +442,6 @@ pub fn handle_security_status_async<'a>(
 pub fn handle_topology_status_async<'a>(
     command: &'a Command,
     _conn: &'a mut AsyncConnection,
-    topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -476,16 +450,13 @@ pub fn handle_topology_status_async<'a>(
             debug!("Handling async topology_status command: {}", command.id);
         }
 
-        let (services, caps, dims) = match topology.read() {
-            Ok(t) => (t.services.len(), t.capability_dimensions.len(), t.dimensions),
-            Err(_) => (0, 0, 8),
-        };
+        let services = 0usize;
+        let caps = 0usize;
 
         CommandResult::success(json!({
             "topology_status": {
                 "services_registered": services,
                 "capabilities_defined": caps,
-                "dimensions": dims,
                 "load_order_calculated": false,
                 "topology_health": "operational"
             },

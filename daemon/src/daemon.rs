@@ -31,7 +31,7 @@ pub fn request_shutdown() {
 use crate::integration::stream_discovery::{StreamDiscoveryManager, StreamDiscoveryConfig};
 
 use crate::{
-    SharedTopology, Result, GeometricError
+    Result, GeometricError
 };
 
 /// Command received from clients
@@ -116,7 +116,6 @@ impl std::fmt::Display for NodeType {
 /// Main daemon struct
 pub struct GNodeDaemon {
     pub client: Client,
-    pub topology_manager: SharedTopology,
 
     /// Format processor for custom message format support (requires "cms" feature)
     /// Uses Arc<Mutex<Option<Arc<T>>>> for interior mutability since run() takes &self
@@ -150,7 +149,6 @@ pub struct GNodeDaemon {
     pub stream_prefix: String,
     pub debug: bool,
     pub debug_level: LogLevel,
-    pub dimensions: usize,
     pub thread_config: Option<ThreadConfig>,
     pub stream_config: crate::config::GNodeSettings,
     /// Single-threaded mode: cooperative tick-based scheduling instead of spawning threads
@@ -234,10 +232,6 @@ static LOAD_METRICS_MANAGER_STORAGE: std::sync::OnceLock<Arc<crate::integration:
 /// — the writer lease, which a stream worker has to ask about on every batch.
 static NODE_ID_STORAGE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
-// Module-level static for shared topology storage
-// This allows the topology loaded from ValKey to be accessed statically by command handlers
-static TOPOLOGY_STORAGE: std::sync::OnceLock<Arc<RwLock<crate::GeometricTopology>>> = std::sync::OnceLock::new();
-
 // Module-level static for topology namespace (set once at daemon init)
 static TOPOLOGY_NAMESPACE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
@@ -254,37 +248,16 @@ impl GNodeDaemon {
     /// NOTE: site_id has been removed. The daemon is infrastructure, not a site.
     /// Sites are discovered dynamically via StreamDiscoveryManager.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with_config(redis_url: &str, dimensions: usize, topology_namespace: String, environment: String, node_id: String, node_type: String, stream_prefix: String, debug: bool, debug_level: &str, is_master: bool, stream_config: crate::config::GNodeSettings) -> Result<Self> {
+    pub fn new_with_config(redis_url: &str, topology_namespace: String, environment: String, node_id: String, node_type: String, stream_prefix: String, debug: bool, debug_level: &str, is_master: bool, stream_config: crate::config::GNodeSettings) -> Result<Self> {
         let node_type_enum = NodeType::from(node_type.as_str());
         GNodeDaemon::set_node_id_for_lease(&node_id);
-        info!("Initializing gNode daemon with Redis URL: {}, dimensions: {}, topology_namespace: {} → {{{}}}:gnode:topology, environment: {}, node_id: {}, node_type: {}, is_master: {}, stream_prefix: {}, debug_level: {}",
-            crate::config::redact_url(redis_url), dimensions, topology_namespace, topology_namespace, environment, node_id, node_type_enum, is_master, stream_prefix, debug_level);
+        info!("Initializing gNode daemon with Redis URL: {}, topology_namespace: {} → {{{}}}:gnode:topology, environment: {}, node_id: {}, node_type: {}, is_master: {}, stream_prefix: {}, debug_level: {}",
+            crate::config::redact_url(redis_url), topology_namespace, topology_namespace, environment, node_id, node_type_enum, is_master, stream_prefix, debug_level);
         info!("  Stream discovery: DYNAMIC (sites discovered from topology)");
 
         let client = Client::open(redis_url).map_err(GeometricError::Redis)?;
 
-        // Create topology manager with Redis storage using topology_namespace for the topology key
-        // This creates the shared topology at {topology_namespace}:gnode:topology (e.g., {geodineum}:gnode:topology)
-        let topology_manager = SharedTopology::with_storage(
-            dimensions,
-            redis_url,
-            &topology_namespace,  // Use topology_namespace instead of site_id for topology key
-            &stream_prefix
-        )?;
-
-        // STATELESS ARCHITECTURE:
-        // Capability dimensions are statically defined in integration/handlers/types.rs
-        // via SERVICE_DIMENSIONS lazy_static (23 dims, TOTAL_DIMENSIONS constant).
-        // No runtime registration needed for the canonical service tier; custom
-        // topologies created via topo_create / gNode-TOPO have their own dim counts
-        // declared at creation time and stored in ValKey.
-        // Schema source-of-truth: daemon/config/service_schema.yaml (30D = 25 discovery + 5 storage).
-
-        // Set the static topology reference so command handlers can access the same topology
-        // This is critical for proper registration/deregistration of services
-        Self::set_topology_ref(topology_manager.get_topology_ref());
         Self::set_topology_namespace(topology_namespace.clone());
-        info!("Static topology reference set for command handlers");
 
         // Initialize StreamDiscoveryManager for dynamic site discovery
         // Uses per-site environment configuration via GNODE_SERVICE_GET_ALL_STREAMS
@@ -300,7 +273,6 @@ impl GNodeDaemon {
 
         Ok(Self {
             client,
-            topology_manager,
 
             format_processor: Arc::new(std::sync::Mutex::new(None)), // Will be set during run() when format system initializes
 
@@ -317,7 +289,6 @@ impl GNodeDaemon {
             stream_prefix,
             debug,
             debug_level: LogLevel::from(debug_level),
-            dimensions,
             thread_config: None, // Default is None, will be set later
             stream_config,
             single_threaded: false, // Default is multi-threaded, can be set via set_single_threaded()
@@ -330,10 +301,10 @@ impl GNodeDaemon {
     /// Uses "geodineum" as default topology namespace
     /// NOTE: site_id has been removed - daemon discovers sites dynamically
     #[allow(clippy::too_many_arguments)]
-    pub fn new(redis_url: &str, dimensions: usize, environment: String, node_id: String, node_type: String, stream_prefix: String, debug: bool, debug_level: &str) -> Result<Self> {
+    pub fn new(redis_url: &str, environment: String, node_id: String, node_type: String, stream_prefix: String, debug: bool, debug_level: &str) -> Result<Self> {
         let is_master = node_id == "master";
         // Default topology namespace
-        Self::new_with_config(redis_url, dimensions, "geodineum".to_string(), environment, node_id, node_type, stream_prefix, debug, debug_level, is_master, crate::config::GNodeSettings::default())
+        Self::new_with_config(redis_url, "geodineum".to_string(), environment, node_id, node_type, stream_prefix, debug, debug_level, is_master, crate::config::GNodeSettings::default())
     }
     
     /// Set the thread configuration for worker threads
@@ -385,35 +356,6 @@ impl GNodeDaemon {
         }
     }
     
-    /// Get topology reference for static access
-    /// This is used by the integration modules
-    ///
-    /// IMPORTANT: This returns the topology loaded from ValKey storage if set_topology_ref()
-    /// was called during daemon initialization. Otherwise falls back to a default topology.
-    pub fn get_topology_ref() -> Arc<RwLock<crate::GeometricTopology>> {
-        // Try to get the topology from storage first (set during daemon init)
-        if let Some(topology) = TOPOLOGY_STORAGE.get() {
-            return Arc::clone(topology);
-        }
-
-        // Fallback: create a default topology (this should rarely happen)
-        // Using OnceLock for thread-safe lazy initialization
-        use crate::integration::thread_safety::ThreadSafeSingleton;
-        static FALLBACK_TOPOLOGY: ThreadSafeSingleton<crate::GeometricTopology> = ThreadSafeSingleton::new();
-
-        warn!("Using fallback topology - set_topology_ref() was not called during daemon initialization");
-        FALLBACK_TOPOLOGY.get_or_init(|| crate::GeometricTopology::new(64))
-    }
-
-    /// Set the topology reference for static access
-    /// This should be called during daemon initialization with the topology loaded from storage
-    /// Can only be called once - subsequent calls will be ignored
-    pub fn set_topology_ref(topology: Arc<RwLock<crate::GeometricTopology>>) {
-        if TOPOLOGY_STORAGE.set(topology).is_err() {
-            warn!("Topology reference already set, ignoring duplicate initialization");
-        }
-    }
-
     /// Set the topology namespace for static access (called once at daemon init)
     pub fn set_topology_namespace(ns: String) {
         if TOPOLOGY_NAMESPACE.set(ns).is_err() {
@@ -1385,7 +1327,6 @@ impl GNodeDaemon {
         {
             let compute_client = self.client.clone();
             let compute_node_id = self.node_id.clone();
-            let compute_topology = GNodeDaemon::get_topology_ref();
             // SHARED discovery - compute handler uses daemon's discovery, not its own
             let compute_discovery = self.stream_discovery.clone();
             let compute_debug = self.debug;
@@ -1409,7 +1350,6 @@ impl GNodeDaemon {
                     let handler = crate::compute_handler::ComputeHandler::new(
                         compute_client,
                         compute_node_id.clone(),
-                        compute_topology,
                         compute_discovery,  // SHARED discovery from daemon
                         compute_debug,
                     );
@@ -1442,7 +1382,6 @@ impl GNodeDaemon {
         // Commit 1.5.b (GN-D2.04): JoinHandle captured into worker_handles.
         {
             let asset_client = self.client.clone();
-            let asset_topology = GNodeDaemon::get_topology_ref();
             let asset_debug = self.debug;
             let rebuild_interval = 300; // 5 minutes
 
@@ -1460,7 +1399,6 @@ impl GNodeDaemon {
 
                     let builder = crate::asset_builder::AssetBuilder::new(
                         asset_client,
-                        asset_topology,
                         rebuild_interval,
                         asset_debug,
                     );

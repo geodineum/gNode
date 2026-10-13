@@ -4,8 +4,6 @@
 //! endpoints from gNode-BROKER's registry.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::RwLock;
 use std::pin::Pin;
 use std::future::Future;
 use redis::Connection;
@@ -14,7 +12,6 @@ use serde::Deserialize;
 use log::debug;
 use serde_json::{Value, json};
 use crate::daemon::Command;
-use crate::GeometricTopology;
 
 use super::types::{CommandResult, CommandHandlerFn, AsyncCommandHandlerFn, CommandDescriptor, Lane};
 
@@ -155,17 +152,17 @@ fn endpoint_registry(params: &Value, site_id: &str) -> String {
         .unwrap_or_else(|| format!("{{{}}}:gnode:endpoints", site_id))
 }
 
-pub fn handle_register_service(command: &Command, conn: &mut Connection, _topology: &Arc<RwLock<GeometricTopology>>, site_id: &str, debug_mode: bool) -> CommandResult {
+pub fn handle_register_service(command: &Command, conn: &mut Connection, site_id: &str, debug_mode: bool) -> CommandResult {
     if debug_mode { debug!("Handling registerService command: {}", command.id); }
     super::one_topology::register(conn, site_id, command.parameters.clone())
 }
 
-pub fn handle_deregister_service(command: &Command, conn: &mut Connection, _topology: &Arc<RwLock<GeometricTopology>>, site_id: &str, debug_mode: bool) -> CommandResult {
+pub fn handle_deregister_service(command: &Command, conn: &mut Connection, site_id: &str, debug_mode: bool) -> CommandResult {
     if debug_mode { debug!("Handling deregisterService command: {}", command.id); }
     super::one_topology::deregister(conn, site_id, command.parameters.clone())
 }
 
-pub fn handle_discover_with_endpoints(command: &Command, conn: &mut Connection, _topology: &Arc<RwLock<GeometricTopology>>, site_id: &str, debug_mode: bool) -> CommandResult {
+pub fn handle_discover_with_endpoints(command: &Command, conn: &mut Connection, site_id: &str, debug_mode: bool) -> CommandResult {
     if debug_mode { debug!("Handling discover_with_endpoints command: {}", command.id); }
     let ids = match super::one_topology::discover_ids(conn, site_id, &command.parameters) {
         Ok(ids) => ids,
@@ -180,21 +177,21 @@ pub fn handle_discover_with_endpoints(command: &Command, conn: &mut Connection, 
     endpoints_reply(services)
 }
 
-pub fn handle_register_service_async<'a>(command: &'a Command, conn: &'a mut AsyncConnection, _topology: &'a Arc<RwLock<GeometricTopology>>, site_id: &'a str, debug_mode: bool) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
+pub fn handle_register_service_async<'a>(command: &'a Command, conn: &'a mut AsyncConnection, site_id: &'a str, debug_mode: bool) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
         if debug_mode { debug!("Handling async registerService command: {}", command.id); }
         super::one_topology::register_async(conn, site_id, command.parameters.clone()).await
     })
 }
 
-pub fn handle_deregister_service_async<'a>(command: &'a Command, conn: &'a mut AsyncConnection, _topology: &'a Arc<RwLock<GeometricTopology>>, site_id: &'a str, debug_mode: bool) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
+pub fn handle_deregister_service_async<'a>(command: &'a Command, conn: &'a mut AsyncConnection, site_id: &'a str, debug_mode: bool) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
         if debug_mode { debug!("Handling async deregisterService command: {}", command.id); }
         super::one_topology::deregister_async(conn, site_id, command.parameters.clone()).await
     })
 }
 
-pub fn handle_discover_with_endpoints_async<'a>(command: &'a Command, conn: &'a mut AsyncConnection, _topology: &'a Arc<RwLock<GeometricTopology>>, site_id: &'a str, debug_mode: bool) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
+pub fn handle_discover_with_endpoints_async<'a>(command: &'a Command, conn: &'a mut AsyncConnection, site_id: &'a str, debug_mode: bool) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
     Box::pin(async move {
         if debug_mode { debug!("Handling async discover_with_endpoints command: {}", command.id); }
         let ids = match super::one_topology::discover_ids_async(conn, site_id, &command.parameters).await {

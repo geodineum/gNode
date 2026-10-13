@@ -31,8 +31,6 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use futures::StreamExt;
 
-use crate::GeometricTopology;
-use std::sync::RwLock;
 
 /// A content slot in a manifest bundle (face, cell, page, etc.)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,7 +86,6 @@ pub struct FaceData {
 pub struct AssetBuilder {
     redis_client: Client,
     #[allow(dead_code)]
-    topology: Arc<RwLock<GeometricTopology>>,
     rebuild_interval_secs: u64,
     #[allow(dead_code)]
     debug: bool,
@@ -97,13 +94,11 @@ pub struct AssetBuilder {
 impl AssetBuilder {
     pub fn new(
         redis_client: Client,
-        topology: Arc<RwLock<GeometricTopology>>,
         rebuild_interval_secs: u64,
         debug: bool,
     ) -> Self {
         Self {
             redis_client,
-            topology,
             rebuild_interval_secs,
             debug,
         }

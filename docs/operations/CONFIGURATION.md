@@ -333,7 +333,6 @@ Connection Options:
   --stream-prefix <PREFIX>     Stream naming prefix [default: gnode]
 
 Operational Options:
-  --dimensions <N>             Capability space dimensions [default: 23]
   --threads <auto|N>           Worker threads (auto or number) [default: auto]
   --max-threads <N>            Max auto threads [default: 16]
   --debug                      Enable debug mode

@@ -5,8 +5,6 @@
 // colour words, metadata, shape, derived slots, edges.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::sync::RwLock;
 use std::pin::Pin;
 use std::future::Future;
 use redis::Connection;
@@ -14,7 +12,6 @@ use redis::aio::MultiplexedConnection as AsyncConnection;
 use log::debug;
 use serde_json::{Value, json};
 use crate::daemon::Command;
-use crate::GeometricTopology;
 
 use super::types::{
     CommandResult, CommandHandlerFn, AsyncCommandHandlerFn, CommandDescriptor, Lane,
@@ -156,7 +153,6 @@ fn describe_from(entity_id: &str, raw: Option<String>, out: Vec<String>, inc: Ve
 pub fn handle_service_describe(
     command: &Command,
     conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool,
 ) -> CommandResult {
@@ -186,7 +182,6 @@ pub fn handle_service_describe(
 pub fn handle_service_describe_async<'a>(
     command: &'a Command,
     conn: &'a mut AsyncConnection,
-    _topology: &'a Arc<RwLock<GeometricTopology>>,
     _site_id: &'a str,
     debug_mode: bool,
 ) -> Pin<Box<dyn Future<Output = CommandResult> + Send + 'a>> {
@@ -222,7 +217,6 @@ pub fn handle_service_describe_async<'a>(
 pub fn handle_constellation_status(
     command: &Command,
     conn: &mut Connection,
-    _topology: &Arc<RwLock<GeometricTopology>>,
     _site_id: &str,
     debug_mode: bool,
 ) -> CommandResult {

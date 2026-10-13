@@ -12,7 +12,6 @@
 // 5. Ensures consistent behavior regardless of the source of commands
 
 use log::{debug, error, warn, info};
-use std::sync::{Arc, RwLock};
 use redis::{Connection, Commands};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -30,10 +29,7 @@ use crate::integration::command_handler::unknown_command_error;
 use crate::daemon::Response;
 use crate::integration::error_handlings::log_error;
 
-use crate::{
-    daemon::Command,
-    GeometricTopology
-};
+use crate::daemon::Command;
 
 use crate::integration::error_handlings::{IntegrationResult, stream_processing_error};
 use crate::utils::{get_field, get_field_opt};
@@ -173,7 +169,6 @@ impl FormatResponse {
   /// * `IntegrationResult<String>` - Message ID of the response or error
   pub fn process_command(
     connection: &mut Connection,
-    topology: &Arc<RwLock<GeometricTopology>>,
     command: &Command,
     response_stream: &str,
     site_id: &str,
@@ -213,7 +208,6 @@ impl FormatResponse {
     // Use the unified stream implementation from command_handler
     crate::integration::command_handler::process_command_unified_stream(
         connection,
-        topology,
         command,
         response_stream, // We reuse the response_stream as the unified stream key
         site_id,
@@ -896,7 +890,6 @@ pub fn parse_resp3_stream_response(resp3_str: &str) -> serde_json::Result<HashMa
 #[allow(clippy::too_many_arguments)]
 pub fn process_commands(
     conn: &mut Connection,
-    topology: &Arc<RwLock<GeometricTopology>>,
     stream_key: &str,
     group_name: &str,
     consumer_name: &str,
@@ -928,7 +921,6 @@ pub fn process_commands(
                     
                     let processed = process_command_batch(
                         conn,
-                        topology,
                         stream_key,
                         &pending_commands,
                         registry,
@@ -990,7 +982,6 @@ pub fn process_commands(
             // Process commands
             let processed = process_command_batch(
                 conn,
-                topology,
                 stream_key,
                 &commands,
                 registry,
@@ -1068,7 +1059,6 @@ fn publish_node_observation(conn: &mut Connection, command: &str, elapsed_ms: u6
 
 pub fn process_command_batch(
     conn: &mut Connection,
-    topology: &Arc<RwLock<GeometricTopology>>,
     stream_key: &str,
     commands: &[(String, OptimizedCommand)],
     registry: &CommandHandlerRegistry,
@@ -1178,7 +1168,7 @@ pub fn process_command_batch(
                                 info!("Found registered handler for batch sub-command: {}", sub_command.command);
                             }
                             // Call handler with proper arguments
-                            handler(&sub_command, conn, topology, site_id, debug_mode)
+                            handler(&sub_command, conn, site_id, debug_mode)
                         },
                         None => {
                             unknown_command_error(&sub_command.command)
@@ -1256,7 +1246,7 @@ pub fn process_command_batch(
                                             info!("Found registered handler for raw batch command: {}", sub_command.command);
                                         }
                                         // Call handler with proper arguments
-                                        handler(&sub_command, conn, topology, site_id, debug_mode)
+                                        handler(&sub_command, conn, site_id, debug_mode)
                                     },
                                     None => {
                                         unknown_command_error(&sub_command.command)
@@ -1360,14 +1350,12 @@ pub fn process_command_batch(
             {
                 let cmd_owned = command.clone();
                 let site_owned = site_id.to_string();
-                let topology_clone = topology.clone();
                 let env_owned = crate::integration::receipt::env_from_stream_key(stream_key)
                     .map(String::from);
                 let spawned = crate::integration::concurrent_lane::try_spawn_concurrent(
                     crate::integration::concurrent_lane::dispatch(
                         cmd_owned,
                         site_owned,
-                        topology_clone,
                         env_owned,
                         debug_mode,
                     ),
@@ -1389,7 +1377,7 @@ pub fn process_command_batch(
                     if debug_level >= LogLevel::Info {
                         info!("Found registered handler for command: {}", command.command);
                     }
-                    handler(&command, conn, topology, site_id, debug_mode)
+                    handler(&command, conn, site_id, debug_mode)
                 },
                 None => {
                     unknown_command_error(&command.command)

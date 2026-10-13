@@ -3,14 +3,12 @@
 // This module provides handling for pending messages in consumer groups,
 // ensuring that messages are not lost due to client failures.
 use std::time::Duration;
-use std::sync::{Arc, RwLock};
 use log::{warn, debug, trace, error};
 use redis::{Connection, RedisResult, Value};
 use crate::integration::stream_processing_error;
 use crate::integration::log_error;
 use crate::daemon::Command;
 use crate::integration::OptimizedCommand;
-use crate::GeometricTopology;
 use crate::integration::{
     IntegrationResult,
     command_handler::{CommandHandlerRegistry, unknown_command_error},
@@ -46,7 +44,6 @@ use crate::integration::consumer_groups::{
 #[allow(clippy::too_many_arguments)]
 pub fn process_pending_commands(
     conn: &mut Connection,
-    topology: &Arc<RwLock<GeometricTopology>>,
     stream_key: &str,
     group_name: &str,
     consumer_name: &str,
@@ -91,7 +88,7 @@ pub fn process_pending_commands(
         let result = match handler_opt {
             Some(handler) => {
                 // Call handler with proper arguments
-                handler(&command, conn, topology, site_id, debug_mode)
+                handler(&command, conn, site_id, debug_mode)
             },
             None => {
                 unknown_command_error(&command.command)

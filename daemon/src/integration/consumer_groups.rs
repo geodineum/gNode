@@ -35,7 +35,6 @@ use crate::integration::{
     connection_manager,
 };
 use crate::config::GNodeSettings;
-use crate::daemon::GNodeDaemon;
 
 
 /// How often a node looks for entries whose owner stopped.
@@ -854,8 +853,6 @@ pub fn create_unified_stream_worker(
                         }
                     }
                     
-                    // Get topology reference
-                    let topology = GNodeDaemon::get_topology_ref();
 
                     // Get load manager reference for health updates
                     // P2BF003 FIX: Always warn on fallback (invariant violation)
@@ -916,7 +913,6 @@ pub fn create_unified_stream_worker(
 
                                 match crate::integration::command_processor::process_command_batch(
                                     &mut conn,
-                                    &topology,
                                     &stream_key,
                                     &commands,
                                     registry,
@@ -1358,8 +1354,6 @@ pub fn create_environment_stream_worker_dynamic(
                         }
                     }
 
-                    // Get topology reference
-                    let topology = GNodeDaemon::get_topology_ref();
 
                     // Get load manager reference for health updates
                     // P2BF003 FIX: Always warn on fallback (invariant violation)
@@ -1575,7 +1569,7 @@ pub fn create_environment_stream_worker_dynamic(
                                                 // --- Phase 5A: Format translation (best-effort) ---
                                                 // Translation is opt-in: only runs if FormatProcessor Lua funcs are loaded
                                                 // and both source/target have declared format preferences.
-                                                let topology_key = crate::GeometricTopology::get_services_topology_key(stream_site_id);
+                                                let topology_key = constellation.key();
                                                 let params_str = forwarded.parameters_as_json_string();
                                                 let translation = crate::integration::relay::translate_for_relay(
                                                     &mut conn, &params_str, stream_site_id,
@@ -1715,7 +1709,6 @@ pub fn create_environment_stream_worker_dynamic(
                                 if !local_commands_final.is_empty() {
                                     match crate::integration::command_processor::process_command_batch(
                                         &mut conn,
-                                        &topology,
                                         current_unified_stream,
                                         &local_commands_final,
                                         registry,
