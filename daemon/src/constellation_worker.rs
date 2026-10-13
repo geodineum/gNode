@@ -155,13 +155,18 @@ impl ConstellationWorker {
             }
             for (id, sh) in matched {
                 let placement_shape = if sh == "2" { "4.1" } else { "4.2" };
+                // The declared capacity_weight rides in the entity's metadata (D13: 0 = standby).
+                let weight = services.iter().chain(components.iter())
+                    .find(|e| e["id"].as_str() == Some(id))
+                    .and_then(|e| e["m"]["capacity_weight"].as_u64())
+                    .unwrap_or(1) as u32;
                 let p = Placement {
                     of: id.to_string(),
                     on: hb.node.clone(),
                     env: if sh == "2" { "global".to_string() } else { env_word(&hb.env) },
                     heartbeat: hb.component.clone(),
                     heartbeat_env: Some(hb.env.clone()),
-                    weight: 1,
+                    weight,
                 };
                 let pid = p.id();
                 if let Some(prev) = existing.get(&pid) {
@@ -170,7 +175,10 @@ impl ConstellationWorker {
                         continue;
                     }
                 }
-                let d = Declared::new(&pid, placement_shape, &p.env);
+                let mut d = Declared::new(&pid, placement_shape, &p.env);
+                if placement_shape == "4.2" {
+                    d = d.fraction("capacity_weight", (weight as f64 / 100.0).min(1.0));
+                }
                 match encode(&self.schema, &d).and_then(|e| c.place(conn, &p, &e)) {
                     Ok(_) => report.placed.push(pid),
                     Err(e) => warn!("placement {} from heartbeat {} refused: {}", pid, key, e),

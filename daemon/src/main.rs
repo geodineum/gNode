@@ -440,6 +440,13 @@ enum Commands {
         #[clap(long)]
         environment: Option<String>,
 
+        /// The service's onboarding manifest (gnode_services.yaml). Its `gnode:` block
+        /// (shape, axes, heartbeat, holds, requires, fundamentality, capacity_weight,
+        /// constellation) is the declaration; `--profile` is the fallback when the
+        /// block is absent. Use with --tier service --site <id>.
+        #[clap(long)]
+        manifest: Option<PathBuf>,
+
         /// Dry run — show what would be registered without writing
         #[clap(long)]
         dry_run: bool,
@@ -670,7 +677,7 @@ fn main() -> Result<()> {
             info!("Checking daemon status...");
             check_daemon_status(&redis_url, &cli.environment, &cli.stream_prefix)?;
         },
-        Some(Commands::RegisterTools { tier, site, config, schema, profile, environment, dry_run }) => {
+        Some(Commands::RegisterTools { tier, site, config, schema, profile, environment, manifest, dry_run }) => {
             info!("Registering {} tier...", tier);
             gnode::tool_registration::run(gnode::tool_registration::RegisterToolsArgs {
                 site,
@@ -682,6 +689,7 @@ fn main() -> Result<()> {
                 tier,
                 profile,
                 environment,
+                manifest,
             })?;
         },
         Some(Commands::VerifyExtension { .. }) => {

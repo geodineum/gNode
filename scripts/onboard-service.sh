@@ -400,6 +400,14 @@ fi
 
 # Resolve environments
 TOPOLOGY_NS="${GNODE_TOPOLOGY_NAMESPACE:-geodineum}"
+# The manifest's gnode.constellation names where the service registers and whose
+# heartbeat family it writes (SPEC-ONE-TOPOLOGY §10); the environment is the fallback.
+if [[ -n "${RESOLVED_YAML:-}" && -f "${RESOLVED_YAML:-}" ]] && command -v yq >/dev/null 2>&1; then
+    _manifest_constellation=$(yq eval '.gnode.constellation // ""' "$RESOLVED_YAML" 2>/dev/null | tr -d '"')
+    if [[ -n "$_manifest_constellation" && "$_manifest_constellation" != "null" ]]; then
+        TOPOLOGY_NS="$_manifest_constellation"
+    fi
+fi
 if [[ -n "$ENVIRONMENT" && -n "$ENVIRONMENTS" ]]; then
     log_error "Cannot specify both --environment and --environments"
     exit 1
@@ -708,15 +716,19 @@ if [[ "$DRY_RUN" != "true" ]]; then
     DAEMON_BIN="${GNODE_DAEMON_BIN:-${PROJECT_ROOT}/daemon/target/release/gnode-daemon}"
     [[ -x "$DAEMON_BIN" ]] || DAEMON_BIN="$(command -v gnode-daemon 2>/dev/null || true)"
     DAEMON_CRED="${CREDENTIAL_DIR}/valkey_daemon.password"
-    # Register the SITE'S OWN single (C) entity from its capability profile
-    # (--profile, default web) — gMath computes the 30-dim vector. NOT a loop of
-    # framework components (those are global tool-tier; see register-tools --tier tool).
+    # Register the SITE'S OWN entity by name on the one topology: the manifest's
+    # gnode: block is the declaration (shape, axes, heartbeat, holds, requires,
+    # fundamentality, capacity_weight); the profile is the fallback when the block
+    # is absent. NOT a loop of framework components (those are shape 2; see
+    # register-tools --tier tool).
+    _manifest_arg=()
+    [[ -n "${RESOLVED_YAML:-}" && -f "${RESOLVED_YAML:-}" ]] && _manifest_arg=(--manifest "$RESOLVED_YAML")
     if [[ -z "$DAEMON_BIN" ]] || [[ ! -r "$DAEMON_CRED" ]]; then
         log_info "Daemon binary/credential unavailable — service registers on the next daemon scan (~120s) or restart"
     elif VALKEY_USER=gnode_daemon GNODE_REDIS_AUTH_FILE="$DAEMON_CRED" \
-            "$DAEMON_BIN" register-tools --tier service --site "$SITE_ID" --profile "$PROFILE" \
+            "$DAEMON_BIN" register-tools --tier service --site "$SITE_ID" --profile "$PROFILE" "${_manifest_arg[@]}" \
             ${PRIMARY_ENV:+--environment "$PRIMARY_ENV"} >/dev/null 2>&1; then
-        log_success "Registered '$SITE_ID' now — '$PROFILE'-profile capability vector (C) + snapshot (B)"
+        log_success "Registered '$SITE_ID' now on the one topology (${_manifest_arg:+manifest gnode: block}${_manifest_arg:-'$PROFILE' profile})"
         # Declare the INTENT alongside the entity. The entity is derived from
         # (intent x schema); recording the intent is what lets the daemon
         # re-derive it later instead of leaving it frozen at whatever schema

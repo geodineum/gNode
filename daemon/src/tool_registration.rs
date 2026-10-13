@@ -209,6 +209,8 @@ pub struct RegisterToolsArgs {
     /// into the environment axis of the profile entity, so a non-prod site's geometric placement
     /// matches its active_environment. None → profile/schema default (production).
     pub environment: Option<String>,
+    /// The onboarding manifest whose `gnode:` block declares the service (one topology).
+    pub manifest: Option<PathBuf>,
 }
 
 // ============================================================================
@@ -1004,7 +1006,7 @@ pub fn run(args: RegisterToolsArgs) -> Result<()> {
     match args.tier.as_str() {
         "tool" => run_tool_tier(&args),
         "service" => {
-            if args.profile.is_some() {
+            if args.profile.is_some() || args.manifest.is_some() {
                 run_service_profile(&args)
             } else {
                 run_service_tier(args)
@@ -1150,10 +1152,18 @@ fn run_service_profile(args: &RegisterToolsArgs) -> Result<()> {
               env, env_dim.map(|d| d.index as i64).unwrap_or(-1), site);
     }
 
-    // One topology: the profile names a shape (web → site, headless → app, the rest →
-    // daemon) and its words register by name; the daemon codes.
+    // One topology: the manifest's `gnode:` block is the declaration; without it the
+    // profile names a shape (web → site, headless → app, the rest → daemon) and its
+    // words register by name. The daemon codes either way.
     if crate::constellation::one_topology_enabled() {
-        let p = crate::integration::handlers::one_topology::profile_params(site, profile, &caps, args.environment.as_deref());
+        let from_manifest = match &args.manifest {
+            Some(path) => crate::integration::handlers::one_topology::manifest_params(site, path, args.environment.as_deref())?,
+            None => None,
+        };
+        let p = match from_manifest {
+            Some(p) => { info!("Declaration from the manifest's gnode: block"); p }
+            None => crate::integration::handlers::one_topology::profile_params(site, profile, &caps, args.environment.as_deref()),
+        };
         info!("Registering '{}' by name as shape {} from the '{}' profile", site, p["shape"], profile);
         if args.dry_run {
             info!("Dry run — would register {}", p);
@@ -1583,6 +1593,7 @@ mod preflight_tests {
             dry_run: dry, redis_url: url.to_string(),
             topology_namespace: "geodineum".into(), tier: "tool".into(),
             profile: None, environment: None,
+            manifest: None,
         }
     }
 

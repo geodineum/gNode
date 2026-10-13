@@ -106,6 +106,10 @@ pub fn plan_register(schema: &TopologySchema, p: &RegisterParams) -> Result<Regi
     if let Some(hb) = &p.heartbeat {
         meta["heartbeat"] = json!(hb);
     }
+    if p.capacity_weight != 1 {
+        // The registrar reads it when it places this service from a heartbeat (D13: 0 = standby).
+        meta["capacity_weight"] = json!(p.capacity_weight);
+    }
     d = d.meta(meta);
     for (name, v) in &p.axes {
         let value = match v {
@@ -645,6 +649,40 @@ pub fn component_params(comp: &crate::tool_registration::ToolServiceDef) -> Valu
     p
 }
 
+/// The manifest's `gnode:` block (SPEC-ONE-TOPOLOGY §10) → `register_service` parameters.
+/// `Ok(None)` when the manifest has no block (the caller falls back to the profile).
+/// The top-level `environment:` is the entity's environment unless overridden.
+pub fn manifest_params(site: &str, path: &std::path::Path, environment: Option<&str>) -> crate::Result<Option<Value>> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| crate::GeometricError::Other(format!("cannot read manifest {:?}: {}", path, e)))?;
+    let doc: serde_yaml::Value = serde_yaml::from_str(&text)
+        .map_err(|e| crate::GeometricError::Other(format!("manifest {:?} is not YAML: {}", path, e)))?;
+    let Some(block) = doc.get("gnode") else { return Ok(None) };
+    let block: serde_json::Value = serde_json::to_value(block)
+        .map_err(|e| crate::GeometricError::Other(format!("manifest {:?} gnode block: {}", path, e)))?;
+    let env = environment.map(str::to_string)
+        .or_else(|| doc.get("environment").and_then(|v| v.as_str()).map(str::to_string))
+        .unwrap_or_else(|| "production".to_string());
+    let mut axes = block.get("axes").cloned().unwrap_or_else(|| json!({}));
+    if !axes.is_object() { return Err(crate::GeometricError::Other(format!("manifest {:?}: gnode.axes must be a map", path))); }
+    if let Some(f) = block.get("fundamentality") {
+        axes["fundamentality"] = f.clone();
+    }
+    let mut p = json!({
+        "id": site,
+        "shape": block.get("shape").and_then(|v| v.as_str()).unwrap_or("daemon"),
+        "environment": env,
+        "axes": axes,
+        "metadata": { "manifest": path.to_string_lossy(), "type": doc.get("profile").and_then(|v| v.as_str()).unwrap_or("service") },
+    });
+    for key in ["heartbeat", "holds", "requires", "peers", "capacity_weight", "constellation"] {
+        if let Some(v) = block.get(key) {
+            if !v.is_null() { p[key] = v.clone(); }
+        }
+    }
+    Ok(Some(p))
+}
+
 /// A registration profile (`service_schema.yaml` `profiles:`) → the site's declaration by
 /// name: web is a site (3.1), headless an app (3.2), service / system / component a daemon
 /// (3.3). The environment is a header slot, never an axis word.
@@ -726,5 +764,34 @@ mod profile_tests {
         assert_eq!(p["axes"]["domain"], json!(["framework", "presentation"]));
         assert_eq!(p["axes"]["contract_version"], "v2");
         assert_eq!(p["requires"], json!(["internal"]));
+    }
+}
+
+#[cfg(test)]
+mod manifest_tests {
+    use super::*;
+
+    #[test]
+    fn the_gnode_block_is_the_declaration_and_its_absence_means_none() {
+        let dir = std::env::temp_dir().join(format!("gnode-manifest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let with = dir.join("with.yaml");
+        std::fs::write(&with, "profile: service\nenvironment: staging\ngnode:\n  constellation: geodineum\n  shape: daemon\n  heartbeat: gflow\n  holds: [internal]\n  requires: []\n  fundamentality: 0.4\n  capacity_weight: 2\n  axes:\n    protocol: [gnode_stream]\n    domain: [workflow]\n    implementation_language: javascript\n").unwrap();
+        let p = manifest_params("gflow", &with, None).unwrap().unwrap();
+        assert_eq!(p["shape"], "daemon");
+        assert_eq!(p["environment"], "staging");
+        assert_eq!(p["heartbeat"], "gflow");
+        assert_eq!(p["holds"], json!(["internal"]));
+        assert_eq!(p["capacity_weight"], 2);
+        assert_eq!(p["constellation"], "geodineum");
+        assert_eq!(p["axes"]["fundamentality"], 0.4);
+        assert_eq!(p["axes"]["domain"], json!(["workflow"]));
+        assert_eq!(p["metadata"]["type"], "service");
+        let p = manifest_params("gflow", &with, Some("production")).unwrap().unwrap();
+        assert_eq!(p["environment"], "production", "the flag overrides the manifest");
+        let without = dir.join("without.yaml");
+        std::fs::write(&without, "profile: web\nenvironment: production\nservices: []\n").unwrap();
+        assert!(manifest_params("x", &without, None).unwrap().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
