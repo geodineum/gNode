@@ -1498,28 +1498,8 @@ impl GNodeDaemon {
                                                 // Route by message type
                                                 match msg.message_type.as_str() {
                                                     "topology_update" => {
-                                                        info!("Received topology update broadcast - refreshing topology from ValKey");
-                                                        // Refresh topology from ValKey using the shared topology namespace
-                                                        let topology_key = format!("{{{}}}:{}:topology", topology_namespace_bc, stream_prefix_bc);
-                                                        if let Ok(Some(json_str)) = redis::cmd("GET").arg(&topology_key).query::<Option<String>>(&mut conn) {
-                                                            if let Ok(mut new_topology) = crate::GeometricTopology::from_json(&json_str) {
-                                                                // Rebuild spatial hash if needed
-                                                                if new_topology.spatial_hash.is_none() ||
-                                                                   new_topology.spatial_hash.as_ref().map(|h| h.buckets.is_empty()).unwrap_or(true) {
-                                                                    new_topology.rebuild_spatial_hash();
-                                                                }
-                                                                let service_count = new_topology.services.len();
-                                                                // Update in-memory topology
-                                                                let topology_ref = GNodeDaemon::get_topology_ref();
-                                                                let update_result = topology_ref.write().map(|mut t| {
-                                                                    *t = new_topology;
-                                                                });
-                                                                drop(update_result);
-                                                                info!("Topology refreshed successfully ({} services)", service_count);
-                                                            } else {
-                                                                warn!("Failed to parse topology JSON from ValKey");
-                                                            }
-                                                        }
+                                                        // The in-memory engine is gone (WP3e K12); the one topology is read from ValKey on demand.
+                                                        info!("Topology update broadcast received; nothing to refresh in memory");
                                                     },
                                                     "service_registered" => {
                                                         if let Some(service_id) = msg.fields.get("service_id") {
