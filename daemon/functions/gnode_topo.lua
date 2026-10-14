@@ -21,8 +21,8 @@
 -- This follows the same pattern as health stream metrics (si, l, cpu, etc.)
 --
 -- TOPOLOGY METADATA:
---   tk  = topology_key      # Full key like "{site_id}:{name}"
---   si  = site_id           # Site identifier for isolation
+--   tk  = topology_key      # Full key like "{c}:gnode:topo:<name>"
+--   si  = constellation hash tag
 --   n   = name              # Human-readable topology name
 --   ct  = constraint_type   # none|z_monotonic|bidirectional|custom
 --   tt  = topology_type     # custom|dependency|spatial|etc
@@ -87,8 +87,8 @@
 --
 -- ============================================================================
 -- VALKEY SCHEMA:
---   {site_id}:gnode:topo:registry              → Hash: topology_id → JSON metadata
---   {site_id}:gnode:topo:by_type:{type}        → Set: topology_ids of this type
+--   {c}:gnode:topo:registry              → Hash: topology_id → JSON metadata
+--   {c}:gnode:topo:by_type:{type}        → Set: topology_ids of this type
 --   {topo_key}:entities                      → Hash: entity_id → JSON entity data
 --   {topo_key}:voxel:{bucket_key}            → Set: entity_ids in this voxel
 --   {topo_key}:z_order                       → Sorted Set: entity_id with z_score
@@ -168,19 +168,39 @@ local function get_timestamp()
     return tonumber(time_result[1]) or 0
 end
 
---- Build registry key for site
--- @param site_id string Site identifier
+--- Validate and return the registry (index) key
+-- @param index_key string Registry key {c}:gnode:topo:registry
 -- @return string Registry key
-local function build_registry_key(site_id)
-    return site_id .. REGISTRY_SUFFIX
+local function build_registry_key(index_key)
+    if type(index_key) == 'string' and string.sub(index_key, -#REGISTRY_SUFFIX) == REGISTRY_SUFFIX
+        and string.match(index_key, '^%b{}') then
+        return index_key
+    end
+    return nil
+end
+
+local function index_tag(index_key)
+    return string.match(index_key, '^(%b{})')
+end
+
+local function valid_topology_key(index_key, topology_key)
+    local base = string.sub(index_key, 1, -#REGISTRY_SUFFIX - 1) .. ':gnode:topo:'
+    if string.sub(topology_key, 1, #base) ~= base then
+        return false
+    end
+    local name = string.sub(topology_key, #base + 1)
+    if not string.match(name, '^[a-z0-9][a-z0-9_-]*$') then
+        return false
+    end
+    return name ~= 'registry' and name ~= 'catalog' and name ~= 'by_type'
 end
 
 --- Build type index key for site
--- @param site_id string Site identifier
+-- @param index_key string Registry key {c}:gnode:topo:registry
 -- @param topo_type string Topology type
 -- @return string Type index key
-local function build_type_index_key(site_id, topo_type)
-    return site_id .. TYPE_INDEX_PREFIX .. topo_type
+local function build_type_index_key(index_key, topo_type)
+    return string.sub(index_key, 1, -#REGISTRY_SUFFIX - 1) .. TYPE_INDEX_PREFIX .. topo_type
 end
 
 -- ============================================================================
@@ -191,20 +211,30 @@ end
 server.register_function{
     function_name = 'GNODE_TOPO_CREATE',
     callback = function(keys, args)
-        -- keys[1] = site_id (for keyspace isolation)
-        -- args[1] = topology_key (full key like "{site_id}:{name}")
+        -- keys[1] = index key "{c}:gnode:topo:registry"
+        -- args[1] = topology_key "{c}:gnode:topo:<name>"
         -- args[2] = definition_json (name, constraint_type, axis_semantics, etc)
 
         if #keys < 1 then
-            return server.error_reply("Missing site_id key")
+            return server.error_reply("Missing registry key")
+        end
+        if not build_registry_key(keys[1]) then
+            return server.error_reply("keys[1] must be {c}:gnode:topo:registry")
         end
         if #args < 2 then
             return server.error_reply("Missing topology_key or definition_json")
         end
 
-        local site_id = keys[1]
+        local site_id = index_tag(keys[1])
         local topology_key = args[1]
         local definition_json = args[2]
+
+        if index_tag(topology_key) ~= site_id then
+            return server.error_reply("Topology key hash tag differs from registry key: " .. topology_key)
+        end
+        if not valid_topology_key(keys[1], topology_key) then
+            return server.error_reply("Topology key must be {c}:gnode:topo:<name>: " .. topology_key)
+        end
 
         -- Decode and validate definition
         local def, decode_err = safe_json_decode(definition_json)
@@ -224,7 +254,7 @@ server.register_function{
         end
 
         -- Check if topology already exists
-        local registry_key = build_registry_key(site_id)
+        local registry_key = keys[1]
         local existing = server.call('HEXISTS', registry_key, topology_key)
         if existing == 1 then
             return server.error_reply("Topology already exists: " .. topology_key)
@@ -262,7 +292,7 @@ server.register_function{
 
         -- Add to type index
         if metadata.tt then
-            local type_key = build_type_index_key(site_id, metadata.tt)
+            local type_key = build_type_index_key(keys[1], metadata.tt)
             server.call('SADD', type_key, topology_key)
         end
 
@@ -871,26 +901,25 @@ server.register_function{
 server.register_function{
     function_name = 'GNODE_TOPO_LIST',
     callback = function(keys, args)
-        -- keys[1] = site_id
+        -- keys[1] = index key "{c}:gnode:topo:registry"
         -- args[1] = topology_type (optional, filter by type)
 
-        if #keys < 1 then
-            return server.error_reply("Missing site_id")
+        if #keys < 1 or not build_registry_key(keys[1]) then
+            return server.error_reply("keys[1] must be {c}:gnode:topo:registry")
         end
 
-        local site_id = keys[1]
+        local site_id = index_tag(keys[1])
         local filter_type = args[1]
 
         local topology_keys
 
         if filter_type and filter_type ~= "" then
             -- Get from type index
-            local type_key = build_type_index_key(site_id, filter_type)
+            local type_key = build_type_index_key(keys[1], filter_type)
             topology_keys = server.call('SMEMBERS', type_key) or {}
         else
             -- Get all from registry
-            local registry_key = build_registry_key(site_id)
-            topology_keys = server.call('HKEYS', registry_key) or {}
+            topology_keys = server.call('HKEYS', keys[1]) or {}
         end
 
         -- Fetch summary for each
@@ -939,20 +968,23 @@ server.register_function{
 server.register_function{
     function_name = 'GNODE_TOPO_DELETE',
     callback = function(keys, args)
-        -- keys[1] = site_id
+        -- keys[1] = index key "{c}:gnode:topo:registry"
         -- args[1] = topology_key
         -- args[2] = "CONFIRM" (required safety flag)
 
-        if #keys < 1 then
-            return server.error_reply("Missing site_id")
+        if #keys < 1 or not build_registry_key(keys[1]) then
+            return server.error_reply("keys[1] must be {c}:gnode:topo:registry")
         end
         if #args < 2 then
             return server.error_reply("Missing topology_key or CONFIRM flag")
         end
 
-        local site_id = keys[1]
         local topology_key = args[1]
         local confirm = args[2]
+
+        if index_tag(topology_key) ~= index_tag(keys[1]) or not valid_topology_key(keys[1], topology_key) then
+            return server.error_reply("Topology key must be {c}:gnode:topo:<name> under the registry key's tag: " .. topology_key)
+        end
 
         if confirm ~= "CONFIRM" then
             return server.error_reply("Must provide 'CONFIRM' flag to delete topology")
@@ -993,12 +1025,11 @@ server.register_function{
         server.call('DEL', topology_key .. ':meta')
 
         -- Remove from registry
-        local registry_key = build_registry_key(site_id)
-        server.call('HDEL', registry_key, topology_key)
+        server.call('HDEL', keys[1], topology_key)
 
         -- Remove from type index
         if meta and meta.tt then  -- tt = topology_type
-            local type_key = build_type_index_key(site_id, meta.tt)
+            local type_key = build_type_index_key(keys[1], meta.tt)
             server.call('SREM', type_key, topology_key)
         end
 

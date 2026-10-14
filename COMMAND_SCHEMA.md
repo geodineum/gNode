@@ -349,7 +349,7 @@ The one topology of a constellation (`{c}:gnode:constellation`, SPEC-ONE-TOPOLOG
 
 | Function | Keys | Args | Returns | Description |
 |----------|------|------|---------|-------------|
-| `GNODE_TOPO_CREATE` | site_id | topology_key, definition_json | JSON topology metadata | Create a named topology |
+| `GNODE_TOPO_CREATE` | `{c}:gnode:topo:registry` | topology_key, definition_json | JSON topology metadata | Create a named topology |
 | `GNODE_TOPO_SET_DERIVED` | tk [, lease_key] | entity_id, updates_json `{"<slot>": {"pd": float, "pr": "<raw>"}}`, "", "", ts?, "", node_id | `{ok}` | Zone-B (derived) write under the writer lease; indexes and the ring follow (the arguments kept for position: z_score, snapshot_key, hashed_width? | `{ok, eid, n, ds, zs}` | Write measured coordinates into a stored entity without moving it: `bk` and voxel membership are untouched, `m.ds` records the measurement time, and the `z_order` set is updated when `z_score` is given. `updates_json` is `{"<index>": {"pd": <float>, "pr": "<raw>"}}` — both scales come from the daemon, Lua has no Q64.64. An index below `hashed_width` is refused: those coordinates are the bucket key |
 | `GNODE_TOPO_ADD_EDGE` | topology_key | from_id, to_id, edge_json | `{ok, f, t}` | Add directed edge |
 | `GNODE_TOPO_REMOVE_EDGE` | topology_key | from_id, to_id | `{ok}` | Remove directed edge |
@@ -358,8 +358,8 @@ The one topology of a constellation (`{c}:gnode:constellation`, SPEC-ONE-TOPOLOG
 | `GNODE_TOPO_GET_EDGE` | topology_key | from_id, to_id | `{f, t, zd, m}` | Get specific edge |
 | `GNODE_TOPO_GET_EDGES` | topology_key | entity_id, direction | `{out, in}` | Get all edges for entity |
 | `GNODE_TOPO_STATS` | topology_key | — | `{entity_count, edge_count, ...}` | Topology statistics |
-| `GNODE_TOPO_LIST` | site_id | filter_type? | JSON array of topology metadata | List site topologies |
-| `GNODE_TOPO_DELETE` | site_id | topology_key, "CONFIRM" | `{ok, deleted_keys}` | Delete topology (safety flag required) |
+| `GNODE_TOPO_LIST` | `{c}:gnode:topo:registry` | filter_type? | JSON array of topology metadata | List the constellation's named topologies |
+| `GNODE_TOPO_DELETE` | `{c}:gnode:topo:registry` | topology_key, "CONFIRM" | `{ok, deleted_keys}` | Delete topology (safety flag required) |
 | `GNODE_TOPO_EXISTS` | topology_key | — | `{exists: bool}` | Check topology existence |
 
 ---

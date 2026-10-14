@@ -31,7 +31,7 @@ CONSUMES ← ValKey 7.2+ (FUNCTION LOAD, RESP3, consumer groups, streams) | Lua 
 - Capability discovery: geometricDiscover({axis: value},limit) → rank the site's (C) entities by Q64.64 distance over the NAMED axes only (unnamed axes don't count); voxel cell lookup only when all discovery axes are named.
 - Notification queue → `{site}:gnode:comms:{env}` (gNode ignores, COMMS consumes/dispatches/ACK-after-SQLite).
 - Inter-service relay via `_rt` → resolve entity→site → policy → forward.
-- Named topologies: `{c}:gnode:topo:<name>` on gnode_topo.lua; creation is a Pro (gNode-TOPO) command (D16). The JSON-document engine and topo_create/topo_register 3-D model retired 2026-10-11.
+- Named topologies: `{c}:gnode:topo:<name>` on gnode_topo.lua; creation is a Pro (gNode-TOPO) command (D16); `GNODE_TOPO_CREATE/LIST/DELETE` take keys[1]=`{c}:gnode:topo:registry` and refuse a topology key of another hash tag or not `{c}:gnode:topo:<name>`. The JSON-document engine and topo_create/topo_register 3-D model retired 2026-10-11.
 - Config distribution: config_set ↔ GNODE_NODE_FETCH_CONFIG via `{node_type}:gnode:config:*`.
 - Direct hot-pair channels: channel_open → dedicated stream, daemon steps out of data path.
 - Health: GNODE_NODE_HEARTBEAT → GNODE_NODE_AGGREGATE_METRICS → health/topology_heatmap.
