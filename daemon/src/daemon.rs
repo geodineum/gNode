@@ -1585,47 +1585,7 @@ impl GNodeDaemon {
             registry.register(health_worker);
             info!("  ✓ Registered health cleanup worker");
 
-            // Register the load sampler. It self-gates on the writer lease and on
-            // GNODE_SAMPLER (off | shadow | write; shadow by default), so
-            // registering it is not the same as letting it write.
-            let sampler_worker = crate::worker::LoadSamplerWorker::new(
-                Arc::clone(&self.stream_discovery),
-                self.topology_namespace.clone(),
-                self.node_id.clone(),
-            );
-            let sampler_mode = crate::worker::SamplerMode::from_env();
-            registry.register(sampler_worker);
-            info!("  ✓ Registered load sampler worker (mode: {:?})", sampler_mode);
-
-            // The one-topology constellation tick (SPEC §5): self-declaration, placements from
-            // heartbeats, health from placements, one lease per constellation. Opt-in on this
-            // branch (GNODE_ONE_TOPOLOGY=on) until WP3e makes it the only path.
-            if std::env::var("GNODE_ONE_TOPOLOGY").map(|v| v == "on").unwrap_or(false) {
-                match crate::topology_schema::TopologySchema::locate()
-                    .map(|tp| crate::topology_schema::TopologySchema::load(&tp))
-                {
-                    Some(Ok(schema)) => {
-                        let node_config = crate::node_config::get_cached_node_config(&self.node_type.to_string());
-                        let facts = crate::constellation_worker::SelfFacts {
-                            node_id: self.node_id.clone(),
-                            hardware: crate::constellation::NodeHardware {
-                                is_master: self.is_master,
-                                node_type: self.node_type.to_string(),
-                                cores: node_config.resources.cores,
-                                max_memory_mb: node_config.resources.max_memory_mb,
-                                axes: node_config.capabilities.axes.clone(),
-                            },
-                            version: env!("CARGO_PKG_VERSION").to_string(),
-                        };
-                        let constellations = crate::constellation::served();
-                        info!("  ✓ Registered constellation worker for {:?}", constellations.iter().map(|c| c.name.clone()).collect::<Vec<_>>());
-                        registry.register(crate::constellation_worker::ConstellationWorker::new(constellations, schema, facts));
-                    }
-                    Some(Err(e)) => error!("topology_schema.yaml does not compile; constellation worker not started: {}", e),
-                    None => warn!("No topology_schema.yaml found; constellation worker not started"),
-                }
-            }
-
+            self.register_topology_workers(&mut registry);
             // Register discovery refresh worker
             let discovery_worker = crate::worker::DiscoveryRefreshWorker::new(
                 Arc::clone(&self.stream_discovery),
@@ -1646,6 +1606,7 @@ impl GNodeDaemon {
             // ========================================
             // Keep the main thread alive with periodic saves and heartbeat
             // Check shutdown flag and exit gracefully
+            self.spawn_topology_workers();
             info!("gNode daemon main loop started");
             // Reconciliation cadence, independent of the service-discovery scan.
             let mut _last_reconcile: Option<std::time::Instant> = None;
@@ -1801,6 +1762,77 @@ impl GNodeDaemon {
 
     /// Shutdown all worker threads gracefully
     /// Called when shutdown is requested to join all spawned worker threads
+    /// The load sampler and the constellation tick (self-declaration, placements, health).
+    /// Both modes run them: single-threaded inside its cooperative registry, multi-threaded on
+    /// their own thread.
+    fn register_topology_workers(&self, registry: &mut crate::worker::WorkerRegistry) {
+        // Register the load sampler. It self-gates on the writer lease and on
+        // GNODE_SAMPLER (off | shadow | write; shadow by default), so
+        // registering it is not the same as letting it write.
+        let sampler_worker = crate::worker::LoadSamplerWorker::new(
+            Arc::clone(&self.stream_discovery),
+            self.topology_namespace.clone(),
+            self.node_id.clone(),
+        );
+        let sampler_mode = crate::worker::SamplerMode::from_env();
+        registry.register(sampler_worker);
+        info!("  ✓ Registered load sampler worker (mode: {:?})", sampler_mode);
+
+        // The one-topology constellation tick (SPEC §5): self-declaration, placements from
+        // heartbeats, health from placements, one lease per constellation.
+        match crate::topology_schema::TopologySchema::locate()
+            .map(|tp| crate::topology_schema::TopologySchema::load(&tp))
+        {
+            Some(Ok(schema)) => {
+                let node_config = crate::node_config::get_cached_node_config(&self.node_type.to_string());
+                let facts = crate::constellation_worker::SelfFacts {
+                    node_id: self.node_id.clone(),
+                    hardware: crate::constellation::NodeHardware {
+                        is_master: self.is_master,
+                        node_type: self.node_type.to_string(),
+                        cores: node_config.resources.cores,
+                        max_memory_mb: node_config.resources.max_memory_mb,
+                        axes: node_config.capabilities.axes.clone(),
+                    },
+                    version: env!("CARGO_PKG_VERSION").to_string(),
+                };
+                let constellations = crate::constellation::served();
+                info!("  ✓ Registered constellation worker for {:?}", constellations.iter().map(|c| c.name.clone()).collect::<Vec<_>>());
+                registry.register(crate::constellation_worker::ConstellationWorker::new(constellations, schema, facts));
+            }
+            Some(Err(e)) => error!("topology_schema.yaml does not compile; constellation worker not started: {}", e),
+            None => error!("No topology_schema.yaml found (GNODE_TOPOLOGY_SCHEMA); constellation worker not started"),
+        }
+    }
+
+    fn spawn_topology_workers(&self) {
+        let mut registry = crate::worker::WorkerRegistry::new();
+        self.register_topology_workers(&mut registry);
+        if registry.worker_count() == 0 {
+            return;
+        }
+        let spawned = thread::Builder::new().name("gnode-topology".to_string()).spawn(move || {
+            if let Err(e) = registry.init_all() {
+                error!("Topology workers failed to initialize: {}", e);
+                return;
+            }
+            while !is_shutdown_requested() {
+                registry.tick_all();
+                thread::sleep(Duration::from_secs(1));
+            }
+            registry.shutdown_all();
+        });
+        match spawned {
+            Ok(handle) => {
+                if let Ok(mut handles) = self.worker_handles.lock() {
+                    handles.push(handle);
+                }
+                info!("  ✓ Topology workers running on their own thread");
+            }
+            Err(e) => error!("Could not spawn the topology worker thread: {}", e),
+        }
+    }
+
     fn shutdown_workers(&self) {
         let handles = match self.worker_handles.lock() {
             Ok(mut guard) => std::mem::take(&mut *guard),
