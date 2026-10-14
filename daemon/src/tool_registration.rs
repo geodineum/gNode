@@ -115,6 +115,8 @@ pub struct RegisterToolsArgs {
     pub node_role: Option<String>,
     /// `--tier node`: the node's specialization word, when any.
     pub specialization: Option<String>,
+    /// `--tier service`: the hosting node; registration places the entity there.
+    pub on: Option<String>,
 }
 
 // ============================================================================
@@ -161,6 +163,12 @@ fn connect(args: &RegisterToolsArgs) -> Result<redis::Connection> {
     client.get_connection().map_err(GeometricError::Redis)
 }
 
+/// The manifest's own `profile:` word, used when it carries no `gnode:` block.
+fn manifest_profile(path: &std::path::Path) -> Option<String> {
+    let doc: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(path).ok()?).ok()?;
+    doc.get("profile").and_then(|v| v.as_str()).map(str::to_string)
+}
+
 /// One site or service, by name: the manifest's `gnode:` block, else the named profile's
 /// words from the one schema (web → site, headless → app, the rest → daemon).
 fn run_service(args: &RegisterToolsArgs) -> Result<()> {
@@ -171,10 +179,11 @@ fn run_service(args: &RegisterToolsArgs) -> Result<()> {
         Some(path) => crate::integration::handlers::one_topology::manifest_params(site, path, args.environment.as_deref())?,
         None => None,
     };
-    let p = match from_manifest {
+    let mut p = match from_manifest {
         Some(p) => { info!("Declaration from the manifest's gnode: block"); p }
         None => {
-            let profile = args.profile.as_deref().unwrap_or("web");
+            let declared = args.manifest.as_ref().and_then(|m| manifest_profile(m));
+            let profile = args.profile.as_deref().or(declared.as_deref()).unwrap_or("web");
             let s = schema()?;
             let axes = s.profile(profile).ok_or_else(|| GeometricError::Other(format!(
                 "profile '{}' is not in topology_schema.yaml (available: {:?})", profile, s.profile_names()
@@ -182,6 +191,9 @@ fn run_service(args: &RegisterToolsArgs) -> Result<()> {
             crate::integration::handlers::one_topology::profile_params(site, profile, &axes, args.environment.as_deref())
         }
     };
+    if let Some(node) = args.on.as_deref().filter(|n| !n.is_empty()) {
+        p["on"] = serde_json::json!(node);
+    }
     info!("Registering '{}' by name as shape {} in {}", site, p["shape"], p["constellation"].as_str().unwrap_or(&args.topology_namespace));
     if args.dry_run {
         info!("Dry run — would register {}", p);
@@ -250,6 +262,18 @@ fn run_tool_tier(args: &RegisterToolsArgs) -> Result<()> {
 mod preflight_tests {
     use super::*;
 
+    #[test]
+    fn a_manifest_without_a_gnode_block_keeps_its_own_profile() {
+        let dir = std::env::temp_dir().join(format!("gnode-manifest-profile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let m = dir.join("gnode_services.yaml");
+        std::fs::write(&m, "profile: service\nservices: []\n").unwrap();
+        assert_eq!(manifest_profile(&m).as_deref(), Some("service"));
+        std::fs::write(&m, "services: []\n").unwrap();
+        assert_eq!(manifest_profile(&m), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn args(url: &str, dry: bool) -> RegisterToolsArgs {
         RegisterToolsArgs {
             site: None, config_path: None, schema_path: None,
@@ -259,6 +283,7 @@ mod preflight_tests {
             manifest: None,
             node_role: None,
             specialization: None,
+            on: None,
         }
     }
 

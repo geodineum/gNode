@@ -422,6 +422,10 @@ enum Commands {
         #[clap(long)]
         specialization: Option<String>,
 
+        /// --tier service: the node that hosts it, placed at registration (a site's health is its host daemon's heartbeat)
+        #[clap(long)]
+        on: Option<String>,
+
         /// Dry run — show what would be registered without writing
         #[clap(long)]
         dry_run: bool,
@@ -651,7 +655,7 @@ fn main() -> Result<()> {
             info!("Checking daemon status...");
             check_daemon_status(&redis_url, &cli.environment, &cli.stream_prefix)?;
         },
-        Some(Commands::RegisterTools { tier, site, config, schema, profile, environment, manifest, node_role, specialization, dry_run }) => {
+        Some(Commands::RegisterTools { tier, site, config, schema, profile, environment, manifest, node_role, specialization, on, dry_run }) => {
             info!("Registering {} tier...", tier);
             gnode::tool_registration::run(gnode::tool_registration::RegisterToolsArgs {
                 site,
@@ -666,6 +670,7 @@ fn main() -> Result<()> {
                 manifest,
                 node_role,
                 specialization,
+                on,
             })?;
         },
         Some(Commands::VerifyExtension { .. }) => {

@@ -124,7 +124,9 @@ pub fn plan_register(schema: &TopologySchema, p: &RegisterParams) -> Result<Regi
         Some(node) if sh.starts_with('3') => {
             let pl = Placement {
                 of: p.id.clone(), on: node.clone(), env: p.environment.clone(),
-                heartbeat: p.heartbeat.clone().unwrap_or_else(|| p.id.clone()), heartbeat_env: None, weight: p.capacity_weight,
+                heartbeat: if sh == "3.1" { "gnode-daemon".to_string() } else { p.heartbeat.clone().unwrap_or_else(|| p.id.clone()) },
+                heartbeat_env: if sh == "3.1" { Some("all".to_string()) } else { None },
+                weight: p.capacity_weight,
             };
             let pd = Declared::new(&pl.id(), "4.2", &p.environment).fraction("capacity_weight", (p.capacity_weight as f64 / 100.0).min(1.0));
             Some((pl, encode(schema, &pd).map_err(|e| e.to_string())?))
@@ -153,7 +155,8 @@ pub fn register_cmds(c: &Constellation, plan: &RegisterPlan) -> Vec<redis::Cmd> 
     ];
     if let Some((p, pe)) = &plan.placement {
         let w = p.weight.to_string();
-        cmds.push(fcall(&tk, "GNODE_TOPO_PLACE", &[&pe.id, &pe.shape, &p.of, &p.on, &p.env, &p.heartbeat, &w, &pe.record, &pe.ordered, &pe.colours, ""]));
+        let hbe = p.heartbeat_env.clone().unwrap_or_default();
+        cmds.push(fcall(&tk, "GNODE_TOPO_PLACE", &[&pe.id, &pe.shape, &p.of, &p.on, &p.env, &p.heartbeat, &w, &pe.record, &pe.ordered, &pe.colours, &hbe]));
     }
     if let Some((h, r, pe)) = &plan.labels {
         let (h, r, pe) = (serde_json::to_string(h).unwrap_or_default(), serde_json::to_string(r).unwrap_or_default(), serde_json::to_string(pe).unwrap_or_default());
@@ -359,6 +362,18 @@ mod tests {
         assert_eq!(cmds.len(), 4, "ensure, register, place, label");
         let record: Value = serde_json::from_str(&plan.entity.record).unwrap();
         assert_eq!(record["m"]["heartbeat"], "gflow");
+    }
+
+    #[test]
+    fn a_site_is_placed_on_its_host_and_reads_the_host_daemon_heartbeat() {
+        let s = schema();
+        let p: RegisterParams = serde_json::from_value(json!({ "id": "nierto_com", "shape": "site", "on": "aesir-solutions" })).unwrap();
+        let plan = plan_register(&s, &p).unwrap();
+        let (pl, _) = plan.placement.expect("a site with `on` is placed");
+        assert_eq!((pl.on.as_str(), pl.heartbeat.as_str(), pl.heartbeat_env.as_deref()), ("aesir-solutions", "gnode-daemon", Some("all")));
+        let p: RegisterParams = serde_json::from_value(json!({ "id": "gflow", "shape": "daemon", "on": "aesir-solutions" })).unwrap();
+        let (pl, _) = plan_register(&s, &p).unwrap().placement.unwrap();
+        assert_eq!((pl.heartbeat.as_str(), pl.heartbeat_env.as_deref()), ("gflow", None), "a daemon keeps its own heartbeat");
     }
 
     #[test]
