@@ -99,7 +99,6 @@ stream_prefix: "gnode"           // Stream naming prefix
 ### Operational Defaults
 
 ```rust
-dimensions: 23                   // Capability space dimensions (19 discovery + 4 storage-only)
 threads: "auto"                  // Worker thread configuration
 max_threads: 16                  // Maximum auto threads
 debug: false                     // Debug mode disabled
@@ -596,7 +595,7 @@ See [NODE_QUICKSTART.md](NODE_QUICKSTART.md) for detailed examples.
 ```
 daemon/config/
 ├── stream-config.yaml                 # Stream processor config (DTAP environments)
-├── service_schema.yaml                # service-tier (30D = 25 discovery + 5 storage) dimension name → coordinate mapping (canonical tier; legacy capability_schema.yaml/23D removed pre-launch)
+├── topology_schema.yaml               # the one topology: shapes, axes, vocabularies
 ├── lua-libraries.yaml                 # Lua library load list
 ├── gnode-daemon.service               # Systemd service template
 ├── valkey-gnode.conf                  # Production ValKey config
@@ -758,14 +757,6 @@ This uses exactly 8 worker threads.
 # Use all CPU cores (up to 32)
 --threads auto --max-threads 32
 ```
-
-### Capability Dimensions
-
-Default: 23 dimensions (19 discovery + 4 storage-only). This matches the
-Service-tier semantic topology (30D = 25 discovery + 5 storage) defined in `daemon/config/service_schema.yaml`. Other tiers: tool_schema.yaml (16D), constellation_schema.yaml (20D), galaxy_schema.yaml (20D).
-
-Changing this value is only needed for custom topology configurations
-outside the standard service discovery model.
 
 ### Circuit Breaker Tuning
 

@@ -12,7 +12,7 @@ Service A                      gNode Daemon                     Service B
     ├── XADD to own stream ────────►│                                │
     │   {cmd, params, _rt:"svc_b"}  │                                │
     │                               ├── resolve target               │
-    │                               ├── check relay policy           │
+    │                               ├── check reach (permission)     │
     │                               ├── detect source format         │
     │                               ├── look up target format pref   │
     │                               ├── translate params if needed   │
@@ -24,15 +24,15 @@ Service A                      gNode Daemon                     Service B
 ```
 
 1. Service A sends a command to its own unified stream with `_rt` (relay target)
-2. gNode resolves the target — by entity ID, site ID, or explicit stream key
-3. Policy check — is A allowed to talk to B? (first-match rule, default: allow)
+2. gNode resolves the target — by service ID (one pick over the service's ring of healthy placements), or explicit stream key
+3. Permission check — may A reach B? (`GNODE_TOPO_CAN_REACH`; refused unless every condition holds)
 4. Format translation — if A speaks `standard_json` and B expects `compact_json`, params are converted automatically
 5. gNode posts the translated command to B's unified stream with `_rr` pointing back to A
 6. A receives an immediate relay-accepted ack (so it doesn't time out)
 7. B processes the command normally and responds to the `_rr` stream
 8. A reads the response from its own unified stream
 
-Services never need to know each other's stream keys. They never need cross-keyspace ACL permissions. gNode handles all routing, policy, and translation.
+Services never need to know each other's stream keys. They never need cross-keyspace ACL permissions. gNode handles all routing, permission, and translation.
 
 ---
 
@@ -40,7 +40,7 @@ Services never need to know each other's stream keys. They never need cross-keys
 
 Add the `_rt` field to any command on your unified stream. Everything else stays the same.
 
-### By site ID or entity ID
+### By service ID
 
 ```json
 {
@@ -54,7 +54,7 @@ Add the `_rt` field to any command on your unified stream. Everything else stays
 }
 ```
 
-gNode looks up `target_service` in the site registry. If not found as a site ID, it searches across all topologies for an entity with that ID.
+gNode resolves `target_service` on the constellation's one topology (`{<c>}:gnode:constellation`) and picks one placement from the service's ring (exact weighted round-robin over healthy active placements; weight 0 only when the ring is empty). The command is addressed to that placement's stream. Sites are never relay targets.
 
 ### By explicit stream key
 
@@ -64,7 +64,7 @@ gNode looks up `target_service` in the site registry. If not found as a site ID,
 }
 ```
 
-Bypasses discovery — use when you know the exact stream. gNode still enforces policy.
+Bypasses discovery — use when you know the exact stream. gNode still enforces permission.
 
 ### Environment isolation
 
@@ -72,62 +72,36 @@ The source environment is preserved. A command from `my_service:gnode:unified:st
 
 ---
 
-## Relay Policy
+## Permission
 
-Policy rules control which services can talk to which. Stored in ValKey:
+Every relayed command passes `GNODE_TOPO_CAN_REACH caller target` before it is forwarded. It is allowed only when all of these hold:
 
-```
-Key:   {topology_ns}:gnode:relay:policy  (HASH)
-Field: source_site:target_site
-Value: {"action":"allow|deny", "reason":"...", "commands":["*"]}
-```
+1. Both ends are declared on the topology (undeclared is refused).
+2. The target sits below the caller (lower potential: layer first, then fundamentality), or is a declared peer of the caller.
+3. The target's environment is the caller's or `global`.
+4. Every label in the target's `requires` is in the caller's `holds`.
+5. No live deny exists for the pair.
 
-### Evaluation order (first match wins)
+A refusal is written to the caller's verdict key with its reason (`undeclared`, `layer`, `env`, `label:<l>`, `deny`). There is no default allow and no allow on a store error: the check fails closed.
 
-1. Exact pair: `service_a:service_b`
-2. Source wildcard: `*:service_b` (anyone → service_b)
-3. Target wildcard: `service_a:*` (service_a → anyone)
-4. **Default: Allow**
+Labels come from the manifest's `gnode:` block:
 
-### Managing policies
-
-Set a policy:
-```json
-{"c": "relay_policy_set", "p": "{\"source\": \"untrusted_svc\", \"target\": \"core_db\", \"policy\": {\"action\": \"deny\", \"reason\": \"No direct DB access\", \"commands\": [\"*\"]}}"}
+```yaml
+gnode:
+  holds: [infra]       # labels this entity carries
+  requires: [internal] # labels a caller must hold to reach it
 ```
 
-Allow specific commands only:
-```json
-{"c": "relay_policy_set", "p": "{\"source\": \"monitoring\", \"target\": \"core_db\", \"policy\": {\"action\": \"deny\", \"reason\": \"Read-only access\", \"commands\": [\"write\", \"delete\"]}}"}
-```
+A manifest without `holds` holds nothing and reaches only layers below it.
 
-This denies `write` and `delete` but allows all other commands from `monitoring` → `core_db`.
+### Denies
 
-List all policies:
-```json
-{"c": "relay_policy_list"}
-```
-
-Remove a policy:
-```json
-{"c": "relay_policy_remove", "p": "{\"source\": \"untrusted_svc\", \"target\": \"core_db\"}"}
-```
-
-### Switching to fail-closed
-
-The default policy is allow-all (fail-open). For a curated ecosystem where gNode explicitly controls who talks to whom, add a global deny rule and then whitelist specific pairs:
+A deny is a TTL-bounded `caller>target` entry on the constellation key. Operators manage them with the CLI:
 
 ```bash
-# Deny everything by default
-relay_policy_set  *:*  deny  "Fail-closed: explicit allow required"  ["*"]
-
-# Whitelist specific pairs
-relay_policy_set  analytics:geodineum_comms      allow  "Analytics escalates alerts via COMMS"  ["*"]
-relay_policy_set  geodineum_bak:geodineum_comms  allow  "BAK notifies on backup events"  ["*"]
-relay_policy_set  *:analytics                    allow  "Any service can request analysis"  ["*"]
+geodineum gnode deny <caller> <target> --ttl 1h
+geodineum gnode undeny <caller> <target>
 ```
-
-Exact-pair rules are checked before wildcards, so whitelisted pairs pass even with `*:*` deny.
 
 ---
 
@@ -214,9 +188,9 @@ Both services get their own consumer group on the shared stream. Communication i
 
 ### When to use which
 
-| Pattern | Use case | gNode in data path? | Format translation? | Policy enforced? |
+| Pattern | Use case | gNode in data path? | Format translation? | Permission enforced? |
 |---------|----------|---------------------|---------------------|-----------------|
-| **Relay** (`_rt`) | Infrequent cross-service commands, heterogeneous formats, policy-controlled access | Yes | Yes | Yes |
+| **Relay** (`_rt`) | Infrequent cross-service commands, heterogeneous formats, permission-controlled access | Yes | Yes | Yes |
 | **Direct channel** | High-throughput streaming between two services, homogeneous format | No (provision only) | No | At provision time only |
 | **Broadcast** | One-to-many announcements, topology updates, service events | No | No | No (shared bus) |
 
@@ -265,7 +239,7 @@ Fields:
 - `count` — total relay operations for this pair
 - `ok` / `err` — successful / failed relays
 - `translated` — relays where format translation was applied
-- `avg_latency_ms` — average relay processing time (resolve + policy + translate + XADD)
+- `avg_latency_ms` — average relay processing time (resolve + permission + translate + XADD)
 - `commands` — per-command breakdown
 
 Storage key: `{topology_ns}:gnode:telemetry:relay` (HASH). Counters are additive across daemon restarts and worker threads.
@@ -290,7 +264,7 @@ If the target never responds, the source will not receive a response. The RelayT
 |-------|-----------|
 | **Stream isolation** | Each service can only XADD/XREADGROUP on its own `{service_id}:*` keyspace |
 | **Relay gating** | gNode daemon (`~*` ACL) is the only entity that can write to another service's stream |
-| **Policy enforcement** | Per-pair allow/deny rules checked on every relay, before forwarding |
+| **Permission** | `GNODE_TOPO_CAN_REACH` (layer, environment, holds/requires, deny list) checked on every relay, fail closed |
 | **DTAP isolation** | Environment preserved — staging commands never reach production streams |
 | **No credential sharing** | Services never receive another service's ValKey credentials |
 | **Audit trail** | Every relay logged (info level) + telemetry counters in ValKey |
@@ -304,16 +278,8 @@ If the target never responds, the source will not receive a response. The RelayT
 
 | Field | Description | Required |
 |-------|-------------|----------|
-| `_rt` | Relay target: entity ID, site ID, or explicit stream key | Yes (triggers relay) |
+| `_rt` | Relay target: service ID or explicit stream key | Yes (triggers relay) |
 | `_rr` | Reply-to stream override (set automatically by gNode) | No (auto-set) |
-
-### Relay policy commands
-
-| Command | Parameters |
-|---------|-----------|
-| `relay_policy_set` | `{source, target, policy: {action, reason, commands}}` |
-| `relay_policy_list` | `{}` |
-| `relay_policy_remove` | `{source, target}` |
 
 ### Channel commands
 

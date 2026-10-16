@@ -29,9 +29,8 @@ directories registered via `GNODE_EXT_<NAME>_PATH` or `GNODE_EXT_DIR`
 ### Discovery & Topology
 | Library | Functions | Purpose |
 |---------|-----------|---------|
-| `gnode_geometric` | 5 | O(1) spatial-hash discovery |
-| `gnode_topology` | 28 | 23D semantic topology |
-| `gnode_topo` | 18 | Topology CRUD + traversal |
+| `gnode_topology` | 5 | Published schema readers |
+| `gnode_topo` | - | The one topology: entities, indexes, edges, placements, routing, reach |
 | `gnode_node` | 12 | Node registration + metrics |
 | `gnode_site` | 9 | Site management + discovery |
 
@@ -76,7 +75,7 @@ Companion (unsigned) extension: [geodineum/gNode-CMS](https://github.com/geodine
 ./scripts/valkey-cli-secure.sh FCALL GNODE_CACHE_GET 1 "mysite:cache" "user:123"
 
 # Read-only variant (safe for replicas)
-./scripts/valkey-cli-secure.sh FCALL_RO GNODE_TOPO_GET_ENTITY 1 "{mysite}:gnode:services" "MyService"
+./scripts/valkey-cli-secure.sh FCALL_RO GNODE_TOPO_GET_ENTITY 1 "{geodineum}:gnode:constellation" "MyService"
 ```
 
 ## Conventions

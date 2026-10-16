@@ -55,15 +55,12 @@ exact same approximated result** — bit-for-bit identical.
 
 ## Where It Matters
 
-1. **Bucket key computation** — spatial hash lookup requires identical bucket assignments across nodes
-2. **Distance calculations** — service selection depends on geometric distance ordering
-3. **Z-score computation** — topological ordering must be consistent cluster-wide
-
-Verified by: `test_bucket_key_determinism` and `test_bucket_key_raw_determinism`
-in `daemon/src/lib.rs`.
+1. **Coordinate encoding** — the daemon turns declared axis words into Q64.64 coordinates; every node must produce the same value
+2. **Index scores** — ranking and range queries read scores derived from the coordinates, so every node returns the same order
+3. **Derived axes** — load and health are written from measurements in Q64.64 by the lease holder
 
 ## References
 
 - Re-export shim: `daemon/src/geometric_precision.rs`
 - Arithmetic library: the `g_math` crate (`gMath/`), Q64.64 `embedded` profile
-- Architecture: `CLAUDE.md` §10 (Geometric Topology)
+- Architecture: `CLAUDE.md` §10 (The One Topology)

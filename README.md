@@ -7,8 +7,8 @@
 # gNode
 
 The Rust daemon at the centre of a Geodineum Constellation: it owns the RESP3
-command-stream wire protocol between PHP services and ValKey, the geometric
-topology system, inter-service routing, and the signed-extension pipeline.
+command-stream wire protocol between PHP services and ValKey, the one-topology
+system, inter-service routing, and the signed-extension pipeline.
 
 Built by **Niels Erik Toren** · Rust daemon, crate `gnode-daemon` (see `daemon/Cargo.toml` for the version)
 
@@ -22,7 +22,7 @@ runs the work (native handlers or ValKey Lua functions), and writes the response
 back to a polling key. Because every request carries its own routing and identity
 fields, one daemon serves many tenants and environments at once.
 
-All state lives in ValKey - topology, service registry, relay policy, telemetry.
+All state lives in ValKey - topology, service registry, reach labels and denies, telemetry.
 The daemon process holds no durable state of its own: restart it and it
 rediscovers everything from ValKey. It exposes no HTTP surface; the wire is RESP3
 over ValKey (port 47445), and the protocol is the contract.
@@ -54,12 +54,11 @@ Most PHP callers never touch the wire at all - they use the reference client,
 
 ## Capabilities
 
-- **Geometric discovery** - services register a capability vector and are found
-  by spatial proximity in Q64.64 fixed-point space, not by name.
-- **Multi-tier topology** - the canonical tier schemas (service, tool,
-  constellation, galaxy) that place entities in geometric space for discovery.
+- **One topology** - a constellation has one topology, `{<c>}:gnode:constellation`:
+  nodes, components, sites, apps, daemons and their placements, declared by name
+  and encoded by the daemon. Services are found by facet and axis range.
 - **Inter-service routing** - a command tagged with a relay target is resolved,
-  policy-checked, optionally format-translated, and forwarded to the target's
+  permission-checked, optionally format-translated, and forwarded to the target's
   stream, so the sender needs no ACL on the target's keyspace.
 - **Two execution lanes** - Concurrent (async-spawned, unordered, the default) and
   Ordered (synchronous inline) for commands with cross-request ordering
@@ -111,7 +110,7 @@ REDISCLI_AUTH="$AUTH" redis-cli -p 47445 GET '{mysite}:res:req-001'
 # -> {"id":"req-001","status":"ok","result":{...},"error":null,"timestamp":...}
 
 # 3. Call a Lua function directly
-REDISCLI_AUTH="$AUTH" redis-cli -p 47445 FCALL GNODE_GEOMETRIC_GET_DIMENSIONS 0
+REDISCLI_AUTH="$AUTH" redis-cli -p 47445 FCALL_RO GNODE_SCHEMA_GET 0 geodineum 3.3
 ```
 
 From PHP, the same round-trip is `gNodeClient::forSite('mysite','production')`
@@ -127,8 +126,8 @@ aliases, and every command's parameters are in
   consumer groups.
 - **Response keys expire after ~10 seconds.** A late poller silently loses the
   response; poll within a few seconds and handle a missing key gracefully.
-- **Relay policy defaults to allow (fail-open).** To lock a Constellation down,
-  set an explicit deny policy - see [`CONTRACT.md`](CONTRACT.md).
+- **Relay permission fails closed.** A pair that is not declared reachable is
+  refused - see [`CONTRACT.md`](CONTRACT.md).
 - **Ordered-lane commands block their consumer thread** with no per-command
   timeout; a slow Ordered handler stalls messages behind it. Reserve the Ordered
   lane for commands that truly need it.

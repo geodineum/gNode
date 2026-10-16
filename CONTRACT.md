@@ -1,6 +1,6 @@
 # gNode — Integration Contract
 
-**Role:** Stateless Rust daemon (tokio async) that owns the RESP3 command-stream wire protocol, unified multi-tenant routing, the geometric topology system, and the signed-extension pipeline between PHP services and ValKey. All state lives in ValKey; the daemon rediscovers everything on restart.
+**Role:** Stateless Rust daemon (tokio async) that owns the RESP3 command-stream wire protocol, unified multi-tenant routing, the one-topology system, and the signed-extension pipeline between PHP services and ValKey. All state lives in ValKey; the daemon rediscovers everything on restart.
 
 > This file is the human-readable **integration contract** — the wire format, stream keys, how to send a command, and the signed-extension expectation. For the exhaustive catalog of every command and Lua function, see **[COMMAND_SCHEMA.md](COMMAND_SCHEMA.md)** (do not duplicate it here).
 
@@ -26,8 +26,8 @@
 | Inter-service routing | command | Commands carrying `_rt` (relay target) are routed to the target site's unified stream; `_rr` overrides the reply-to stream. Resolution: explicit stream key → `site_id` direct → entity lookup. A JSON capability query in `_rt` is parsed and REFUSED with an error: `router.rs::resolve_capability_query` is not wired to the live query path, so the arbitrator cannot yet pick a provider by position. The source of a relay is the hash tag of the stream the command was read from, never the `ss` field | README.md, integration/relay/router.rs |
 | Lane execution | method | `Lane::Concurrent` (async-spawned, no ordering) vs `Lane::Ordered` (synchronous inline). 7 Ordered commands: `channel_open`, `channel_close`, `config_set`, `topology_edge_add`, `topology_edge_remove`, `topology_edge_list`, `topology_edge_validate` | COMMAND_SCHEMA.md, integration/handlers/types.rs |
 | Batch wrapper | command | `c=batch`, `p='{"commands":[{"id":...,"c":...,"p":{}}]}'` — groups commands for atomic-ish processing | COMMAND_SCHEMA.md |
-| Topology schema tiers | data | 4 canonical tiers (service, tool, constellation, galaxy) plus user-defined custom topologies with arbitrary dimensions. **Counts are not quoted here** — read the published schema (`FCALL_RO GNODE_SCHEMA_GET <tier>`); a number copied into prose drifts from the YAML silently. Only 3 tiers accept registrations: galaxy publishes a schema and refuses registration by design | daemon/config/*_schema.yaml, daemon/src/tool_registration.rs |
-| Tool affordances | data | Tool-tier entities carry `metadata.affordances` — a list of `scheme:target` pointers saying how to ask that component what it can do: `describe:<component>` (machine-readable command schemas), `cli:<repo>/geodeploy.yaml` (the manifest declaring its commands; `geodineum --help` renders them), `doc:<repo>/<path>` (the floor). Returned verbatim by `service_describe` under `metadata` | daemon/src/tool_registration.rs, config/ecosystem_tools.yaml |
+| Topology schema | data | One schema file, `topology_schema.yaml`, with a body map per shape (node, component, site, app, daemon, placements). **Counts are not quoted here** — read the published schema (`FCALL_RO GNODE_SCHEMA_GET <ns> <shape key>`); a number copied into prose drifts from the YAML silently. Pro named topologies `{c}:gnode:topo:<name>` run on the same library | daemon/config/topology_schema.yaml, daemon/src/topology_schema.rs |
+| Tool affordances | data | Component entities (shape 2) carry `metadata.affordances` — a list of `scheme:target` pointers saying how to ask that component what it can do: `describe:<component>` (machine-readable command schemas), `cli:<repo>/geodeploy.yaml` (the manifest declaring its commands; `geodineum --help` renders them), `doc:<repo>/<path>` (the floor). Returned verbatim by `service_describe` under `metadata` | daemon/src/tool_registration.rs, config/ecosystem_tools.yaml |
 | Signed-extension loader | method | Loads ed25519-signed `.so` extensions from `$GNODE_EXT_DIR`; validates against the public key constant in `ext_author.rs` | daemon/src/extensions/mod.rs, ext_author.rs, ext_verify.rs |
 
 ---
@@ -107,10 +107,10 @@ producer is visible in the journal, never silent.
 
 **Topology entity JSON:**
 ```json
-{"id":"", "x":<float>, "y":<float>, "z":<float>, "bk":"<bucket_key>", "zs":<z_score>, "ra":[outgoing_ids], "m":{metadata}}
+{"id":"", "sh":"3.3", "ly":<layer code>, "ro":<registration order>, "env":"production", "pd":[24 doubles], "pr":[24 Q64.64 raw strings], "c":{facet:[values]}, "m":{metadata}}
 ```
 
-**Capability vector:** `{"dimension_name": <float_value>, ...}` mapped to the tier's dimension count. An axis's index is its zone, both cuts being prefix truncations: `[0, hashed_dimensions)` declared and hashed, `[hashed_dimensions, discovery_dimensions)` derived and ranked but never hashed, `[discovery_dimensions, total_dimensions)` storage-only and refused in a query. Read the counts from the published schema, never from prose.
+**Declaration:** `{id, shape, environment, axes: {axis: word | [words] | fraction}, metadata}`. The daemon encodes the words through the published per-shape schema (`<tk>:schema:<shape>`) and refuses a word it does not know; callers never send coordinates.
 
 **FCALL args (Lua):** positional, auto-JSON-encoded for non-scalar; keys array first, then args array per ValKey function spec.
 
@@ -173,7 +173,7 @@ FCALL GNODE_TOPOLOGY_GET_SCHEMA 0
 # (semantic discovery is a daemon command — send `discover` via the unified stream, not FCALL)
 ```
 
-Inter-service relay: add `_rt service-b` to the command fields; the daemon resolves the target site, enforces relay policy, and forwards to `{site_b}:gnode:unified:{env}`. Add `_rr <stream>` to override the reply destination.
+Inter-service relay: add `_rt service-b` to the command fields; the daemon resolves the target service over its ring of placements, checks `GNODE_TOPO_CAN_REACH`, and forwards to the chosen placement's stream (`{site_b}:gnode:unified:{env}:{node}`). Add `_rr <stream>` to override the reply destination.
 
 ---
 
@@ -207,7 +207,7 @@ Verified-aligned (from ecosystem cross-check):
 - **Signed extension** — gNode-CMS verifies against `AUTHOR_PUBKEY` `2ff9966fcad06b6d`; every `GNODE_ASSET_*` the handlers call is registered in `gnode_asset.lua` (Lua registers a superset). ✓
 
 Operator-relevant risks (design, not divergence):
-- ⚠️ **Relay policy default = ALLOW (fail-open).** To lock down, operators must explicitly set `*:*` DENY (relay/policy.rs).
+- Relay permission fails closed: an undeclared pair, a layer or environment mismatch, an unmet `requires` label or a live deny is refused with its reason on the caller's verdict key.
 - ⚠️ **`st` overloaded** between source_site (`t=c`) and status (`t=r`); disambiguated by `t`. New writers use `ss`. (COMMAND_SCHEMA.md)
 - ⚠️ **Response polling key TTL = 10s** (concurrent_lane.rs). Slow/late pollers silently lose the response; no retry. Poll within a few seconds, handle 404 gracefully.
 - ⚠️ **`Lane::Ordered` commands block the consumer thread** with no per-command timeout; a slow handler stalls subsequent messages, including other tenants' (intentional per COMMAND_SCHEMA.md).

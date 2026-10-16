@@ -103,39 +103,18 @@ rdb := redis.NewClient(&redis.Options{
 
 ## §2 Register Entity
 
-Register a service into the service-tier topology (30D = 25 discovery + 5 storage). The daemon pre-computes Q64.64 bucket keys and z_scores, but you can also register directly via FCALL if you pre-compute those values.
+Declare a service on the constellation's one topology by name. The daemon encodes the axis words; a word it does not know, or a number in place of a word, is refused.
 
-**Preferred**: Send `register_service` command via stream (daemon computes Q64.64).
+Send the `register_service` command via stream.
 
 **CLI**:
 ```bash
-# Via stream command (recommended — daemon computes bucket_key + z_score)
+# Via stream command
 ./scripts/valkey-cli-secure.sh XADD staging_my_app:gnode:unified:production '*' \
   id "reg-$(date +%s)" \
   cmd "register_service" \
-  params '{"id":"MyService","capabilities":{"domain_primary":0.7,"service_tier":0.30,"protocol":0.5},"metadata":{"type":"worker","version":"1.0"}}' \
+  params '{"id":"MyService","shape":"app","environment":"production","axes":{"protocol":"resp3","latency_class":"fast"},"metadata":{"type":"worker","version":"1.0"}}' \
   _cr "1"
-```
-
-**Direct FCALL** (advanced — the daemon normally computes these; shown so
-the argument contract is visible). `pr` is the full point as Q64.64 raw
-integers (strings), `pd` the display floats, `bucket_key` the HASHED axes at
-grid 10 (16 on the service tier, so 64 characters — not the whole discovery
-block, because the derived axes move), `z_score` = axis 16 × 1e6. args[5] is
-the (B) snapshot key (empty = skip), args[6] the schema index of the
-registration-order axis (-1 = none, which is the service tier since v4.0 and
-15 on the tool tier), args[7] the point's fractional bits (64), args[8] the
-tier width, args[9] the sampler-owned axes as CSV (`16,17` on the service
-tier) whose stored values an update preserves:
-```bash
-./scripts/valkey-cli-secure.sh FCALL GNODE_REGISTER_CAPABILITY_VECTOR 1 \
-  "{staging_my_app}:gnode:services" \
-  "MyService" \
-  '{"pr":["9223372036854775808","0","0","0","0","0","0","0","12912720851596685312","0","0","0","0","0","0","0","0","0","0","5534023222112865280","0","0","0","0","0","0","0","0","0","0"],"pd":[0.5,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.7,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.3,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0],"c":{"domain_primary":0.7,"service_tier":0.3,"protocol":0.5},"m":{"type":"worker"}}' \
-  "0005000000000000000000000000000000070000000000000000000000000000000000000000000300000000000000000000" \
-  0 \
-  "{geodineum}:gnode:topology:services" \
-  29 64
 ```
 
 **Python**:
@@ -148,7 +127,7 @@ r.xadd('staging_my_app:gnode:unified:production', {
     'cmd': 'register_service',
     'params': json.dumps({
         'id': 'MyService',
-        'capabilities': {'domain_primary': 0.7, 'service_tier': 0.30},
+        'shape': 'app', 'axes': {'protocol': 'resp3', 'latency_class': 'fast'},
         'metadata': {'type': 'worker'}
     }),
     '_cr': '1'
@@ -162,7 +141,7 @@ await client.xadd('staging_my_app:gnode:unified:production', '*',
   'cmd', 'register_service',
   'params', JSON.stringify({
     id: 'MyService',
-    capabilities: { domain_primary: 0.7, service_tier: 0.30 },
+    shape: 'app', axes: { protocol: 'resp3', latency_class: 'fast' },
     metadata: { type: 'worker' }
   }),
   '_cr', '1'
@@ -173,7 +152,7 @@ await client.xadd('staging_my_app:gnode:unified:production', '*',
 ```php
 $gnode->execute('register_service', [
     'id' => 'MyService',
-    'capabilities' => ['domain_primary' => 0.7, 'service_tier' => 0.30],
+    'shape' => 'app', 'axes' => ['protocol' => 'resp3', 'latency_class' => 'fast'],
     'metadata' => ['type' => 'worker'],
 ]);
 ```
@@ -189,7 +168,7 @@ redis::cmd("XADD")
     .arg("cmd").arg("register_service")
     .arg("params").arg(serde_json::json!({
         "id": "MyService",
-        "capabilities": {"domain_primary": 0.7, "service_tier": 0.30},
+        "shape": "app", "axes": {"protocol": "resp3", "latency_class": "fast"},
         "metadata": {"type": "worker"}
     }).to_string())
     .arg("_cr").arg("1")
@@ -200,7 +179,7 @@ redis::cmd("XADD")
 ```go
 params, _ := json.Marshal(map[string]interface{}{
     "id":           "MyService",
-    "capabilities": map[string]float64{"domain_primary": 0.7, "service_tier": 0.30},
+    "shape": "app", "axes": map[string]string{"protocol": "resp3", "latency_class": "fast"},
     "metadata":     map[string]string{"type": "worker"},
 })
 rdb.XAdd(ctx, &redis.XAddArgs{
@@ -218,14 +197,14 @@ rdb.XAdd(ctx, &redis.XAddArgs{
 
 ## §3 Discover by Capability
 
-Find services matching capability requirements using O(1) spatial-hash discovery.
+Find the entities of a layer whose facets and axis ranges match, in one index query on the one topology.
 
 **CLI**:
 ```bash
 ./scripts/valkey-cli-secure.sh XADD staging_my_app:gnode:unified:production '*' \
   id "disc-$(date +%s)" \
   cmd "geometric_discover" \
-  params '{"capabilities":{"domain_primary":0.7,"throughput_tier":0.5},"limit":5}' \
+  params '{"layer":"app","facets":{"protocol":["resp3"]},"limit":5}' \
   _cr "1"
 ```
 
@@ -235,7 +214,7 @@ r.xadd('staging_my_app:gnode:unified:production', {
     'id': f'disc-{int(time.time())}',
     'cmd': 'geometric_discover',
     'params': json.dumps({
-        'capabilities': {'domain_primary': 0.7, 'throughput_tier': 0.5},
+        'layer': 'app', 'facets': {'protocol': ['resp3']},
         'limit': 5
     }),
     '_cr': '1'
@@ -248,7 +227,7 @@ await client.xadd('staging_my_app:gnode:unified:production', '*',
   'id', `disc-${Date.now()}`,
   'cmd', 'geometric_discover',
   'params', JSON.stringify({
-    capabilities: { domain_primary: 0.7, throughput_tier: 0.5 },
+    layer: 'app', facets: { protocol: ['resp3'] },
     limit: 5
   }),
   '_cr', '1'
@@ -258,7 +237,7 @@ await client.xadd('staging_my_app:gnode:unified:production', '*',
 **PHP (gNode-Client)**:
 ```php
 $results = $gnode->execute('geometric_discover', [
-    'capabilities' => ['domain_primary' => 0.7, 'throughput_tier' => 0.5],
+    'layer' => 'app', 'facets' => ['protocol' => ['resp3']],
     'limit' => 5,
 ]);
 ```
@@ -273,7 +252,7 @@ redis::cmd("XADD")
     .arg("id").arg(format!("disc-{}", chrono::Utc::now().timestamp()))
     .arg("cmd").arg("geometric_discover")
     .arg("params").arg(serde_json::json!({
-        "capabilities": {"domain_primary": 0.7, "throughput_tier": 0.5},
+        "layer": "app", "facets": {"protocol": ["resp3"]},
         "limit": 5
     }).to_string())
     .arg("_cr").arg("1")
@@ -283,7 +262,7 @@ redis::cmd("XADD")
 **Go**:
 ```go
 params, _ := json.Marshal(map[string]interface{}{
-    "capabilities": map[string]float64{"domain_primary": 0.7, "throughput_tier": 0.5},
+    "layer": "app", "facets": map[string][]string{"protocol": {"resp3"}},
     "limit":        5,
 })
 rdb.XAdd(ctx, &redis.XAddArgs{
@@ -301,7 +280,7 @@ rdb.XAdd(ctx, &redis.XAddArgs{
 
 ## §4 Describe Entity
 
-Get detailed description of a registered service entity: tier, capabilities, edges, health.
+Get detailed description of a registered service entity: axes, edges, placements, health.
 
 **CLI (via stream)**:
 ```bash
@@ -315,12 +294,12 @@ Get detailed description of a registered service entity: tier, capabilities, edg
 **CLI (direct FCALL — raw entity without enrichment)**:
 ```bash
 ./scripts/valkey-cli-secure.sh FCALL GNODE_TOPO_GET_ENTITY 1 \
-  "{staging_my_app}:gnode:services" "MyService"
+  "{geodineum}:gnode:constellation" "MyService"
 ```
 
 **Python**:
 ```python
-# Via stream (recommended — includes tier classification + health)
+# Via stream (recommended — includes health)
 r.xadd('staging_my_app:gnode:unified:production', {
     'id': f'desc-{int(time.time())}',
     'cmd': 'service_describe',
@@ -330,7 +309,7 @@ r.xadd('staging_my_app:gnode:unified:production', {
 
 # Direct FCALL (raw entity data only)
 raw = r.fcall('GNODE_TOPO_GET_ENTITY', 1,
-    '{staging_my_app}:gnode:services', 'MyService')
+    '{geodineum}:gnode:constellation', 'MyService')
 entity = json.loads(raw)
 ```
 
@@ -346,7 +325,7 @@ await client.xadd('staging_my_app:gnode:unified:production', '*',
 
 // Direct FCALL
 const raw = await client.call('FCALL', 'GNODE_TOPO_GET_ENTITY', 1,
-  '{staging_my_app}:gnode:services', 'MyService');
+  '{geodineum}:gnode:constellation', 'MyService');
 ```
 
 **PHP (gNode-Client)**:
@@ -355,14 +334,14 @@ const raw = await client.call('FCALL', 'GNODE_TOPO_GET_ENTITY', 1,
 $info = $gnode->execute('service_describe', ['entity_id' => 'MyService']);
 
 // Direct FCALL
-$raw = $gnode->fcall('GNODE_TOPO_GET_ENTITY', ['{staging_my_app}:gnode:services'], ['MyService']);
+$raw = $gnode->fcall('GNODE_TOPO_GET_ENTITY', ['{geodineum}:gnode:constellation'], ['MyService']);
 ```
 
 **Rust**:
 ```rust
 use redis::Commands;
 
-// Via stream (recommended — includes tier classification + health)
+// Via stream (recommended — includes health)
 redis::cmd("XADD")
     .arg("staging_my_app:gnode:unified:production")
     .arg("*")
@@ -376,7 +355,7 @@ redis::cmd("XADD")
 let raw: String = redis::cmd("FCALL")
     .arg("GNODE_TOPO_GET_ENTITY")
     .arg(1)
-    .arg("{staging_my_app}:gnode:services")
+    .arg("{geodineum}:gnode:constellation")
     .arg("MyService")
     .query(&mut conn)?;
 let entity: serde_json::Value = serde_json::from_str(&raw)?;
@@ -384,7 +363,7 @@ let entity: serde_json::Value = serde_json::from_str(&raw)?;
 
 **Go**:
 ```go
-// Via stream (recommended — includes tier classification + health)
+// Via stream (recommended — includes health)
 params, _ := json.Marshal(map[string]string{"entity_id": "MyService"})
 rdb.XAdd(ctx, &redis.XAddArgs{
     Stream: "staging_my_app:gnode:unified:production",
@@ -398,7 +377,7 @@ rdb.XAdd(ctx, &redis.XAddArgs{
 
 // Direct FCALL (raw entity data only)
 raw, err := rdb.FCall(ctx, "GNODE_TOPO_GET_ENTITY",
-    []string{"{staging_my_app}:gnode:services"},
+    []string{"{geodineum}:gnode:constellation"},
     "MyService",
 ).Result()
 ```
@@ -1051,7 +1030,7 @@ rdb.XAdd(ctx, &redis.XAddArgs{
 | Register entity | `XADD` cmd=`register_service` | `{service_id}:gnode:unified:{env}` |
 | Discover | `XADD` cmd=`geometric_discover` | `{service_id}:gnode:unified:{env}` |
 | Describe entity | `XADD` cmd=`service_describe` | `{service_id}:gnode:unified:{env}` |
-| Raw entity get | `FCALL GNODE_TOPO_GET_ENTITY` | `{service_id}:gnode:services` |
+| Raw entity get | `FCALL GNODE_TOPO_GET_ENTITY` | `{<c>}:gnode:constellation` |
 | Send command | `XADD` | `{service_id}:gnode:unified:{env}` |
 | Read response | `XREADGROUP` | `{service_id}:gnode:unified:{env}` |
 | Pub/sub publish | `FCALL GNODE_PUBSUB_PUBLISH` | `{service_id}:pubsub` |
