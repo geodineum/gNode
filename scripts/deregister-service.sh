@@ -279,6 +279,15 @@ elif [[ "$REMOVE_ACL" == "true" && "$DRY_RUN" == "true" ]]; then
     log_info "(Dry run) Would remove ACL user 'gnode_client_$SERVICE_ID'"
 fi
 
+TOPO_DEREG="$(dirname "$(readlink -f "$0")")/cli/deregister.sh"
+if [[ "$DRY_RUN" == "true" ]]; then
+    log_info "(Dry run) Would remove '$SERVICE_ID' from the one topology (entity, placements, indexes): $TOPO_DEREG $SERVICE_ID"
+elif [[ -x "$TOPO_DEREG" ]]; then
+    if "$TOPO_DEREG" "$SERVICE_ID"; then log_success "Removed '$SERVICE_ID' from the one topology"; else log_warn "Topology entity removal reported a problem — run: geodineum topology deregister $SERVICE_ID"; fi
+else
+    log_warn "Topology deregister helper not found at $TOPO_DEREG — run: geodineum topology deregister $SERVICE_ID"
+fi
+
 echo ""
 if [[ "$DRY_RUN" == "true" ]]; then
     log_success "Dry run complete - no changes were made"

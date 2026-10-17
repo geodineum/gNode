@@ -286,21 +286,17 @@ Source: `daemon/src/integration/handlers/diagnostic.rs`
 
 ---
 
-### CMS Extension Commands (23 commands)
+### CMS Extension Commands (19 commands)
 
 Delivered as a signed extension: discovered in `GNODE_EXT_DIR` at build time, verified against the author pubkey, and staged into the build (default companion; opt out with `GEODINEUM_SKIP_CMS=true`). No Cargo feature flag is involved. Source: `gNode-CMS` repo.
 
-#### Template (7)
+#### Template (3)
 
 | Command | Parameters | Returns | Description |
 |---------|------------|---------|-------------|
 | `render_template` | `{template_id: string, variables: object}` | Rendered HTML/text | Render a Tera template with variables |
 | `render_string` | `{template: string, variables?: object}` | `{html}` | Render an ad-hoc Tera template string (no pre-registration needed) |
 | `serve_fragment` | `{fragment_id: string}` | Pre-rendered fragment | Serve a cached template fragment |
-| `list_templates` | `{}` | Array of template IDs | List registered templates |
-| `discover_similar_templates` | `{template_id: string, limit?: int}` | Array of similar templates | Find similar templates by capability |
-| `discover_templates_by_capability` | `{capabilities: object, limit?: int}` | Array of matching templates | Capability-based template search |
-| `get_template_capabilities` | `{template_id: string}` | Capability vector | Get a template's capability coordinates |
 
 #### Content (4)
 
@@ -434,7 +430,7 @@ Stream operations, consumer groups, service provisioning/deprovisioning, DTAP en
 | `GNODE_STREAM_CONSUMERS_INFO` | stream_key | group_name | JSON array of consumer info | XINFO CONSUMERS |
 | `GNODE_STREAM_ADD_RESP3` | stream_key | entry_data, site_id | RESP3 entry ID | XADD with backpressure |
 | `GNODE_PROVISION_SERVICE` | — | service_id, environments_json, namespace, owner | JSON created streams | Create DTAP streams + consumer groups |
-| `GNODE_DEPROVISION_SERVICE` | — | service_id, options_json | JSON cleanup results | Complete service removal. Also removes the service's topology entities from the composed snapshot (`options.snapshot_key`, default `{geodineum}:gnode:topology:services`), except an entity that its own topology still holds |
+| `GNODE_DEPROVISION_SERVICE` | — | service_id, options_json | JSON cleanup results | Complete service removal. The topology entity is removed separately with `GNODE_TOPO_DEREGISTER` (`geodineum topology deregister <id>`) |
 | `GNODE_UPDATE_SERVICE` | — | service_id, updates_json | JSON update results | Update service metadata/status |
 | `GNODE_SERVICE_ADD_ENVIRONMENT` | — | service_id, environment, set_active | JSON creation results | Add DTAP environment to service |
 | `GNODE_SERVICE_REMOVE_ENVIRONMENT` | — | service_id, environment, options_json | JSON removal results | Remove DTAP environment |
