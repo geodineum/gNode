@@ -496,6 +496,12 @@ if [ -f "$DAEMON_ENV_SRC" ] && [ ! -f "$DAEMON_ENV_DST" ]; then
     install -d -m 0755 -o gnode -g gnode /etc/geodineum/components/gnode-daemon
     install -m 0640 -o gnode -g gnode "$DAEMON_ENV_SRC" "$DAEMON_ENV_DST"
     echo "✓ Installed daemon.env to $DAEMON_ENV_DST (sets VALKEY_USER=gnode_daemon)"
+    # A fresh copy carries the template's constellation; the installer's choice replaces it.
+    # An existing daemon.env keeps its list (it may serve several constellations).
+    if [ -n "${GNODE_CONSTELLATIONS:-}" ]; then
+        sed -i "s|^GNODE_CONSTELLATIONS=.*|GNODE_CONSTELLATIONS=\"${GNODE_CONSTELLATIONS}\"|" "$DAEMON_ENV_DST"
+        echo "✓ Constellation set to '${GNODE_CONSTELLATIONS}' in daemon.env"
+    fi
 elif [ -f "$DAEMON_ENV_DST" ]; then
     # Existing daemon.env — verify VALKEY_USER is set, warn if not.
     if grep -qE '^VALKEY_USER=' "$DAEMON_ENV_DST"; then
