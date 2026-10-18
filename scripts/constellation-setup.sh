@@ -722,26 +722,26 @@ show_status() {
     if ip link show "$WG_INTERFACE" &>/dev/null; then
         echo "  WireGuard:    UP (${WG_INTERFACE})"
         local wg_ip
-        wg_ip=$(ip addr show "$WG_INTERFACE" 2>/dev/null | grep "inet " | awk '{print $2}')
+        wg_ip=$(ip addr show "$WG_INTERFACE" 2>/dev/null | grep "inet " | awk '{print $2}' || true)
         echo "  VPN IP:       ${wg_ip:-unknown}"
 
         local peer_count
-        peer_count=$(wg show "$WG_INTERFACE" peers 2>/dev/null | wc -l)
+        peer_count=$(wg show "$WG_INTERFACE" peers 2>/dev/null | wc -l || true)
         echo "  Peers:        ${peer_count}"
         if [[ $peer_count -gt 0 ]]; then
             wg show "$WG_INTERFACE" 2>/dev/null | grep -A3 "^peer:" | while IFS= read -r line; do
                 echo "    ${line}"
-            done
+            done || true
         fi
     else
         echo "  WireGuard:    DOWN"
     fi
 
     local current_bind
-    current_bind=$(grep "^bind " "$VALKEY_CONF" 2>/dev/null | head -1)
+    current_bind=$(grep -m1 "^bind " "$VALKEY_CONF" 2>/dev/null || echo "(unreadable without sudo)")
     echo "  ValKey bind:  ${current_bind:-unknown}"
     local listening
-    listening=$(ss -tlnp 2>/dev/null | grep ":${VALKEY_PORT} " | awk '{print $4}' | tr '\n' ' ')
+    listening=$(ss -tlnp 2>/dev/null | grep ":${VALKEY_PORT} " | awk '{print $4}' | tr '\n' ' ' || true)
     echo "  Listening:    ${listening:-not running}"
 
     if echo "$listening" | grep -qv "127.0.0.1\|10.66.0\|${WG_NETWORK}"; then

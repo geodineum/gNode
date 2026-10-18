@@ -60,7 +60,7 @@ log() {
             echo -e "${GREEN}✓${NC} $message"
             ;;
         $LOG_DEBUG)
-            [[ $VERBOSE -eq 1 ]] && echo -e "${CYAN}→${NC} $message"
+            if [[ $VERBOSE -eq 1 ]]; then echo -e "${CYAN}→${NC} $message"; fi
             ;;
     esac
 }

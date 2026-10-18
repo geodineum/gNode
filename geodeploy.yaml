@@ -36,7 +36,7 @@ cli:
   commands:
     - name: status
       handler: scripts/cli/status.sh
-      description: Constellation at a glance — nodes (liveness, load, mem), what runs where, services, tools; --json for machines
+      description: The one status route — every served constellation, or status <id>; the CLI adds <component>, --config, --visitors; --json
       requires_sudo: true
       category: Constellation
     - name: daemon contract
@@ -60,6 +60,6 @@ cli:
       category: Topology
     - name: topology
       handler: scripts/cli/topology.sh
-      description: Topology — list|all|show|stats|sites | register {tool|service <site> [profile]} | deregister <site> <entity|--all>
+      description: Topology inspection — list|all|show <id>|stats|load|verify|sites (register/deregister: use geodineum register / deregister)
       requires_sudo: true
       category: Topology

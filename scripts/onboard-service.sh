@@ -993,12 +993,8 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 
 if [[ "$DRY_RUN" != "true" ]]; then
     echo ""
-    echo -e "${BOLD}Verification commands:${NC}"
-    echo "  # Test ACL authentication"
-    echo "  REDISCLI_AUTH=\"\$(cat $PASSWORD_FILE)\" valkey-cli -h $(valkey_target_host) -p ${VALKEY_PORT:-47445} --user $ACL_USER PING"
-    echo ""
-    echo "  # Check site registry"
-    echo "  $VALKEY_CLI SISMEMBER gnode:sites:registry $SITE_ID"
+    echo -e "${BOLD}Check it:${NC}"
+    echo "  sudo geodineum status $SITE_ID"
     echo ""
     if [[ -n "$OWNER" ]]; then
         echo "  # List tenant group sites"

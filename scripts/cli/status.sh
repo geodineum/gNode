@@ -1,8 +1,12 @@
 #!/bin/bash
-# geodineum status — the constellation at a glance.
+# geodineum status — the constellation at a glance; the one status route.
 #
-#   geodineum status            # table: nodes, resources, what runs where, services
-#   geodineum status --json     # same facts, machine-shaped
+#   geodineum status                 every constellation this node serves: nodes, resources,
+#                                    what runs where, services (--constellation <c>: just one)
+#   geodineum status <id>            one entity: what it is, where it runs, its health,
+#                                    intent, heartbeats, and this host's registration files
+#   geodineum status --json          the same facts, one JSON object per constellation per line
+#   (the installer CLI adds: status <component> · status --config · status --visitors)
 #
 # Reads only ValKey (nodes publish everything; no SSH, no host inspection):
 # constellation entities, the heartbeat family (CONTRACTS/heartbeat.md — the
@@ -15,23 +19,146 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VCLI="$(dirname "$SCRIPT_DIR")/valkey-cli-secure.sh"
 source "$(dirname "${BASH_SOURCE[0]}")/constellation.sh"
-NS="$(gnode_cli_constellation)"
-MODE=table
-if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
-    cat <<'HLP'
-Usage: geodineum status [--json]
+MODE=table ID=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -h|--help)
+            cat <<'HLP'
+Usage: geodineum status [<id> | <component> | --config | --visitors] [--json] [--constellation <c>]
 
-The constellation at a glance: nodes (heartbeat age, load, memory, what runs
-where), services (shape, env, health, placements, heartbeat), components, and per-site
-visitor counters. Reads only ValKey. --json emits the same facts for machines.
+  (none)          every constellation this node serves: nodes (heartbeat age, load,
+                  memory, what runs where), services (shape, env, health, placements,
+                  heartbeat), components, visitor counters
+  <id>            one service, site, node or component
+  <component>     that component's own status (comms, gflow, gschedule, bak, geodeploy, ...)
+  --config        this host's configuration health (the 7-layer validator; --fix, --verbose)
+  --visitors      per-site visitor counters
+  --json          machine-shaped; one object per constellation per line
 HLP
-    exit 0
+            exit 0 ;;
+        --json) MODE=json ;;
+        -*) echo "status: unknown option $1 (see --help)" >&2; exit 2 ;;
+        *) [[ -z "$ID" ]] || { echo "status: one id at a time" >&2; exit 2; }; ID="$1" ;;
+    esac
+    shift
+done
+
+# Every served constellation unless one was named; each rendered by this same script.
+if [[ -z "$ID" && -z "${GNODE_TOPOLOGY_NAMESPACE:-}" ]]; then
+    mapfile -t _cs < <(gnode_cli_constellations)
+    if [[ ${#_cs[@]} -gt 1 ]]; then
+        _rc=0 _first=1
+        for _c in "${_cs[@]}"; do
+            [[ "$MODE" == table && $_first -eq 0 ]] && echo ""
+            _first=0
+            _a=(); [[ "$MODE" == json ]] && _a=(--json)
+            GNODE_STATUS_INNER=1 GNODE_TOPOLOGY_NAMESPACE="$_c" "$0" "${_a[@]}" || _rc=1
+        done
+        if [[ "$MODE" != json ]] && command -v geodineum >/dev/null 2>&1; then
+            echo ""; geodineum status --visitors --compact 2>/dev/null || true
+        fi
+        exit $_rc
+    fi
 fi
-[[ "${1:-}" == "--json" ]] && MODE=json
+NS="$(gnode_cli_constellation)"
 
 vk() { VALKEY_USER=gnode_daemon "$VCLI" "$@" 2>/dev/null; }
 
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
+
+# ── status <id>: one entity, in the constellation that holds it ──────────────
+if [[ -n "$ID" ]]; then
+    if [[ -n "${GNODE_TOPOLOGY_NAMESPACE:-}" ]]; then _cs=("$GNODE_TOPOLOGY_NAMESPACE"); else mapfile -t _cs < <(gnode_cli_constellations); fi
+    : > "$T/intents"; : > "$T/hb"; HOLDER="" ALSO=""
+    for c in "${_cs[@]}"; do
+        if [[ "$(vk HEXISTS "{$c}:gnode:constellation:entities" "$ID")" == 1 ]]; then
+            if [[ -z "$HOLDER" ]]; then
+                HOLDER="$c"
+                vk HGETALL "{$c}:gnode:constellation:entities" > "$T/ents"
+            else
+                ALSO+="{$c} "
+            fi
+        fi
+        _i="$(vk HGET "{$c}:gnode:registrations" "$ID")"
+        [[ -n "$_i" ]] && printf '%s\t%s\n' "$c" "$_i" >> "$T/intents"
+        while IFS= read -r k; do
+            [[ -n "$k" ]] && printf '%s\t%s\n' "$k" "$(vk GET "$k" | tr -d '\n')" >> "$T/hb"
+        done < <(vk --scan --pattern "{$c}:gnode:heartbeat:*:${ID}:*"; vk --scan --pattern "{$c}:gnode:heartbeat:*:*:${ID}")
+    done
+    [[ -f "$T/ents" ]] || : > "$T/ents"
+    CRED="${GEODINEUM_CREDENTIALS_DIR:-/etc/geodineum/credentials}/valkey_client_${ID}.password"
+    LEDGER="${GEODINEUM_REGISTRATIONS_DIR:-/etc/geodineum/registrations}/${ID}.tsv"
+    HOST_CRED=0; [[ -e "$CRED" ]] && HOST_CRED=1
+    HOST_LEDGER=-1; [[ -r "$LEDGER" ]] && HOST_LEDGER="$(grep -c . "$LEDGER" || true)"
+    rc=0
+    MODE="$MODE" ID="$ID" HOLDER="$HOLDER" ALSO="${ALSO% }" SERVED="${_cs[*]}" HOST_CRED="$HOST_CRED" HOST_LEDGER="$HOST_LEDGER" CRED="$CRED" LEDGER="$LEDGER" \
+        python3 - "$T" <<'PYEOF' || rc=$?
+import json, os, sys, time
+T = sys.argv[1]; now = int(time.time())
+ID, holder = os.environ["ID"], os.environ["HOLDER"]
+def pairs(path):
+    l = [x.rstrip("\n") for x in open(path)]; l = [x for x in l if x != ""]
+    return dict(zip(l[::2], l[1::2]))
+def dec(raw):
+    try: return json.loads(raw)
+    except Exception: return {}
+ents = {k: dec(v) for k, v in pairs(f"{T}/ents").items()}
+SHAPES = {"1": "node", "2": "component", "3.1": "site", "3.2": "app", "3.3": "daemon", "4.1": "component@node", "4.2": "service@node"}
+HEALTH = {0.0: "unknown", 0.25: "dead", 0.5: "degraded", 1.0: "healthy"}
+def slot(e, i):
+    pd = e.get("pd") or []; return pd[i] if len(pd) > i else None
+def health(e):
+    v = slot(e, 17); return None if v is None else HEALTH.get(round(float(v), 4), str(v))
+e = ents.get(ID, {})
+sh = str(e.get("sh", ""))
+pl = [{"id": k, "shape": SHAPES.get(str(p.get("sh")), p.get("sh")), "of": p.get("of"), "on": p.get("on"), "health": health(p)}
+      for k, p in sorted(ents.items()) if str(p.get("sh", "")).startswith("4") and ID in (p.get("of"), p.get("on"))]
+intents = []
+for line in open(f"{T}/intents"):
+    c, raw = line.rstrip("\n").split("\t", 1); intents.append({"constellation": c, **dec(raw)})
+hb = []
+for line in open(f"{T}/hb"):
+    if "\t" not in line: continue
+    k, v = line.rstrip("\n").split("\t", 1); seg = k.split(":"); d = dec(v)
+    if len(seg) < 6: continue
+    hb.append({"key": k, "env": seg[3], "comp": seg[4], "node": ":".join(seg[5:]),
+               "age_s": max(0, now - int(d["ts"])) if d.get("ts") else None})
+also = os.environ.get("ALSO", "")
+out = {"id": ID, "constellation": holder or None, "also_in": [a.strip("{}") for a in also.split()], "shape": SHAPES.get(sh, sh or None), "env": e.get("env"),
+       "health": health(e) if e else None, "load": slot(e, 16) if e else None,
+       "placements": pl, "intents": intents, "heartbeats": hb,
+       "host": {"credential_file": os.environ["CRED"] if os.environ["HOST_CRED"] == "1" else None,
+                "ledger_entries": None if os.environ["HOST_LEDGER"] == "-1" else int(os.environ["HOST_LEDGER"])}}
+if not e and not intents and not hb:
+    if os.environ["MODE"] == "json": print(json.dumps(out))
+    else: print(f"no entity, intent or heartbeat for '{ID}' in {os.environ['SERVED']}")
+    sys.exit(1)
+if os.environ["MODE"] == "json":
+    print(json.dumps(out)); sys.exit(0)
+age = lambda a: "—" if a is None else (f"{a}s" if a < 120 else f"{a//60}m (stale)")
+print(f"{ID}  {out['shape'] or 'not on the topology'}{' in {' + holder + '}' if holder else ''}{' (also ' + also + ')' if also else ''}"
+      f"  env {out['env'] or '—'}  health {out['health'] or '—'}  load {out['load'] if out['load'] is not None else '—'}")
+if pl:
+    print("  placements  " + "  ".join(f"{p['id']}:{p['health'] or '?'}" for p in pl))
+else:
+    print("  placements  —" + ("  (a site is placed on the node that serves it; an app or daemon by its heartbeat)" if sh.startswith("3") else ""))
+for i in intents:
+    print(f"  intent      {{{i['constellation']}}} shape {i.get('shape') or '—'} profile {i.get('profile') or '—'}"
+          f" env {i.get('environment') or '—'}{' on ' + i['on'] if i.get('on') else ''}  by {i.get('declared_by') or '—'}")
+if not intents and sh.startswith("3"):
+    print("  intent      — (none recorded: re-register to record it)")
+for h in hb:
+    print(f"  heartbeat   {h['comp']}@{h['node']} ({h['env']}) {age(h['age_s'])}")
+host = out["host"]
+print(f"  this host   credential {'present' if host['credential_file'] else '—'} · "
+      f"ledger {'—' if host['ledger_entries'] is None else str(host['ledger_entries']) + ' entr' + ('y' if host['ledger_entries'] == 1 else 'ies')}")
+PYEOF
+    if [[ "$MODE" != json && $rc -eq 0 ]] && command -v geodineum >/dev/null 2>&1; then
+        geodineum status --visitors "$ID" --compact 2>/dev/null || true
+    fi
+    exit "$rc"
+fi
+
 TK="{${NS}}:gnode:constellation"
 # One read of the constellation: every entity of every shape, decoded by shape below.
 vk HGETALL "${TK}:entities" > "$T/ents" || true
@@ -168,7 +295,7 @@ for s in out["services"]:
 PYEOF
 
 # Visitor counters (beacon-fed aggregates) — the fold lives in the installer
-# CLI (`geodineum visitors`); ride along here best-effort, never fatally.
-if [[ "$MODE" != "json" ]] && command -v geodineum >/dev/null 2>&1; then
-    geodineum visitors --compact 2>/dev/null || true
+# CLI (`geodineum status --visitors`); ride along here best-effort, never fatally.
+if [[ "$MODE" != "json" && -z "${GNODE_STATUS_INNER:-}" ]] && command -v geodineum >/dev/null 2>&1; then
+    geodineum status --visitors --compact 2>/dev/null || true
 fi
