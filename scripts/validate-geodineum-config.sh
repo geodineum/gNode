@@ -643,13 +643,13 @@ check_layer_3() {
 
     # zero client passwords is the canonical state for a fresh
     # install with no sites registered yet — not a degradation. Sites
-    # are registered post-install via `geodineum new site <domain>`
+    # are registered post-install via `geodineum register <domain> --new website-wp`
     # which triggers provision-gnode-site.sh. Demote to PASS with
     # contextual message, same shape as the optional-file fix.
     if [[ $client_count -gt 0 ]]; then
         record_check 3 PASS "$client_count client password(s) found"
     else
-        record_check 3 PASS "No site credentials yet — fresh install, no sites registered (run \`geodineum new site <domain>\` to register)"
+        record_check 3 PASS "No site credentials yet — fresh install, no sites registered (run \`geodineum register <domain> --new website-wp\` to register)"
     fi
 
     # Check for password duplication across stores

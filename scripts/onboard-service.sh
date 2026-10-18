@@ -78,7 +78,7 @@ valkey_admin_cli() {
         log_error "Admin password file not found: $VALKEY_ADMIN_PASSWORD_FILE"
         log_error "ACL provisioning requires the ValKey admin credential, which by"
         log_error "design exists only on the constellation master. Run this on the"
-        log_error "master: geodineum provision-service <name>"
+        log_error "master: geodineum register <name> --node <node>"
         return 1
     fi
 }
@@ -98,7 +98,7 @@ fi
 # a silent default, silently handed the historical powerset to any service
 # that declared nothing, and was indistinguishable from a correct grant on
 # every own-namespace check. A service without declarations now fails loud
-# here instead — `geodineum register` / `geodineum service new` both write a
+# here instead — `geodineum register` writes a
 # declaring manifest for you.
 # Cross-service access is NEVER a self-declared grant — that is the daemon
 # relay's lane, with its own authorization (relay/policy.rs).
@@ -638,6 +638,10 @@ else
         chown "root:${CRED_GROUP}" "$PASSWORD_FILE" 2>/dev/null || true
         printf 'root:%s:640\n' "$CRED_GROUP" > "${PASSWORD_FILE}.owner" 2>/dev/null || true
         log_success "Password stored: $PASSWORD_FILE (group ${CRED_GROUP})"
+        # Minted in this run: if the run fails from here, take it back, so a refused
+        # manifest leaves no identity without a service behind it.
+        _NEW_IDENTITY=1
+        trap '_rc=$?; if [[ $_rc -ne 0 && "${_NEW_IDENTITY:-0}" == 1 ]]; then valkey_admin_cli ACL DELUSER "$ACL_USER" >/dev/null 2>&1; valkey_admin_cli ACL SAVE >/dev/null 2>&1; rm -f "$PASSWORD_FILE" "${PASSWORD_FILE}.owner"; log_warning "Onboarding failed: the identity it had just minted (${ACL_USER}) was removed again; geodineum deregister ${SITE_ID} clears the rest"; fi' EXIT
 
         # Create ACL user
         valkey_admin_cli <<EOF >/dev/null
