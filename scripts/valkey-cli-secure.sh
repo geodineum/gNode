@@ -34,7 +34,7 @@ VALKEY_USER="${VALKEY_USER:-gnode_client}"
 # Resolve the DAEMON TIER to this node's own identity.
 #
 # `gnode_daemon` names a privilege tier, not a login. Where the master has
-# minted this node its own user (constellation expand, bundle V2), that user
+# minted this node its own user (geodineum node add, bundle V2), that user
 # IS the daemon tier here and every caller asking for gnode_daemon means it.
 # Resolving centrally keeps ~56 call sites across the ecosystem correct
 # without any of them knowing a node identity exists.

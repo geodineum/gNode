@@ -2,7 +2,7 @@
 #
 # Mint a per-node ValKey identity for a node that has ALREADY joined.
 #
-# `constellation expand` mints an identity as part of enrolling a NEW node,
+# `geodineum node add` mints an identity as part of enrolling a NEW node,
 # and its add_peer step is not idempotent: it appends a second [Peer] block,
 # allocates a fresh VPN IP, and leaves the previous peer live and stale. So
 # expand must never be re-run against a working member just to issue it a

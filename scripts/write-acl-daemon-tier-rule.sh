@@ -3,7 +3,7 @@
 # Write /etc/geodineum/components/gnode-daemon/acl-daemon-tier.rule from the
 # live gnode_daemon user.
 #
-# `constellation expand` mints each node a per-node ValKey identity of the
+# `geodineum node add` mints each node a per-node ValKey identity of the
 # daemon tier, and reads the grant from that rule file rather than carrying
 # its own copy — one definition of a privilege boundary. install.sh writes
 # the file when it provisions gnode_daemon, so fresh installs have it.
@@ -83,4 +83,4 @@ printf '%s\n' "$RULE" > "$RULE_FILE"
 chown root:gnode "$RULE_FILE" 2>/dev/null || true
 chmod 0640 "$RULE_FILE"
 echo "Wrote ${RULE_FILE} (root:gnode 0640)"
-echo "'geodineum constellation expand' will now mint per-node identities."
+echo "'geodineum node add' will now mint per-node identities."

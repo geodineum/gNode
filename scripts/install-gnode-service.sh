@@ -531,7 +531,7 @@ if [ -n "${GNODE_NODE_ID:-}" ] && [ -f "$DAEMON_ENV_DST" ]; then
 fi
 
 # Per-node ValKey identity: point daemon.env at this node's own user where the
-# master minted one (constellation expand, bundle V2). daemon.env ships with
+# master minted one (geodineum node add, bundle V2). daemon.env ships with
 # the shared gnode_daemon login, which is correct for a master or a standalone
 # install and correct as a fallback for a pre-V2 join.
 #
