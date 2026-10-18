@@ -54,6 +54,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+source "$SCRIPT_DIR/cli/constellation.sh"
 
 # Credential and config directories (centralized FHS layout)
 CREDENTIAL_DIR="${GNODE_CREDENTIAL_DIR:-/etc/geodineum/credentials}"
@@ -399,7 +400,7 @@ if [[ -n "$YAML_PATH" ]]; then
 fi
 
 # Resolve environments
-TOPOLOGY_NS="${GNODE_TOPOLOGY_NAMESPACE:-geodineum}"
+TOPOLOGY_NS="$(gnode_cli_constellation)"
 # The manifest's gnode.constellation names where the service registers and whose
 # heartbeat family it writes (SPEC-ONE-TOPOLOGY §10); the environment is the fallback.
 if [[ -n "${RESOLVED_YAML:-}" && -f "${RESOLVED_YAML:-}" ]] && command -v yq >/dev/null 2>&1; then
@@ -506,6 +507,22 @@ if [[ -z "$PROFILE" && -n "$RESOLVED_YAML" ]] && command -v yq >/dev/null 2>&1; 
         PROFILE_SOURCE="manifest"
     fi
 fi
+# The manifest's gnode: block is the declaration; a profile only stands in for it.
+_manifest_shape=""
+if [[ -n "$RESOLVED_YAML" ]] && command -v yq >/dev/null 2>&1; then
+    _manifest_shape=$(yq eval '.gnode.shape // ""' "$RESOLVED_YAML" 2>/dev/null | tr -d '"')
+    [[ "$_manifest_shape" == null ]] && _manifest_shape=""
+fi
+if [[ -n "$_manifest_shape" ]]; then
+    case "$_manifest_shape" in site) _shape_profile=web ;; app) _shape_profile=headless ;; *) _shape_profile=service ;; esac
+    if [[ -z "$PROFILE" ]]; then
+        PROFILE="$_shape_profile"; PROFILE_SOURCE="manifest gnode.shape"
+    elif [[ "$(gnode_cli_shape "$PROFILE")" != "$_manifest_shape" ]]; then
+        log_warning "Profile '$PROFILE' ($PROFILE_SOURCE) disagrees with the manifest's gnode.shape '$_manifest_shape' — the shape wins"
+        PROFILE="$_shape_profile"; PROFILE_SOURCE="manifest gnode.shape"
+    fi
+fi
+SHAPE="${_manifest_shape:-$(gnode_cli_shape "${PROFILE:-web}")}"
 if [[ -z "$PROFILE" ]]; then
     PROFILE="web"
     PROFILE_SOURCE="DEFAULT"
@@ -694,6 +711,13 @@ HEADER
         else
             echo "$DISCOVERY_ENTRY" >> "$DISCOVERY_PATHS_FILE"
             log_success "Added to discovery manifest: $DISCOVERY_ENTRY"
+            # The registration ledger (Geodineum lib/common.sh): what registering
+            # created on this host, so `geodineum deregister` undoes exactly that.
+            _ledger_dir="${GEODINEUM_REGISTRATIONS_DIR:-/etc/geodineum/registrations}"
+            install -d -m 0750 "$_ledger_dir"
+            _ledger_line="config"$'\t'"discovery"$'\t'"$DISCOVERY_ENTRY"
+            grep -qxF -- "$_ledger_line" "$_ledger_dir/${SITE_ID}.tsv" 2>/dev/null \
+                || { printf '%s\n' "$_ledger_line" >> "$_ledger_dir/${SITE_ID}.tsv"; chmod 0640 "$_ledger_dir/${SITE_ID}.tsv"; }
         fi
     fi
 else
@@ -702,50 +726,51 @@ else
 fi
 
 # =============================================================================
-# Step 3.5: Immediate topology registration (S6c)
-# Register the service's capability vector into the canonical (C) topology NOW,
-# rather than waiting ~120s for the daemon's discovery scan. Uses the daemon's
-# register-tools subcommand, which performs the Q64.64/gMath vector computation
-# that Lua cannot — so this is the architecture-correct "provision yields a (C)
-# entity" path (a pure-Lua composed verb can't compute the vector). Best-effort:
-# the periodic scan (or a daemon restart) is the fallback if it doesn't run.
+# Step 3.5: Topology registration
+# The service's own entity by name on the one topology, through the daemon's
+# register-tools (it codes the words the manifest's gnode: block declares; the
+# profile stands in when there is no block). A site is placed on this node: its
+# health is this node's daemon heartbeat. An app or daemon is placed by its own
+# heartbeat. Then the intent: what was declared, so the daemon can re-derive it.
 # =============================================================================
 
-if [[ "$DRY_RUN" != "true" ]]; then
-    log_step "Step 3.5: Immediate Topology Registration"
+if [[ "$DRY_RUN" == "true" ]]; then
+    log_dry "register-tools --tier service --site $SITE_ID (shape $SHAPE in {$TOPOLOGY_NS})$([[ "$SHAPE" == site ]] && echo ", placed on $(gnode_cli_node_id)")"
+    log_dry "HSET {$TOPOLOGY_NS}:gnode:registrations $SITE_ID"
+else
+    log_step "Step 3.5: Topology Registration"
     DAEMON_BIN="${GNODE_DAEMON_BIN:-${PROJECT_ROOT}/daemon/target/release/gnode-daemon}"
     [[ -x "$DAEMON_BIN" ]] || DAEMON_BIN="$(command -v gnode-daemon 2>/dev/null || true)"
     DAEMON_CRED="${CREDENTIAL_DIR}/valkey_daemon.password"
-    # Register the SITE'S OWN entity by name on the one topology: the manifest's
-    # gnode: block is the declaration (shape, axes, heartbeat, holds, requires,
-    # fundamentality, capacity_weight); the profile is the fallback when the block
-    # is absent. NOT a loop of framework components (those are shape 2; see
-    # register-tools --tier tool).
+    [[ -n "$DAEMON_BIN" ]] || { log_error "gnode-daemon binary not found — '$SITE_ID' is NOT on the topology"; exit 1; }
+    [[ -r "$DAEMON_CRED" ]] || { log_error "Cannot read $DAEMON_CRED — '$SITE_ID' is NOT on the topology"; exit 1; }
     _manifest_arg=()
     [[ -n "${RESOLVED_YAML:-}" && -f "${RESOLVED_YAML:-}" ]] && _manifest_arg=(--manifest "$RESOLVED_YAML")
-    if [[ -z "$DAEMON_BIN" ]] || [[ ! -r "$DAEMON_CRED" ]]; then
-        log_info "Daemon binary/credential unavailable — service registers on the next daemon scan (~120s) or restart"
-    elif VALKEY_USER=gnode_daemon GNODE_REDIS_AUTH_FILE="$DAEMON_CRED" \
+    _on=""
+    [[ "$SHAPE" == site ]] && _on="$(gnode_cli_node_id)"
+    if ! _reg_out="$(GNODE_TOPOLOGY_NAMESPACE="$TOPOLOGY_NS" VALKEY_USER=gnode_daemon GNODE_REDIS_AUTH_FILE="$DAEMON_CRED" \
             "$DAEMON_BIN" register-tools --tier service --site "$SITE_ID" --profile "$PROFILE" "${_manifest_arg[@]}" \
-            ${PRIMARY_ENV:+--environment "$PRIMARY_ENV"} >/dev/null 2>&1; then
-        log_success "Registered '$SITE_ID' now on the one topology (${_manifest_arg:+manifest gnode: block}${_manifest_arg:-'$PROFILE' profile})"
-        # Declare the INTENT alongside the entity. The entity is derived from
-        # (intent x schema); recording the intent is what lets the daemon
-        # re-derive it later instead of leaving it frozen at whatever schema
-        # was current today. Without this the registration is one-shot: a
-        # schema change moves dimension indices and nothing recomputes.
-        _intent_key="{${TOPOLOGY_NS}}:gnode:registrations"
-        _intent_json=$(printf '{"site":"%s","profile":"%s","environment":"%s","declared_at":%s,"declared_by":"%s"}' \
-            "$SITE_ID" "$PROFILE" "${PRIMARY_ENV:-production}" "$(date +%s)" \
-            "onboard-service.sh@$(hostname)")
-        if valkey_daemon_cli HSET "$_intent_key" "$SITE_ID" "$_intent_json" >/dev/null 2>&1; then
-            log_success "Registration intent declared (profile=$PROFILE env=${PRIMARY_ENV:-production})"
-        else
-            log_warning "Could not record registration intent — this entity will not be"
-            log_warning "  re-derived when the schema changes. Registration itself is fine."
+            ${PRIMARY_ENV:+--environment "$PRIMARY_ENV"} ${_on:+--on "$_on"} 2>&1)"; then
+        log_error "Topology registration of '$SITE_ID' failed:"
+        printf '%s\n' "$_reg_out" | tail -n 5 | sed 's/^/    /' >&2
+        exit 1
+    fi
+    log_success "Registered '$SITE_ID' as $SHAPE in {$TOPOLOGY_NS}${_on:+, placed on $_on}"
+    # One intent per id across the constellations this node serves: an older one
+    # left in another constellation would report drift for an entity that moved.
+    while IFS= read -r _c; do
+        [[ "$_c" == "$TOPOLOGY_NS" ]] && continue
+        if [[ "$(valkey_daemon_cli HDEL "{${_c}}:gnode:registrations" "$SITE_ID" 2>/dev/null)" == 1 ]]; then
+            log_info "Removed an older registration intent for '$SITE_ID' from {${_c}}"
         fi
+    done < <(gnode_cli_constellations)
+    _intent_json=$(printf '{"site":"%s","profile":"%s","shape":"%s","environment":"%s","on":"%s","declared_at":%s,"declared_by":"%s"}' \
+        "$SITE_ID" "$PROFILE" "$SHAPE" "${PRIMARY_ENV:-production}" "$_on" "$(date +%s)" "onboard-service.sh@$(gnode_cli_node_id)")
+    if [[ "$(valkey_daemon_cli HSET "{${TOPOLOGY_NS}}:gnode:registrations" "$SITE_ID" "$_intent_json" 2>/dev/null)" =~ ^[01]$ ]]; then
+        log_success "Registration intent declared in {$TOPOLOGY_NS} (shape=$SHAPE env=${PRIMARY_ENV:-production})"
     else
-        log_info "Immediate registration skipped — service registers on the next daemon scan (~120s) or restart"
+        log_error "Could not record the registration intent in {$TOPOLOGY_NS}"
+        exit 1
     fi
 fi
 
@@ -985,7 +1010,6 @@ if [[ "$DRY_RUN" != "true" ]]; then
         echo "  $VALKEY_CLI GET '{${SITE_ID}}:comms:config'"
         echo ""
     fi
-    echo "  # Services will appear in topology within 120s (daemon scan interval)"
-    echo "  # Or restart the daemon for immediate discovery:"
-    echo "  #   sudo systemctl restart gnode-daemon"
+    echo "  # The service on the one topology"
+    echo "  sudo geodineum status $SITE_ID"
 fi

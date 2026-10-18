@@ -7,7 +7,8 @@
 #                                                             every entity of one shape
 #                                                             (site|app|daemon|component|node)
 #
-# Wraps FCALL GNODE_TOPO_DEREGISTER on {<c>}:gnode:constellation. Under one key a
+# Wraps FCALL GNODE_TOPO_DEREGISTER on {<c>}:gnode:constellation: by id, the served
+# constellation that holds the entity (or the one --constellation names). Under one key a
 # blanket "--all" would empty the constellation, so removal is by id or by one
 # shape with an explicit --confirm. Reads the admin credential → requires_sudo.
 set -uo pipefail
@@ -51,6 +52,14 @@ for i in range(0, len(l) - 1, 2):
         echo "deregistered $n entit$([[ $n -eq 1 ]] && echo y || echo ies) of shape $shape"
         ;;
     *)
-        dereg_one "$1"
+        # By id: the constellation that holds it (--constellation names one explicitly).
+        if [[ -n "${GNODE_TOPOLOGY_NAMESPACE:-}" ]]; then dereg_one "$1"; exit $?; fi
+        found=0
+        while IFS= read -r c; do
+            [[ "$(vc --raw HEXISTS "{$c}:gnode:constellation:entities" "$1")" == 1 ]] || continue
+            found=1
+            TK="{$c}:gnode:constellation" dereg_one "$1" || exit 1
+        done < <(gnode_cli_constellations)
+        [[ $found -eq 1 ]] || { echo "deregister: no entity '$1' in $(gnode_cli_constellations | tr '\n' ' ')" >&2; exit 1; }
         ;;
 esac

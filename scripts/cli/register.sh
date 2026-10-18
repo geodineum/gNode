@@ -74,7 +74,7 @@ case "$sub" in
         env_arg=(); [[ -n "$environment" ]] && env_arg=(--environment "$environment")
         if [[ "$on" == "__default__" ]]; then
             on=""
-            [[ "$profile" == web ]] && on="$(sed -n 's/^GNODE_NODE_ID="\{0,1\}\([^"]*\)"\{0,1\}/\1/p' /etc/geodineum/components/gnode-daemon/daemon.env 2>/dev/null | sed -n 1p)" && on="${on:-$(hostname -s)}"
+            [[ "$(gnode_cli_shape "$profile" "$manifest")" == site ]] && on="$(gnode_cli_node_id)"
         fi
         on_arg=(); [[ -n "$on" ]] && on_arg=(--on "$on")
         src_arg=(--profile "$profile"); [[ -n "$manifest" ]] && src_arg=(--manifest "$manifest")

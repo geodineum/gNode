@@ -1679,6 +1679,10 @@ server.register_function{
         -- Helper function to delete a key (respects dry_run)
         local function delete_key(key, reason)
             if dry_run then
+                if server.call('EXISTS', key) == 0 then
+                    table.insert(skipped_keys, {key = key, reason = "did not exist"})
+                    return false
+                end
                 table.insert(deleted_keys, {key = key, reason = reason, dry_run = true})
                 return true
             else
@@ -1705,7 +1709,9 @@ server.register_function{
         -- =============================================================================
         local registry_key = 'gnode:sites:registry'
         if dry_run then
-            table.insert(deleted_keys, {key = registry_key .. " (SREM " .. service_id .. ")", reason = "registry entry"})
+            if server.call('SISMEMBER', registry_key, service_id) == 1 then
+                table.insert(deleted_keys, {key = registry_key .. " (SREM " .. service_id .. ")", reason = "registry entry"})
+            end
         else
             local removed = server.call('SREM', registry_key, service_id)
             if removed > 0 then
@@ -1790,6 +1796,23 @@ server.register_function{
         -- =============================================================================
         -- 7. Delete ALL service-namespaced keys (if include_all_namespaced is true)
         -- =============================================================================
+        -- A constellation named like the service shares its hash tag ({coursematch}
+        -- is both). Then only the service's own families go; the constellation's
+        -- keys (topology, heartbeats, intents, leases, grants) are reported as kept.
+        local shared = server.call('EXISTS', '{' .. service_id .. '}:gnode:constellation:meta') == 1
+        local own_families = {
+            'gnode:unified:', 'gnode:health', 'gnode:broadcast', 'gnode:comms:', 'gnode:receipts:',
+            'gnode:baseline', 'comms:', 'config:', 'forms:', 'cache:', 'ratelimit:', 'circuit:',
+            'metrics', 'visits:', 'pagecounts:', 'bothits:', 'referrers:', 'transitions:', 'res:',
+        }
+        local tag = '{' .. service_id .. '}:'
+        local function service_owned(key)
+            local rest = string.sub(key, #tag + 1)
+            for _, f in ipairs(own_families) do
+                if string.sub(rest, 1, #f) == f then return true end
+            end
+            return false
+        end
         if include_all_namespaced then
             -- Find all keys with the service's hash tag prefix
             local pattern = '{' .. service_id .. '}:*'
@@ -1800,7 +1823,11 @@ server.register_function{
                 local batch = result[2]
 
                 for _, key in ipairs(batch) do
-                    delete_key(key, "namespaced key")
+                    if not shared or service_owned(key) then
+                        delete_key(key, "namespaced key")
+                    else
+                        table.insert(skipped_keys, {key = key, reason = "constellation " .. service_id .. " shares the namespace: kept"})
+                    end
                 end
             until cursor == "0"
 
@@ -1825,6 +1852,7 @@ server.register_function{
             success = #errors == 0,
             service_id = service_id,
             dry_run = dry_run,
+            shared_namespace = shared,
             deleted_count = #deleted_keys,
             skipped_count = #skipped_keys,
             deleted_keys = deleted_keys,
