@@ -21,6 +21,8 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/constellation.sh"
+export GNODE_TOPOLOGY_NAMESPACE="$(gnode_cli_constellation)"
 GNODE_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
 DAEMON_BIN="${GNODE_DAEMON_BIN:-${GNODE_ROOT}/daemon/target/release/gnode-daemon}"
 [[ -x "$DAEMON_BIN" ]] || DAEMON_BIN="$(command -v gnode-daemon 2>/dev/null || true)"
@@ -82,7 +84,7 @@ case "$sub" in
     node)
         # register node <id> [--role <word>] [--specialization <word>] [--constellation <c>]
         node="${1:-}"; shift || true
-        role="observer"; spec=""; c="${GNODE_TOPOLOGY_NAMESPACE:-geodineum}"
+        role="observer"; spec=""; c="$(gnode_cli_constellation)"
         while [[ $# -gt 0 ]]; do
             case "$1" in
                 --role)            role="${2:-}"; shift 2 ;;

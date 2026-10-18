@@ -14,7 +14,8 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VCLI="$(dirname "$SCRIPT_DIR")/valkey-cli-secure.sh"
-NS="${GNODE_TOPOLOGY_NAMESPACE:-geodineum}"
+source "$(dirname "${BASH_SOURCE[0]}")/constellation.sh"
+NS="$(gnode_cli_constellation)"
 MODE=table
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     cat <<'HLP'

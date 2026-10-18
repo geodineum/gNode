@@ -10,14 +10,15 @@
 #                                              and how old the reading is (shapes with a load slot)
 #   sudo geodineum topology verify             the library's own invariant check
 #
-# The constellation is GNODE_TOPOLOGY_NAMESPACE (default geodineum). Reads the
+# The constellation is the one this node serves (cli/constellation.sh). Reads the
 # admin credential (root-readable) → requires_sudo. Read-only.
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PORT="${VALKEY_PORT:-47445}"
 CRED_DIR="${GEODINEUM_CREDENTIALS_DIR:-/etc/geodineum/credentials}"
-NS="${GNODE_TOPOLOGY_NAMESPACE:-geodineum}"
+source "$(dirname "${BASH_SOURCE[0]}")/constellation.sh"
+NS="$(gnode_cli_constellation)"
 TK="{${NS}}:gnode:constellation"
 
 AUTH=""

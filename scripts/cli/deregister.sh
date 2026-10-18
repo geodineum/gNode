@@ -14,7 +14,8 @@ set -uo pipefail
 
 PORT="${VALKEY_PORT:-47445}"
 CRED_DIR="${GEODINEUM_CREDENTIALS_DIR:-/etc/geodineum/credentials}"
-NS="${GNODE_TOPOLOGY_NAMESPACE:-geodineum}"
+source "$(dirname "${BASH_SOURCE[0]}")/constellation.sh"
+NS="$(gnode_cli_constellation)"
 TK="{${NS}}:gnode:constellation"
 
 AUTH=""
