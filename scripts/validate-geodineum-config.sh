@@ -321,7 +321,7 @@ check_htaccess_readable() {
         sym=$(stat -c '%A' "$f" 2>/dev/null); grp=$(stat -c '%G' "$f" 2>/dev/null)
         ok=false
         if [[ "${sym:7:1}" == "r" ]]; then ok=true                       # other-readable
-        elif [[ "${sym:4:1}" == "r" ]] && id -nG www-data 2>/dev/null | tr ' ' '\n' | grep -qx "$grp"; then ok=true  # group www-data is in
+        elif [[ "${sym:4:1}" == "r" && " $(id -nG www-data 2>/dev/null) " == *" $grp "* ]]; then ok=true  # group www-data is in
         fi
         if ! $ok; then
             bad=$((bad+1))
@@ -331,7 +331,7 @@ check_htaccess_readable() {
             fi
         fi
     done < <(find "$root" -name .htaccess 2>/dev/null)
-    [[ $bad -eq 0 ]] && record_check "$layer" PASS "all .htaccess under ${root} are www-data-readable"
+    if [[ $bad -eq 0 ]]; then record_check "$layer" PASS "all .htaccess under ${root} are www-data-readable"; fi
 }
 
 # Guardrail: shared framework/library source (gCore, gNode-Client) MUST be
@@ -357,7 +357,7 @@ check_source_readable() {
                 chgrp -R geodineum-code "$root/$tree" && echo -e "  ${CYAN}[FIXED]${NC} $tree → :geodineum-code"
             fi
         fi
-        sample=$(find "$root/$tree" -type f -name '*.php' 2>/dev/null | head -1)
+        sample=$(find "$root/$tree" -type f -name '*.php' -print -quit 2>/dev/null)
         for u in $CONSUMERS; do
             id "$u" >/dev/null 2>&1 || continue
             [[ -n "$sample" ]] || continue
@@ -370,7 +370,7 @@ check_source_readable() {
             fi
         done
     done
-    [[ $bad -eq 0 ]] && record_check "$layer" PASS "shared source (gCore, gNode-Client) is geodineum-code + readable by consumers"
+    if [[ $bad -eq 0 ]]; then record_check "$layer" PASS "shared source (gCore, gNode-Client) is geodineum-code + readable by consumers"; fi
 }
 
 # Check file does not contain secrets patterns
@@ -389,7 +389,7 @@ check_no_secrets() {
     # Check for common secret patterns
     if grep -qiE '(password|secret|token)\s*=' "$path" 2>/dev/null; then
         # Exclude comments and known-safe patterns
-        if grep -vE '^\s*#' "$path" | grep -qiE '(VALKEY_PASSWORD|SECRET_KEY|AUTH_TOKEN)\s*=' 2>/dev/null; then
+        if [[ -n "$(grep -vE '^\s*#' "$path" | grep -iE '(VALKEY_PASSWORD|SECRET_KEY|AUTH_TOKEN)\s*=' 2>/dev/null)" ]]; then
             secrets_found=true
         fi
     fi
@@ -876,7 +876,7 @@ check_layer_6() {
     # Check Cargo.toml for version info
     if [[ -f "$gnode_dir/daemon/Cargo.toml" ]]; then
         local version
-        version=$(grep '^version' "$gnode_dir/daemon/Cargo.toml" 2>/dev/null | head -1 | sed 's/.*"\(.*\)".*/\1/')
+        version=$(grep -m1 '^version' "$gnode_dir/daemon/Cargo.toml" 2>/dev/null | sed 's/.*"\(.*\)".*/\1/')
         if [[ -n "$version" ]]; then
             record_check 6 PASS "gNode daemon version: $version"
         fi
