@@ -33,19 +33,17 @@
 
 set -euo pipefail
 
-# ─── PERMISSION / ACL MODEL — 3 COORDINATED LOCATIONS (keep in sync) ─────────
-# ValKey credential ownership + client ACL grants are defined in THREE places
+# ─── PERMISSION / ACL MODEL — 2 COORDINATED LOCATIONS (keep in sync) ─────────
+# ValKey credential ownership + client ACL grants are defined in TWO places
 # that MUST change together (fixing one alone is what caused the geodine
-# NOAUTH crash-loop). Canonical model + rationale: ~/gh/PERMISSION_MODEL.md.
-#   [1] gNode/scripts/register-site.sh   — web-site creds: ACL grant +
-#                                          root:geodineum-web 0640 + .owner sidecar
-#   [2] gNode/scripts/onboard-service.sh — service/component creds: ACL grant +
-#                                          root:<component> 0640 (per-component group) + sidecar (THIS FILE)
-#   [3] Geodineum[-pro]/lib/geodeploy.sh :: geodeploy_fix_all_credentials()
-#                                          — deploy-time enforcement from the
-#                                          .owner sidecars (NO www-data default)
+# NOAUTH crash-loop). Canonical model + rationale: the installer repos' CONTRACTS/permission-model.md.
+#   [1] THIS FILE — every service's and site's creds: ACL grant + root:<group> 0640
+#                   (--cred-group: geodineum-web for sites, the component's own group
+#                   for services) + .owner sidecar
+#   [2] Geodineum[-pro]/lib/geodeploy.sh :: geodeploy_fix_all_credentials()
+#                   — deploy-time enforcement from the .owner sidecars (NO www-data default)
 # Change the cred owner/group/mode or the client ACL command set in any one →
-# mirror it in the other two (and any live-migration script).
+# mirror it in the other (and any live-migration script).
 # ────────────────────────────────────────────────────────────────────────────
 
 # =============================================================================
