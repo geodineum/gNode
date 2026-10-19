@@ -1,5 +1,6 @@
 #!/bin/bash
-# geodineum topology deregister — remove an entity from the one topology.
+# geodineum topology deregister — the topology primitive: removes one entity, nothing else.
+# The route that undoes a registration end to end is `geodineum deregister <id>`.
 #
 #   sudo geodineum topology deregister <id>                   the entity, its indexes, edges
 #                                                             and placements (cascade)

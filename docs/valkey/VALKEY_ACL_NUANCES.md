@@ -69,7 +69,7 @@ if (getenv("REDISCLI_AUTH")) {
 
 ## Password Lifecycle Deep Dive
 
-### 1. Generation (register-site.sh)
+### 1. Generation (onboard-service.sh, run by `geodineum register`)
 
 ```bash
 # Generate 64-character hex password
@@ -316,7 +316,7 @@ VALKEY_USER=gnode_daemon ./scripts/valkey-cli-secure.sh ACL GETUSER gnode_client
 **Fix:**
 ```bash
 # Re-run creation script (now includes resetpass)
-/opt/gNode/scripts/register-site.sh staging_my_app
+sudo geodineum register <path of staging_my_app>
 ```
 
 **Verification:**
@@ -345,7 +345,7 @@ od -c /opt/gNode/.gnode/valkey_client_staging_my_app.password | tail -1
 **Fix:**
 ```bash
 # Re-run creation script (now uses echo -n)
-/opt/gNode/scripts/register-site.sh staging_my_app
+sudo geodineum register <path of staging_my_app>
 ```
 
 **Verification:**
@@ -376,10 +376,10 @@ VALKEY_USER=gnode_daemon ./scripts/valkey-cli-secure.sh ACL GETUSER gnode_client
 **Fix:**
 ```bash
 # Synchronize by re-running creation script
-/opt/gNode/scripts/register-site.sh staging_my_app
+sudo geodineum register <path of staging_my_app>
 ```
 
-**Prevention:** Always use `register-site.sh` script, never manually edit ACL.
+**Prevention:** Always use `geodineum register` (it recomposes the grants from the manifest), never edit an ACL by hand.
 
 ---
 
@@ -477,7 +477,7 @@ VALKEY_USER=gnode_daemon ./scripts/valkey-cli-secure.sh KEYS "*:staging_my_app:*
 **DO:**
 ```bash
 # Use provided script for all ACL operations
-/opt/gNode/scripts/register-site.sh staging_my_app
+sudo geodineum register <path of staging_my_app>
 ```
 
 **DON'T:**
@@ -573,7 +573,7 @@ $redis = new Redis();
 
 - **docs/ACL_PASSWORD_MANAGEMENT.md** - User-facing guide with examples
 - **CLAUDE.md** - System architecture with ACL authentication section
-- **scripts/register-site.sh** - Automated ACL user creation
+- **scripts/onboard-service.sh** - ACL user creation from the manifest (run by `geodineum register`)
 - **scripts/valkey-cli-secure.sh** - Wrapper script using REDISCLI_AUTH
 
 ---
@@ -582,7 +582,7 @@ $redis = new Redis();
 
 | Scenario | Command |
 |----------|---------|
-| Create ACL user | `/opt/gNode/scripts/register-site.sh {service_id}` |
+| Create ACL user | `sudo geodineum register <path of {service_id}>` |
 | Test auth | `REDISCLI_AUTH="$(cat password_file)" valkey-cli --user {user} PING` |
 | List users | `VALKEY_USER=gnode_daemon ./scripts/valkey-cli-secure.sh ACL LIST` |
 | Check permissions | `VALKEY_USER=gnode_daemon ./scripts/valkey-cli-secure.sh ACL GETUSER {user}` |

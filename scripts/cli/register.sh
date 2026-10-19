@@ -1,6 +1,6 @@
 #!/bin/bash
-# geodineum topology register — register components and sites on the one topology.
-# (`geodineum register`, without `topology`, is the installer's manifest generator.)
+# geodineum topology register — the topology primitive: writes one entity, nothing else.
+# The route that registers a service end to end is `geodineum register`.
 #
 #   sudo geodineum topology register components                            (re)register the ecosystem components (shape 2)
 #   sudo geodineum topology register service <site> [profile] [--env <dtap>] [--manifest <path>] [--on <node>]   register <site>'s OWN entity by name

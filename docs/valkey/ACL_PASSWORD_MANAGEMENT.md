@@ -14,10 +14,10 @@ valkey-cli --user gnode_client_staging_my_app \
 
 ## Password Lifecycle
 
-### 1. Generation (register-site.sh)
+### 1. Generation (onboard-service.sh, run by `geodineum register`)
 
 ```bash
-/opt/gNode/scripts/register-site.sh staging_my_app
+sudo geodineum register <path of staging_my_app>
 ```
 
 **What it does:**
@@ -145,7 +145,7 @@ VALKEY_USER=gnode_daemon ./scripts/valkey-cli-secure.sh KEYS "*:staging_my_app:*
 VALKEY_USER=gnode_daemon ./scripts/valkey-cli-secure.sh ACL GETUSER gnode_client_staging_my_app | grep -A5 "passwords"
 
 # Fix: Re-run creation script (now uses resetpass)
-/opt/gNode/scripts/register-site.sh staging_my_app
+sudo geodineum register <path of staging_my_app>
 ```
 
 **Cause 2:** Password file has newline
@@ -197,7 +197,7 @@ VALKEY_USER=gnode_daemon ./scripts/valkey-cli-secure.sh ACL SAVE
 
 | Task | Command |
 |------|---------|
-| Create site ACL | `/opt/gNode/scripts/register-site.sh {service_id}` |
+| Create site ACL | `sudo geodineum register <path of {service_id}>` |
 | Test auth | `REDISCLI_AUTH="$(cat /opt/gNode/.gnode/valkey_client_{service_id}.password)" valkey-cli --user gnode_client_{service_id} PING` |
 | List users | `VALKEY_USER=gnode_daemon ./scripts/valkey-cli-secure.sh ACL LIST` |
 | Check user perms | `VALKEY_USER=gnode_daemon ./scripts/valkey-cli-secure.sh ACL GETUSER {user}` |
@@ -209,7 +209,7 @@ VALKEY_USER=gnode_daemon ./scripts/valkey-cli-secure.sh ACL SAVE
 **New system:** Per-site `gnode_client_{service_id}` users
 
 **Migration steps:**
-1. Create per-site ACL user: `/opt/gNode/scripts/register-site.sh {service_id}`
+1. Create per-site ACL user: `sudo geodineum register <path of {service_id}>`
 2. WordPress auto-detects and uses new user (gcore-loader.php)
 3. Verify: Check logs for `"site_id":"{service_id}"`
 4. After all sites migrated: Deprecate `gnode_client`

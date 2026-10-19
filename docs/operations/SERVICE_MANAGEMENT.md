@@ -18,18 +18,17 @@ Each service gets:
 
 ## Quick Reference
 
-### Shell Scripts
+### The CLI (one route each)
 
 ```bash
-# Register a new service
-./scripts/register-site.sh my_service
-
-# Preview what deregistration would delete
-./scripts/deregister-service.sh my_service --dry-run
-
-# Completely remove a service
-./scripts/deregister-service.sh my_service --remove-acl --force
+sudo geodineum register                      # NEW (a wired skeleton) or INTEGRATE (an existing codebase)
+sudo geodineum status my_service             # what the constellation holds for it
+sudo geodineum deregister my_service --dry-run
+sudo geodineum deregister my_service         # the inverse of registering it
 ```
+
+The Lua functions below are what those routes call; use them directly only for
+inspection or repair.
 
 ### Lua Functions (FCALL)
 
@@ -56,24 +55,15 @@ FCALL GNODE_DEPROVISION_SERVICE 0 my_service '{"dry_run":true}'
 
 Register a new service with streams, ACL user, and registry entry.
 
-#### Using Shell Script (Recommended)
+#### Using the CLI (the route)
 
 ```bash
-# Full provisioning with ACL user
-./scripts/register-site.sh my_service
-
-# Specify environments
-./scripts/register-site.sh my_service --environments '["production","staging"]'
-
-# ACL only (no streams)
-./scripts/register-site.sh my_service --acl-only
-
-# Streams only (ACL exists)
-./scripts/register-site.sh my_service --streams-only
-
-# Preview without changes
-./scripts/register-site.sh my_service --dry-run
+sudo geodineum register my_service --new daemon --env production   # identity, streams, topology, intent, heartbeat
+sudo geodineum register /srv/my_service --env production           # an existing codebase: only what it lacks
 ```
+
+`register` runs `scripts/onboard-service.sh`, which calls `GNODE_PROVISION_SERVICE`
+below, then registers the entity on the one topology.
 
 #### Using Lua Function
 
@@ -261,28 +251,21 @@ Completely remove a service and all its data.
 #### Preview First (Recommended)
 
 ```bash
-# Using script
-./scripts/deregister-service.sh my_service --dry-run
-
-# Using Lua function
-FCALL GNODE_DEPROVISION_SERVICE 0 my_service '{"dry_run":true}'
+sudo geodineum deregister my_service --dry-run
+FCALL GNODE_DEPROVISION_SERVICE 0 my_service '{"dry_run":true}'   # the key part only; lists keys that exist
 ```
 
 #### Full Removal
 
 ```bash
-# Remove service data only (keep ACL user)
-./scripts/deregister-service.sh my_service
-
-# Remove everything including ACL user
-./scripts/deregister-service.sh my_service --remove-acl
-
-# Force without confirmation
-./scripts/deregister-service.sh my_service --remove-acl --force
-
-# Keep cache keys (only remove streams and registry)
-./scripts/deregister-service.sh my_service --keep-cache
+sudo geodineum deregister my_service                 # topology, intent, keys, identity, and the host ledger
+sudo geodineum deregister my_service --purge-data    # and the data registration created
+sudo geodineum deregister my_service --keep-acl      # keep the identity
+sudo geodineum deregister my_service --keep-cache    # keep cache and rate-limit keys
 ```
+
+`scripts/deregister-service.sh` is its ValKey half (intent, entity, keys, identity).
+A constellation that shares the service's namespace (`{coursematch}` is both) keeps its own keys.
 
 **What Gets Deleted:**
 
@@ -298,7 +281,7 @@ FCALL GNODE_DEPROVISION_SERVICE 0 my_service '{"dry_run":true}'
 | Circuit breaker | `{service_id}:circuit:*` |
 | Metrics | `{service_id}:metrics` |
 | All namespaced keys | `{service_id}:*` |
-| ACL user | `gnode_client_{service_id}` (if --remove-acl) |
+| ACL user | `gnode_client_{service_id}` (unless --keep-acl) |
 | Password file | `/etc/geodineum/credentials/valkey_client_{service_id}.password` |
 
 **Daemon Behavior:** The daemon automatically detects removed streams and stops listening (no restart required).
@@ -341,10 +324,10 @@ FCALL GNODE_UPDATE_SERVICE 0 my_service '{"status":"active"}'
 FCALL GNODE_UPDATE_SERVICE 0 my_service '{"status":"inactive"}'
 
 # 2. Preview deletion
-./scripts/deregister-service.sh my_service --dry-run
+sudo geodineum deregister my_service --dry-run
 
 # 3. Confirm and delete
-./scripts/deregister-service.sh my_service --remove-acl
+sudo geodineum deregister my_service
 ```
 
 ---
@@ -492,8 +475,8 @@ sudo systemctl restart gnode-daemon
 # Check ACL user exists
 ./scripts/valkey-cli-secure.sh ACL LIST | grep gnode_client_my_service
 
-# Repair ACL
-./scripts/repair-site-acl.sh my_service
+# Repair ACL: registration is idempotent and rewrites the grants
+sudo geodineum register /path/to/my_service
 ```
 
 ---

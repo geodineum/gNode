@@ -5,7 +5,7 @@
 # Only bare domains (no DTAP prefix) default to production.
 #
 # Schema-driven: developers can customize terminology for their locale.
-# Detection happens at: geodineum new site, geodineum register, gCore bootstrap.
+# Detection happens at: geodineum register, gCore bootstrap.
 
 schema_version: "1.0"
 
