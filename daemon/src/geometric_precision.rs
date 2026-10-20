@@ -6,7 +6,9 @@
 //! All `use crate::geometric_precision::*` import paths are preserved.
 //! All arithmetic, transcendental, and vector operations are provided by g_math directly.
 
-pub use g_math::fixed_point::{FixedPoint, FixedVector, FixedMatrix};
+pub type FixedPoint = g_math::fixed_point::Q64_64;
+pub type FixedVector = g_math::fixed_point::FixedVector<FixedPoint>;
+pub type FixedMatrix = g_math::fixed_point::FixedMatrix<FixedPoint>;
 
 /// A point in Q64.64, converted from f64 directly (an f32 step would drop precision).
 fn to_fixed(point: &[f64]) -> FixedVector {
