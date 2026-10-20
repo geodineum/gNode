@@ -102,6 +102,31 @@ pub fn node_heartbeat_value(component: &str, node: &str, ts_secs: u64, pid: u32)
     v.to_string()
 }
 
+/// The daemon's key in every constellation it serves: a site placed on this node
+/// reads its health from the daemon heartbeat of its own constellation.
+pub fn daemon_heartbeat_keys(constellations: &[crate::constellation::Constellation], environment: &str, node: &str) -> Vec<String> {
+    constellations.iter().map(|c| heartbeat_key(&c.name, environment, "gnode-daemon", node)).collect()
+}
+
+/// SETEX the daemon heartbeat into every served constellation. One failed write
+/// does not stop the others.
+pub fn write_daemon_heartbeats(
+    conn: &mut redis::Connection,
+    constellations: &[crate::constellation::Constellation],
+    environment: &str,
+    node: &str,
+    pid: u32,
+) {
+    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let value = node_heartbeat_value("gnode-daemon", node, ts, pid);
+    for key in daemon_heartbeat_keys(constellations, environment, node) {
+        let r: redis::RedisResult<()> = redis::cmd("SETEX").arg(&key).arg(HEARTBEAT_TTL_SECS).arg(&value).query(conn);
+        if let Err(e) = r {
+            log::warn!("daemon heartbeat {} not written: {}", key, e);
+        }
+    }
+}
+
 /// Short hostname — first dot-label of the kernel hostname, verbatim case.
 /// The fallback for components that carry no declared node id of their own.
 /// The daemon itself must NOT use this: its identity is the configured
@@ -127,6 +152,18 @@ mod tests {
         assert_eq!(
             heartbeat_key("geodineum", "production", "gnode-daemon", "aesir"),
             "{geodineum}:gnode:heartbeat:production:gnode-daemon:aesir"
+        );
+    }
+
+    #[test]
+    fn the_daemon_beats_once_per_served_constellation() {
+        let served = [crate::constellation::Constellation::new("geodineum"), crate::constellation::Constellation::new("coursematch")];
+        assert_eq!(
+            daemon_heartbeat_keys(&served, "production", "aesir-solutions"),
+            vec![
+                "{geodineum}:gnode:heartbeat:production:gnode-daemon:aesir-solutions",
+                "{coursematch}:gnode:heartbeat:production:gnode-daemon:aesir-solutions",
+            ]
         );
     }
 
