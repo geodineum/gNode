@@ -872,7 +872,7 @@ impl GNodeDaemon {
             }
         }
 
-        // Initialize node configuration and register this node
+        // Initialize node configuration
         info!("Initializing node configuration for type '{}'", self.node_type);
         let node_config_dir = if self.is_master {
             // Uses fallback chain: explicit -> env var -> /etc/geodineum -> daemon/config/nodes
@@ -904,49 +904,6 @@ impl GNodeDaemon {
             },
             Err(e) => {
                 warn!("Failed to initialize node config: {}. Using defaults.", e);
-            }
-        }
-
-        // Register this node instance in ValKey topology (with idempotency check)
-        info!("Checking/registering node '{}' (type: {}) in topology", self.node_id, self.node_type);
-        let hostname = std::env::var("HOSTNAME")
-            .or_else(|_| hostname::get().map(|h| h.to_string_lossy().to_string()))
-            .unwrap_or_else(|_| self.node_id.clone());
-
-        // Try to get the IP address
-        let ip_address = std::env::var("GNODE_IP_ADDRESS")
-            .unwrap_or_else(|_| "127.0.0.1".to_string());
-
-        let register_result = crate::integration::connection_manager::get_connection()
-            .map_err(|e| e.to_string())
-            .and_then(|mut conn| {
-                let node_config = node_config_result.clone()
-                    .unwrap_or_else(|_| crate::node_config::get_cached_node_config(&self.node_type.to_string()));
-
-                // Use idempotent registration: checks if exists first, then registers or heartbeats
-                // Use topology_namespace for node registration (daemon identity, not site-specific)
-                let flat = crate::node_config::register_node_with_idempotency(
-                    &mut conn,
-                    &self.node_id,
-                    &self.node_type.to_string(),
-                    &self.topology_namespace,  // Daemon uses topology namespace, not site_id
-                    &hostname,
-                    &ip_address,
-                    &node_config,
-                );
-
-                flat
-            });
-
-        match register_result {
-            Ok(true) => {
-                info!("✅ Node '{}' newly registered in topology", self.node_id);
-            },
-            Ok(false) => {
-                info!("✅ Node '{}' already registered, heartbeat sent", self.node_id);
-            },
-            Err(e) => {
-                warn!("Failed to register node in topology: {}. Node may not be visible to other nodes.", e);
             }
         }
 
@@ -1631,20 +1588,6 @@ impl GNodeDaemon {
                     crate::integration::lease::hold_writer_lease(&mut conn, &self.node_id);
                 }
 
-                // Keep the legacy node health hash honest. Its `last_heartbeat` was
-                // written ONCE, by the registration path at startup, while
-                // gnode_node.lua marks any node quiet for 60s as `stale` and a
-                // cleanup path treats stale nodes as removable — so both live nodes
-                // read as stale within a minute of booting and were candidates for
-                // garbage collection. The unified heartbeat below is the source of
-                // truth; this keeps the hash from contradicting it.
-                if let Ok(mut conn) = crate::integration::connection_manager::get_connection() {
-                    if let Err(e) = crate::node_config::send_node_heartbeat(
-                        &mut conn, &self.node_id, 0.0, None, None, None, None) {
-                        debug!("Node health refresh failed: {}", e);
-                    }
-                }
-
                 // Refresh the daemon heartbeat in every served constellation.
                 if let Ok(mut conn) = crate::integration::connection_manager::get_connection() {
                     crate::integration::heartbeat::write_daemon_heartbeats(
@@ -1711,21 +1654,10 @@ impl GNodeDaemon {
             info!("  ✓ PID key deleted: {}", pid_key);
         }
 
-        // 2. Deregister node from topology
-        info!("Deregistering node from topology...");
-        if let Ok(mut conn) = crate::integration::connection_manager::get_connection() {
-            let _: redis::RedisResult<i32> = redis::cmd("FCALL")
-                .arg("GNODE_NODE_DEREGISTER")
-                .arg(0)
-                .arg(&self.node_id)
-                .query(&mut conn);
-            info!("  ✓ Node deregistered: {}", self.node_id);
-        }
-
-        // 3. STATELESS: No topology save needed (state lives in ValKey via FCALL)
+        // 2. STATELESS: No topology save needed (state lives in ValKey via FCALL)
         info!("  ✓ Topology state lives in ValKey (stateless daemon)");
 
-        // 4. Wait for worker threads to finish
+        // 3. Wait for worker threads to finish
         info!("Waiting for worker threads to finish...");
         self.shutdown_workers();
 

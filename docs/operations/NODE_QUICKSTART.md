@@ -266,10 +266,10 @@ REDISCLI_AUTH="$(cat .gnode/valkey_daemon.password)" \
   valkey-cli -h <MASTER_IP> --user gnode_daemon \
   XINFO GROUPS {<YOUR_SITE_ID>}:gnode:unified:production
 
-# View all registered nodes
+# View the constellation's entities (nodes are shape 1), or run `geodineum status`
 REDISCLI_AUTH="$(cat .gnode/valkey_daemon.password)" \
   valkey-cli -h <MASTER_IP> --user gnode_daemon \
-  FCALL GNODE_NODE_GET_TOPOLOGY 0 true
+  HKEYS {<CONSTELLATION>}:gnode:constellation:entities
 
 # Check configs were loaded
 REDISCLI_AUTH="$(cat .gnode/valkey_daemon.password)" \

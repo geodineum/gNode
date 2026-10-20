@@ -61,7 +61,6 @@ hex = "0.4.3"            # binary format pattern matching
 
 thread-id = "4.0.0" # For getting thread IDs for batch uniqueness
 rand = "0.8.5" # For random number generation in batch handling
-hostname = "0.3.1" # For getting system hostname in node registration
 chrono = "0.4.23" # For timestamp formatting in logs and format transformations
 
 # Content processing (unconditional — CMS handlers stage into OUT_DIR)
