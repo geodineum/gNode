@@ -1669,12 +1669,8 @@ impl GNodeDaemon {
                 // look identical in a log.
                 //
                 // Master-only, like schema publication: exactly one node owns
-                // shared topology state.
-                //
-                // REPORT-ONLY unless GNODE_RECONCILE_REGISTRATIONS=apply. It
-                // can overwrite every service entity in the estate on a timer,
-                // so it earns that power by first showing in the log that what
-                // it would write matches what is already there.
+                // shared topology state. One pass per served constellation;
+                // report only, drift at WARN.
                 if self.is_master {
                     let due = _last_reconcile
                         .map(|t: std::time::Instant| t.elapsed().as_secs() >= 120)
@@ -1682,13 +1678,11 @@ impl GNodeDaemon {
                     if due {
                         _last_reconcile = Some(std::time::Instant::now());
                         if let Ok(mut conn) = crate::integration::connection_manager::get_connection() {
-                            let apply = std::env::var("GNODE_RECONCILE_REGISTRATIONS")
-                                .map(|v| v.eq_ignore_ascii_case("apply"))
-                                .unwrap_or(false);
-                            if let Err(e) = crate::registration_intent::reconcile(
-                                &mut conn, &self.topology_namespace, apply,
-                            ) {
-                                warn!("Registration reconcile failed: {}", e);
+                            let served = crate::constellation::served();
+                            for (c, r) in crate::registration_intent::reconcile_served(&mut conn, &served) {
+                                if let Err(e) = r {
+                                    warn!("Registration reconcile of {{{}}} failed: {}", c, e);
+                                }
                             }
                         }
                     }
