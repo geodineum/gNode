@@ -86,16 +86,6 @@ impl ConstellationWorker {
         Self { constellations, schema, facts, tick_interval: Duration::from_secs(15), last_tick: None, fresh_secs: 75, declared: false }
     }
 
-    /// The constellations a daemon serves: `GNODE_CONSTELLATIONS` (comma separated), else the namespace.
-    pub fn constellations_from_env(default_ns: &str) -> Vec<Constellation> {
-        let raw = std::env::var("GNODE_CONSTELLATIONS").unwrap_or_default();
-        let mut names: Vec<String> = raw.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-        if names.is_empty() {
-            names.push(default_ns.to_string());
-        }
-        names.into_iter().map(|n| Constellation::new(&n)).collect()
-    }
-
     /// Every node describes ITSELF, lease or not: the node entity, the gNode component
     /// and its placement on this node. Idempotent.
     pub fn declare_self(&self, conn: &mut redis::Connection, c: &Constellation) -> crate::Result<()> {
@@ -275,7 +265,7 @@ mod tests {
     #[test]
     fn constellations_default_to_the_namespace() {
         std::env::remove_var("GNODE_CONSTELLATIONS");
-        let c = ConstellationWorker::constellations_from_env("geodineum");
+        let c = crate::constellation::served();
         assert_eq!(c, vec![Constellation::new("geodineum")]);
     }
 }
