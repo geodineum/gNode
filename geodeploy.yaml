@@ -60,6 +60,6 @@ cli:
       category: Topology
     - name: topology
       handler: scripts/cli/topology.sh
-      description: Topology inspection — list|all|show <id>|stats|load|verify|sites (register/deregister: use geodineum register / deregister)
+      description: "Topology inspection — list|all|show <id>|stats|load|verify|sites (to register or deregister, use geodineum register / deregister)"
       requires_sudo: true
       category: Topology
