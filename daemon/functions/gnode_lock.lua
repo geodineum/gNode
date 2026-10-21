@@ -75,7 +75,7 @@ server.register_function{
         local lock_key = '{' .. site_id .. '}:lock:' .. resource
         local lock_meta = '{' .. site_id .. '}:lock:meta:' .. resource
 
-        -- RESP3 response structure
+        -- result: 1 or 0 (COMMAND_SCHEMA.md)
         local response = { boolean = false }
 
         -- Atomic single-attempt lock acquisition using SET NX EX
@@ -103,7 +103,7 @@ server.register_function{
             })
         end
 
-        return response
+        return response.boolean and 1 or 0
     end,
     description = 'Acquires a distributed lock (single atomic attempt, client handles retry)'
 }
@@ -134,14 +134,14 @@ server.register_function{
         local lock_key = '{' .. site_id .. '}:lock:' .. resource
         local lock_meta = '{' .. site_id .. '}:lock:meta:' .. resource
         
-        -- RESP3 response structure
+        -- result: 1 or 0 (COMMAND_SCHEMA.md)
         local response = { boolean = false }
         
         -- Get full lock state
         local state = server.call('HGETALL', lock_meta)
         if #state == 0 then
             -- Lock doesn't exist or expired
-            return response
+            return 0
         end
         
         -- Format lock state
@@ -170,7 +170,7 @@ server.register_function{
             })
         end
         
-        return response
+        return response.boolean and 1 or 0
     end,
     description = 'Releases a distributed lock with token verification'
 }
@@ -196,7 +196,7 @@ server.register_function{
         -- Track operation timing
         local start_time = server.call('TIME')[1]
         
-        -- RESP3 response structure
+        -- result: 1 or 0 (COMMAND_SCHEMA.md)
         local response = { boolean = false }
         
         -- Check if lock exists and is valid
@@ -208,7 +208,7 @@ server.register_function{
             response.boolean = true
         end
         
-        return response
+        return response.boolean and 1 or 0
     end,
     -- Note: No no-writes flag because track_metric writes to metrics hash
     description = 'Checks if a resource is currently locked'
@@ -236,7 +236,7 @@ server.register_function{
         -- Track operation timing
         local start_time = server.call('TIME')[1]
         
-        -- RESP3 response structure with map
+        -- result: a JSON object (COMMAND_SCHEMA.md)
         local response = { map = {
             locked = false,
             exists = false,
@@ -268,7 +268,7 @@ server.register_function{
             track_metric(site_id, 'lock_checks', 1)
         end
         
-        return response
+        return cjson.encode(response.map)
     end,
     -- Note: No no-writes flag because track_metric writes to metrics hash
     description = 'Gets detailed information about a lock'

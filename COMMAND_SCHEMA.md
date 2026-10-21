@@ -647,7 +647,7 @@ Distributed locking (single atomic attempt).
 | `GNODE_LOCK_ACQUIRE` | resource | site_id, token, ttl_s | 1 or 0 | Acquire lock (SET NX EX) |
 | `GNODE_LOCK_RELEASE` | resource | site_id, token | 1 or 0 | Release lock (token must match) |
 | `GNODE_LOCK_IS_LOCKED` | resource | site_id | 1 or 0 | Check if locked |
-| `GNODE_LOCK_INFO` | resource | site_id | `{locked, token, ttl_remaining}` | Lock details |
+| `GNODE_LOCK_INFO` | resource | site_id | JSON `{locked, exists, info: {acquired_at, timeout, site, ttl, attempts}}` (never the token) | Lock details |
 
 ---
 
