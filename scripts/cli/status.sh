@@ -178,7 +178,20 @@ while IFS= read -r k; do
     [[ -n "$k" ]] || continue
     printf '%s\t%s\n' "$k" "$(vk GET "$k" | tr -d '\n')" >> "$T/hb"
 done < "$T/hbkeys"
-vk SMEMBERS "gnode:sites:registry" > "$T/sites" || true
+# The site registry is estate-wide; a registered id no served constellation holds is
+# reported once, not rendered as an empty row in every constellation.
+: > "$T/orphans"
+if [[ -z "${GNODE_STATUS_INNER:-}" || "$NS" == "$(GNODE_TOPOLOGY_NAMESPACE= gnode_cli_constellations | head -1)" ]]; then
+    mapfile -t _served < <(gnode_cli_constellations)
+    while IFS= read -r sid; do
+        [[ -n "$sid" ]] || continue
+        _held=0
+        for c in "${_served[@]}"; do
+            [[ "$(vk HEXISTS "{$c}:gnode:constellation:entities" "$sid")" == 1 || "$(vk HEXISTS "{$c}:gnode:registrations" "$sid")" == 1 ]] && { _held=1; break; }
+        done
+        (( _held )) || echo "$sid" >> "$T/orphans"
+    done < <(vk SMEMBERS "gnode:sites:registry")
+fi
 
 MODE="$MODE" NS="$NS" python3 - "$T" <<'PYEOF'
 import json, os, sys, time
@@ -196,7 +209,7 @@ def dec(raw):
 
 ents = {k: dec(v) for k, v in pairs(f"{T}/ents").items()}
 intents = {k: dec(v) for k, v in pairs(f"{T}/reg").items()}
-sites = {l.strip() for l in open(f"{T}/sites") if l.strip()} if os.path.exists(f"{T}/sites") else set()
+orphans = sorted({l.strip() for l in open(f"{T}/orphans") if l.strip()})
 HEALTH = {0.0: "unknown", 0.25: "dead", 0.5: "degraded", 1.0: "healthy"}
 SHAPES = {"1": "node", "2": "component", "3.1": "site", "3.2": "app", "3.3": "daemon", "4.1": "component@node", "4.2": "service@node"}
 def slot(e, i):
@@ -248,7 +261,7 @@ for pid, p in placements.items():
         placed.setdefault(p.get("of"), []).append({"node": p.get("on"), "health": health_of(p), "load": slot(p, 16), "weight": p.get("w")})
 
 rows = []
-for sid in sorted(set(services) | sites | set(intents)):
+for sid in sorted(set(services) | set(intents)):
     e = services.get(sid, {})
     it = intents.get(sid, {})
     mine = [h for h in hb if h["comp"] == sid and h["age_s"] is not None]
@@ -268,6 +281,10 @@ out = {"constellation": os.environ.get("NS", "geodineum"), "ts": now,
        "nodes": sorted(nodes.values(), key=lambda n: n["node"]),
        "services": rows,
        "components": len(components),
+       "component_list": [{"component": cid, "health": health_of(e),
+                           "on": sorted({p.get("on") for p in placements.values() if p.get("sh") == "4.1" and p.get("of") == cid} - {None})}
+                          for cid, e in sorted(components.items())],
+       "unplaced_registry": orphans,
        "placements": len(placements),
        "components_live": sum(1 for h in hb if h["age_s"] is not None and h["age_s"] <= 120)}
 
@@ -286,12 +303,26 @@ print(f"{'NODE':<17}{'HEALTH':<9}{'HB':<6}{'LOAD':<10}{'MEM':<12}RUNS")
 for n in out["nodes"]:
     print(f"{n['node']:<17}{n['health'] or '—':<9}{age(n['hb_age_s']):<6}{load(n['la1'], n['cores']):<10}"
           f"{mem(n['mem_used_mb'], n['mem_total_mb']):<12}{' '.join(n['runs']) or '—'}")
-print(f"{'SERVICE':<20}{'SHAPE':<8}{'ENV':<12}{'HEALTH':<9}{'ENTITY':<8}{'PLACED ON':<24}HB")
-for s in out["services"]:
-    where = f"{age(s['hb_age_s'])}@{s['hb_node']}" if s["hb_node"] else "—"
-    pl = " ".join(f"{p['node']}:{p['health'] or '?'}" for p in s["placements"]) or "—"
-    print(f"{s['service']:<20}{s['shape'] or '—':<8}{s['env'] or '—':<12}{s['health'] or '—':<9}"
-          f"{'✓' if s['entity'] else '✗':<8}{pl:<24}{where}")
+if out["component_list"]:
+    print(f"\n{'COMPONENTS':<20}{'HEALTH':<9}ON")
+    for c in out["component_list"]:
+        print(f"{c['component']:<20}{c['health'] or '—':<9}{' '.join(c['on']) or '—'}")
+# Grouped by the topology's shapes (3.1 site, 3.2 app, 3.3 daemon); an id with only an
+# intent is grouped by its declared profile, the way registration would shape it.
+BY_PROFILE = {"web": "site", "headless": "app", "service": "daemon", "system": "daemon", "component": "daemon"}
+GROUPS = [("site", "SITES"), ("app", "APPS"), ("daemon", "DAEMONS")]
+group_of = lambda s: s["shape"] or BY_PROFILE.get(s["profile"] or "", "other")
+for g, title in GROUPS + [("other", "NOT ON THE TOPOLOGY")]:
+    rows_g = [s for s in out["services"] if group_of(s) == g]
+    if not rows_g: continue
+    print(f"\n{title:<20}{'ENV':<12}{'HEALTH':<9}{'ENTITY':<10}{'PLACED ON':<24}HB")
+    for s in rows_g:
+        where = f"{age(s['hb_age_s'])}@{s['hb_node']}" if s["hb_node"] else "—"
+        pl = " ".join(f"{p['node']}:{p['health'] or '?'}" for p in s["placements"]) or "—"
+        print(f"{s['service']:<20}{s['env'] or '—':<12}{s['health'] or '—':<9}"
+              f"{'✓' if s['entity'] else '✗ intent':<10}{pl:<24}{where}")
+if orphans:
+    print(f"\nin the site registry, in no served constellation: {' '.join(orphans)}")
 PYEOF
 
 # Visitor counters (beacon-fed aggregates) — the fold lives in the installer
