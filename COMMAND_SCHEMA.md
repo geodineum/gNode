@@ -47,6 +47,7 @@ producers are visible in the journal, never silent.
 | `ts`  | all         | `ts`, `timestamp`                    | Timestamp in milliseconds (**not** `t` — collides with type) |
 | `bi`  | `t=b*`      | `bi`                                 | Batch id |
 | `tc`  | `t=b*`      | `tc`                                 | Total count of messages in batch |
+| `pz`  | any entry   | `pz`, `persist`, `persistence`       | Persistence mark — `1` STORE keeps the entry, `0` never kept (beats a detector), absent = detectors decide |
 
 \* `st` and `n` as aliases for source-site / source-node are accepted
 for backwards compatibility only. New writers must use `ss` / `sn`. The

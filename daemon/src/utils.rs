@@ -76,6 +76,11 @@ pub mod field_names {
     // TIMESTAMP intentionally does NOT include "t" — that collides
     // with TYPE. Clients writing to the wire must use "ts".
     pub const TIMESTAMP: &[&str] = &["ts", "timestamp"];
+
+    // ─── Persistence mark (any stream entry) ─────────────────────
+    // "1" = STORE keeps the entry; "0" = never kept, beats a detector;
+    // absent = STORE's detectors decide.
+    pub const PERSIST: &[&str] = &["pz", "persist", "persistence"];
 }
 
 /// Get a field from a HashMap trying multiple keys in order (short-form preferred)
@@ -100,4 +105,33 @@ pub fn get_field_opt(map: &HashMap<String, String>, keys: &[&str]) -> Option<Str
         }
     }
     None
+}
+#[cfg(test)]
+mod field_names_tests {
+    use super::field_names::*;
+    use super::get_field;
+    use std::collections::HashMap;
+
+    #[test]
+    fn persist_resolves_canonical_first() {
+        let m: HashMap<String, String> =
+            [("persistence", "0"), ("pz", "1")].iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        assert_eq!(get_field(&m, PERSIST), "1");
+        let m: HashMap<String, String> = [("persist".to_string(), "0".to_string())].into();
+        assert_eq!(get_field(&m, PERSIST), "0");
+    }
+
+    #[test]
+    fn no_alias_in_two_lists_except_st() {
+        let lists: &[&[&str]] = &[ID, TYPE, CMD, PARAMS, SOURCE_SITE, SOURCE_NODE, DEST_SITE,
+                                   DEST_NODE, STATUS, RESULT, ERROR, TIMESTAMP, PERSIST];
+        let mut seen: HashMap<&str, usize> = HashMap::new();
+        for (i, l) in lists.iter().enumerate() {
+            for a in l.iter() {
+                if let Some(j) = seen.insert(a, i) {
+                    assert!(*a == "st" && j != i, "alias {a} is in two lists");
+                }
+            }
+        }
+    }
 }

@@ -74,6 +74,7 @@ All field names are **canonical aliases** resolved EXACTLY by `daemon/src/utils.
 | `_rt` | — | relay_target |
 | `_rr` | — | relay_reply_to |
 | `_gh` | — | group_hint |
+| `pz` | `persist`, `persistence` | persistence mark (any entry): `1` kept by STORE, `0` never kept, absent = detectors decide |
 
 > **`st` is overloaded.** In a command (`t=c`) `st` = source_site; in a response (`t=r`) `st` = status. The daemon disambiguates by the `t` field. `st`-as-source-site and `n`-as-source-node are **LEGACY** aliases (COMMAND_SCHEMA.md). New writers MUST use `ss`/`sn`.
 
