@@ -254,6 +254,16 @@ impl ConsumerGroupNodeState {
 
 // Use the ConsumerGroupState defined above
 
+/// The health stream read alongside each unified stream, index for index: its own site's.
+/// A placement stream (`{svc}:gnode:unified:<env>:<node>`) has no health twin in discovery,
+/// and pairing the two discovered lists by position dropped every stream past the shorter
+/// list, so relayed replies on a placement stream were never carried home.
+pub fn health_twins(unified: &[String]) -> Vec<String> {
+    unified.iter()
+        .map(|u| crate::config::build_health_stream_key(crate::config::site_of_stream_key(u).unwrap_or("geodineum")))
+        .collect()
+}
+
 /// Create a consumer group for a stream
 ///
 /// This function creates a consumer group for a stream, using the specified
@@ -1141,8 +1151,10 @@ pub fn create_environment_stream_worker_dynamic(
                         .map(|s| s.key)
                         .collect();
 
+                    let _ = health;
                     if !unified.is_empty() {
                         info!("🚀 Using {} discovered unified streams at startup", unified.len());
+                        let health = health_twins(&unified);
                         (unified, health)
                     } else {
                         info!("⚠️ No discovered streams yet, using fallback");
@@ -1260,10 +1272,7 @@ pub fn create_environment_stream_worker_dynamic(
                                 .map(|s| s.key)
                                 .collect();
 
-                            let discovered_health: Vec<String> = disc.get_health_streams()
-                                .into_iter()
-                                .map(|s| s.key)
-                                .collect();
+                            let discovered_health = health_twins(&discovered_unified);
 
                             // Check for new streams
                             let new_unified: Vec<String> = discovered_unified.iter()
@@ -1406,7 +1415,7 @@ pub fn create_environment_stream_worker_dynamic(
 
                     // Multi-site stream processing: iterate over ALL discovered stream pairs
                     // Each site has its own unified+health stream pair
-                    let stream_count = active_unified_streams.len().min(active_health_streams.len());
+                    let stream_count = active_unified_streams.len();
                     let mut total_processed_all_streams = 0;
                     let mut had_any_error = false;
                     let mut stale_stream_indices: Vec<usize> = Vec::new();
@@ -1561,10 +1570,7 @@ pub fn create_environment_stream_worker_dynamic(
                                                 // ORIGIN's correlation id, not our stream entry id.
                                                 crate::integration::relay::carry_correlation_id(&mut forwarded);
 
-                                                // Set reply-to if not already set
-                                                if forwarded.relay_reply_to.is_none() {
-                                                    forwarded.relay_reply_to = Some(current_unified_stream.to_string());
-                                                }
+                                                crate::integration::relay::reply::stamp_origin(&mut forwarded, current_unified_stream, stream_site_id);
 
                                                 // --- Phase 5A: Format translation (best-effort) ---
                                                 // Translation is opt-in: only runs if FormatProcessor Lua funcs are loaded
@@ -2236,3 +2242,15 @@ pub fn acknowledge_messages(
 // =========================================================================
 // Relay tracing helpers (Phase 5E)
 // =========================================================================
+
+#[cfg(test)]
+mod health_twin_tests {
+    use super::health_twins;
+
+    #[test]
+    fn every_unified_stream_gets_its_own_sites_health_stream() {
+        let u: Vec<String> = ["{nierto_com}:gnode:unified:production", "{geodineum_store}:gnode:unified:production:aesir-solutions",
+                              "{gflow}:gnode:unified:production:squad"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(health_twins(&u), vec!["{nierto_com}:gnode:health", "{geodineum_store}:gnode:health", "{gflow}:gnode:health"]);
+    }
+}

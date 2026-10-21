@@ -115,6 +115,14 @@ pub fn carry_correlation_id(forwarded: &mut crate::integration::processor::resp3
     }
 }
 
+/// The forward names its origin from what the daemon read, never from what the
+/// caller wrote: `_rr` is the stream the command came from and `ss` that stream's
+/// site. A target scoping its answer by either is scoping by an authenticated value.
+pub fn stamp_origin(forwarded: &mut crate::integration::processor::resp3_protocol::OptimizedCommand, read_from: &str, site: &str) {
+    forwarded.relay_reply_to = Some(read_from.to_string());
+    forwarded.source_site = site.to_string();
+}
+
 /// The site a relayed reply belongs to, read off the reply-to stream key.
 ///
 /// `_rr` is a stream key the daemon itself set when forwarding
@@ -364,6 +372,15 @@ mod tests {
         f.insert("id".into(), "req-1".into());
         for (k, v) in extra { f.insert((*k).into(), (*v).into()); }
         crate::integration::processor::resp3_protocol::OptimizedCommand::from_resp3_fields("1-0".into(), f).unwrap()
+    }
+
+    #[test]
+    fn the_forward_overwrites_a_caller_supplied_origin() {
+        let mut c = party(&[("ss", "victim_com"), ("_rr", "{victim_com}:gnode:unified:production")]);
+        stamp_origin(&mut c, "{caller_com}:gnode:unified:production", "caller_com");
+        assert_eq!(c.relay_reply_to.as_deref(), Some("{caller_com}:gnode:unified:production"));
+        assert_eq!(c.source_site, "caller_com");
+        assert_eq!(origin_site_from_reply_stream(c.relay_reply_to.as_deref().unwrap()), Some("caller_com"));
     }
 
     #[test]
