@@ -20,6 +20,26 @@ pub fn is_shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
 }
 
+/// A task that runs until the daemon stops: its result if it ends first, None once shutdown is
+/// requested (the task is aborted, so the thread holding it can be joined instead of killed).
+async fn until_shutdown<T>(task: tokio::task::JoinHandle<T>) -> Option<std::result::Result<T, tokio::task::JoinError>> {
+    until_stopped(task, is_shutdown_requested).await
+}
+
+async fn until_stopped<T>(mut task: tokio::task::JoinHandle<T>, stop: impl Fn() -> bool) -> Option<std::result::Result<T, tokio::task::JoinError>> {
+    loop {
+        tokio::select! {
+            r = &mut task => return Some(r),
+            _ = tokio::time::sleep(Duration::from_millis(500)) => {
+                if stop() {
+                    task.abort();
+                    return None;
+                }
+            }
+        }
+    }
+}
+
 /// Request shutdown (called by signal handler)
 /// Sets the global flag that all workers check
 pub fn request_shutdown() {
@@ -1314,17 +1334,17 @@ impl GNodeDaemon {
                     match handler.start_listener().await {
                         Ok(task) => {
                             info!("✅ KeyBased: Compute handler started successfully (multi-tenant mode)");
-
-                            // Wait for task to complete (it runs forever)
-                            if let Err(e) = task.await {
+                            if let Some(Err(e)) = until_shutdown(task).await {
                                 error!("❌ KeyBased: Compute handler task failed: {}", e);
                             }
+                            info!("Compute handler shutting down");
                         }
                         Err(e) => {
                             error!("❌ KeyBased: Failed to start compute handler: {}", e);
                         }
                     }
                 });
+                rt.shutdown_timeout(Duration::from_secs(2));
             });
             if let Ok(mut handles) = self.worker_handles.lock() {
                 handles.push(compute_handle);
@@ -1363,15 +1383,17 @@ impl GNodeDaemon {
                     match builder.start_builder().await {
                         Ok(task) => {
                             info!("Asset builder started successfully");
-                            if let Err(e) = task.await {
+                            if let Some(Err(e)) = until_shutdown(task).await {
                                 error!("Asset builder task failed: {}", e);
                             }
+                            info!("Asset builder shutting down");
                         }
                         Err(e) => {
                             error!("Failed to start asset builder: {}", e);
                         }
                     }
                 });
+                rt.shutdown_timeout(Duration::from_secs(2));
             });
             if let Ok(mut handles) = self.worker_handles.lock() {
                 handles.push(asset_handle);
@@ -1863,5 +1885,36 @@ impl GNodeDaemon {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod shutdown_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+
+    #[test]
+    fn a_never_ending_task_is_aborted_within_a_second_of_the_stop_flag() {
+        let rt = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&stop);
+        let started = std::time::Instant::now();
+        let out = rt.block_on(async move {
+            let task = tokio::spawn(async { loop { tokio::time::sleep(Duration::from_secs(3600)).await; } });
+            let setter = Arc::clone(&flag);
+            tokio::spawn(async move { tokio::time::sleep(Duration::from_millis(200)).await; setter.store(true, Ordering::SeqCst); });
+            until_stopped(task, move || flag.load(Ordering::SeqCst)).await
+        });
+        rt.shutdown_timeout(Duration::from_secs(2));
+        assert!(out.is_none(), "a stopped wait returns None");
+        assert!(started.elapsed() < Duration::from_millis(1500), "took {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_task_that_ends_first_returns_its_result() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let out = rt.block_on(async { until_stopped(tokio::spawn(async { 7 }), || false).await });
+        assert_eq!(out.map(|r| r.unwrap()), Some(7));
     }
 }
