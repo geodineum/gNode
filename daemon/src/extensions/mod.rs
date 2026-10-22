@@ -276,9 +276,12 @@ impl ExtensionManager {
     fn detect_compiled_features() -> Vec<String> {
         #[allow(unused_mut)]
         let mut features = vec!["base".to_string()];
-
-        features.push("cms".to_string());
-
+        features.extend(
+            env!("GNODE_COMPILED_FEATURES")
+                .split(',')
+                .filter(|f| !f.is_empty())
+                .map(String::from),
+        );
         features
     }
 
@@ -353,8 +356,11 @@ impl ExtensionManager {
             }
         }
 
-        // 3. Signed extensions in GNODE_EXT_DIR
-        if let Ok(dir) = std::env::var("GNODE_EXT_DIR") {
+        // 3. Signed extensions in GNODE_EXT_DIR, else the directory this binary was built from
+        let ext_dir = std::env::var("GNODE_EXT_DIR")
+            .ok()
+            .or_else(|| Some(env!("GNODE_BUILD_EXT_DIR").to_string()).filter(|d| !d.is_empty()));
+        if let Some(dir) = ext_dir {
             let dir = PathBuf::from(dir);
             if let Ok(entries) = fs::read_dir(&dir) {
                 for entry in entries.flatten() {
@@ -751,6 +757,23 @@ mod tests {
     fn test_detect_compiled_features() {
         let features = ExtensionManager::detect_compiled_features();
         assert!(features.contains(&"base".to_string()));
+    }
+
+    #[test]
+    fn test_a_build_with_extensions_lists_them_without_runtime_env() {
+        // The deployed unit sets no GNODE_EXT_DIR; the listing must still match what was compiled in.
+        if env!("GNODE_BUILD_EXT_DIR").is_empty() || env!("GNODE_COMPILED_FEATURES").is_empty() {
+            return;
+        }
+        std::env::remove_var("GNODE_EXT_DIR");
+        let manager = ExtensionManager::discover(None);
+        let compiled: Vec<&str> = env!("GNODE_COMPILED_FEATURES").split(',').collect();
+        let listed: Vec<_> = manager.list().into_iter().filter(|s| s.rust_compiled).map(|s| s.name).collect();
+        assert!(!listed.is_empty(), "no compiled extension listed");
+        for f in compiled {
+            assert!(manager.list().iter().any(|s| s.rust_compiled && manager.extensions.iter().any(|e| e.name == s.name && e.rust_feature.as_deref() == Some(f))),
+                    "compiled feature {} is not listed as compiled", f);
+        }
     }
 
     #[test]

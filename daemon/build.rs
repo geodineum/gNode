@@ -54,7 +54,6 @@ include!("src/ext_author.rs");
 /// `ExtensionManager` parses the full shape; build.rs only needs the fields
 /// that influence codegen and hash-scope.
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // `rust_feature` is declarative-only at build time.
 struct ExtensionManifest {
     /// Lowercase snake_case identifier (used to generate module names).
     name: String,
@@ -75,6 +74,8 @@ struct ExtensionManifest {
 struct StagedExtension {
     /// Extension `name`.
     name: String,
+    /// Its `rust_feature`, if any: what the runtime listing reports as compiled.
+    rust_feature: Option<String>,
     /// Staged handler filenames (already copied into OUT_DIR/<name>_handlers).
     handlers: Vec<String>,
 }
@@ -95,6 +96,11 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GNODE_EXT_DIR");
 
     let (ext_rs, staged) = discover_signed_extensions(&out_dir);
+    // What the runtime ExtensionManager lists: the directory this build compiled from (its
+    // default when GNODE_EXT_DIR is unset at runtime) and the features compiled in.
+    println!("cargo:rustc-env=GNODE_BUILD_EXT_DIR={}", env::var("GNODE_EXT_DIR").unwrap_or_default());
+    let features: Vec<&str> = staged.iter().filter_map(|e| e.rust_feature.as_deref()).collect();
+    println!("cargo:rustc-env=GNODE_COMPILED_FEATURES={}", features.join(","));
     let registration_rs = emit_register_signed_extensions(&staged);
     let full_rs = format!("{}{}", ext_rs, registration_rs);
     fs::write(out_dir.join("ext_handlers.rs"), full_rs).unwrap_or_else(|e| {
@@ -289,6 +295,7 @@ fn verify_and_stage(
     Ok(Some((
         module_rs,
         StagedExtension {
+            rust_feature: manifest.rust_feature.clone(),
             name: manifest.name,
             handlers: staged_handlers,
         },

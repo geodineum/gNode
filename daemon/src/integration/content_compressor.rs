@@ -85,6 +85,7 @@ const MIN_COMPRESSION_SIZE: usize = 200; // Don't compress tiny content
 /// # Examples
 ///
 /// ```
+/// # use gnode::integration::content_compressor::compress_gzip;
 /// let original = b"Hello World!".repeat(100);
 /// let compressed = compress_gzip(&original).unwrap();
 /// assert!(compressed.len() < original.len());

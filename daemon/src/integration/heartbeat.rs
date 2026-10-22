@@ -2,7 +2,9 @@
 //!
 //! Every long-running component announces itself by writing
 //!
-//!     {<topology_ns>}:gnode:heartbeat:<env>:<component>:<node>
+//! ```text
+//! {<topology_ns>}:gnode:heartbeat:<env>:<component>:<node>
+//! ```
 //!
 //! with SETEX 120 and refreshing ~every 60s, so a dead process self-expires
 //! and the dashboard reads absence as down. Four components across three

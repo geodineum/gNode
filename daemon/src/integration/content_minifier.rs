@@ -86,6 +86,7 @@ const MAX_CONTENT_SIZE: usize = 100 * 1024 * 1024;
 /// # Examples
 ///
 /// ```
+/// # use gnode::integration::content_minifier::minify_safe;
 /// let (minified, stats) = minify_safe(
 ///     "<html> <body> <h1>Hello</h1> </body> </html>",
 ///     "text/html"
