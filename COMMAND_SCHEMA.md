@@ -784,9 +784,9 @@ Asset storage and bundle manifest management.
 
 | Tier | Libraries | Functions | Commands |
 |------|-----------|-----------|----------|
-| Base | 24 | 207 | 61 |
-| CMS (default companion) | 1 | 10 | 23 |
-| **Total (core + CMS)** | **25** | **217** | **84** |
+| Base | 23 | 210 | 39 |
+| CMS (default companion) | 1 | 10 | 19 |
+| **Total (core + CMS)** | **24** | **220** | **58** |
 
 Additional signed extensions are commercial and load from `$GNODE_EXT_DIR`;
 they contribute their own libraries, functions, and commands and are

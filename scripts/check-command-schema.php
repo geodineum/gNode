@@ -18,9 +18,9 @@ declare(strict_types=1);
  *                        must match its file.
  * Plus the header totals ("N commands, M Lua libraries (K functions)").
  *
- * Reflects the build: a base binary yields 60 commands; one built with the CMS
- * extension staged into GNODE_EXT_DIR yields 83 — run the checker against the
- * same build the doc describes.
+ * Reflects the build: a base binary yields the base surface; one built with
+ * extensions staged into GNODE_EXT_DIR adds theirs — run the checker against the
+ * same build the doc describes (a base build: GNODE_EXT_DIR=<empty dir>).
  *
  *   php scripts/check-command-schema.php                 # base surface
  *   php scripts/check-command-schema.php --bin=/path/to/gnode-daemon
@@ -86,7 +86,7 @@ $codeLibCount = count($codeLibs);
 $docText = (string) file_get_contents($DOC);
 $lines = preg_split('/\r?\n/', $docText);
 
-// header totals: "**Base daemon**: 60 commands, 23 Lua libraries (203 functions)"
+// header totals: "**Base daemon**: N commands, M Lua libraries (K functions)"
 $hdrCommands = $hdrLibs = $hdrFuncs = null;
 if (preg_match('/^\*\*Base daemon\*\*:\s*(\d+)\s+commands,\s*(\d+)\s+Lua libraries\s*\((\d+)\s+functions\)/mi', $docText, $m)) {
     [$hdrCommands, $hdrLibs, $hdrFuncs] = [(int)$m[1], (int)$m[2], (int)$m[3]];
@@ -183,6 +183,28 @@ if ($hdrLibs !== null && $hdrLibs !== $codeLibCount) {
 }
 if ($hdrFuncs !== null && $hdrFuncs !== $codeFuncTotal) {
     $note('header', "functions: header says $hdrFuncs, file glob has $codeFuncTotal");
+}
+
+// ---- compare: the Summary table -------------------------------------------
+// | Base | L | F | C |, | CMS (default companion) | L | F | C |, | **Total (core + CMS)** | **L** | **F** | **C** |
+$row = static function (string $label) use ($docText): ?array {
+    return preg_match('/^\|\s*\**' . preg_quote($label, '/') . '[^|]*\|\s*\**(\d+)\**\s*\|\s*\**(\d+)\**\s*\|\s*\**(\d+)\**\s*\|/m', $docText, $m)
+        ? [(int)$m[1], (int)$m[2], (int)$m[3]] : null;
+};
+$sumBase = $row('Base'); $sumCms = $row('CMS'); $sumTotal = $row('Total');
+if ($sumBase === null) {
+    $note('summary', 'could not find the "| Base | libraries | functions | commands |" row');
+} elseif ($sumBase !== [$codeLibCount, $codeFuncTotal, $codeCommandCount]) {
+    $note('summary', sprintf('Base row says %d/%d/%d (libraries/functions/commands), code has %d/%d/%d',
+        $sumBase[0], $sumBase[1], $sumBase[2], $codeLibCount, $codeFuncTotal, $codeCommandCount));
+}
+if ($sumBase !== null && $sumCms !== null && $sumTotal !== null
+        && $sumTotal !== [$sumBase[0] + $sumCms[0], $sumBase[1] + $sumCms[1], $sumBase[2] + $sumCms[2]]) {
+    $note('summary', 'Total row is not Base + CMS');
+}
+if ($sumTotal !== null && preg_match('/^\*\*With CMS extension\*\*[^:]*:\s*(\d+)\s+commands,\s*(\d+)\s+Lua libraries\s*\((\d+)\s+functions\)/mi', $docText, $m)
+        && [(int)$m[2], (int)$m[3], (int)$m[1]] !== $sumTotal) {
+    $note('summary', "Total row disagrees with the header's With CMS extension line");
 }
 
 // ---- report ----------------------------------------------------------------
