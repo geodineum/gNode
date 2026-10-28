@@ -874,9 +874,26 @@ verify_mail_dispatch() {
     done
     if [[ "$line" == *"dispatched successfully"* ]]; then
         log_success "MAIL VERIFIED: probe dispatched through the email channel (env=${env})"
-        local relay
-        relay=$(grep -hE 'status=(sent|bounced|deferred)' /var/log/mail.log 2>/dev/null | tail -1)
-        [[ -n "$relay" ]] && log_info "latest postfix activity (NOT matched to this probe — see MAIL-PROBE-EVIDENCE): ${relay#*postfix/}"
+        # COMMS names each mail <comms.<message id>@<sender domain>>: follow this probe's queue id to its status.
+        local qid="" relay=""
+        for i in 1 2 3 4 5 6 7 8 9 10; do
+            qid=$(grep -F "message-id=<comms.${probe_id}@" "${MAIL_LOG:-/var/log/mail.log}" 2>/dev/null | tail -1 \
+                | sed -nE 's/.*postfix\/cleanup\[[0-9]+\]: ([0-9A-Za-z]{6,}): message-id=.*/\1/p') || qid=""
+            if [[ -n "$qid" ]]; then
+                relay=$(grep -E "postfix/[a-z]+\[[0-9]+\]: ${qid}: .*status=" "${MAIL_LOG:-/var/log/mail.log}" 2>/dev/null | tail -1) || relay=""
+                [[ -n "$relay" ]] && break
+            fi
+            sleep 2
+        done
+        if [[ "$relay" == *status=sent* ]]; then
+            log_success "  postfix ${qid}: $(sed -E 's/.*(relay=[^,]*).*(status=sent.*)/\1, \2/' <<<"$relay")"
+        elif [[ -n "$relay" ]]; then
+            log_warning "  postfix ${qid}: $(sed -E 's/.*(relay=[^,]*).*(status=.*)/\1, \2/' <<<"$relay")"
+        elif [[ -n "$qid" ]]; then
+            log_info "  postfix queued it as ${qid}; no delivery status within 20 s (mail.log will show it)"
+        else
+            log_info "  not in "${MAIL_LOG:-/var/log/mail.log}" within 20 s (COMMS may relay to a remote SMTP server)"
+        fi
     elif [[ "$line" == *"Failed to send"* || "$line" == *"dispatch failed"* ]]; then
         log_error "MAIL BROKEN — dispatch failed. The journal names the cause:"
         log_error "  ${line#*geodineum-comms*: }"
