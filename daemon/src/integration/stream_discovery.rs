@@ -46,7 +46,7 @@ pub struct RegisteredSite {
     /// Site status
     pub status: String,
     /// Environments configured for this site
-    #[serde(default)]
+    #[serde(default, deserialize_with = "list")]
     pub environments: Vec<String>,
     /// Number of streams created for this site
     #[serde(default)]
@@ -58,6 +58,7 @@ pub struct RegisteredSite {
 /// Response from GNODE_SERVICE_LIST_ALL
 #[derive(Debug, Clone, Deserialize)]
 struct SiteListResponse {
+    #[serde(deserialize_with = "list")]
     sites: Vec<RegisteredSite>,
     count: u32,
 }
@@ -97,19 +98,42 @@ struct SiteStreams {
     #[serde(default)]
     #[allow(dead_code)]
     active_environment: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "list")]
     streams: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 struct DaemonStreamCategories {
+    #[serde(deserialize_with = "list")]
     unified: Vec<StreamEntry>,
+    #[serde(deserialize_with = "list")]
     health: Vec<StreamEntry>,
+    #[serde(deserialize_with = "list")]
     broadcast: Vec<StreamEntry>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "list")]
     registration: Vec<StreamEntry>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "list")]
     global: Vec<StreamEntry>,
+}
+
+/// A JSON list from Lua: cjson encodes an empty table as `{}`, so an empty object is an empty list.
+/// A constellation with no registration or global stream (any new one) otherwise failed every refresh.
+fn list<'de, D, T>(d: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum ListOrEmpty<T> {
+        List(Vec<T>),
+        Object(HashMap<String, serde::de::IgnoredAny>),
+    }
+    match ListOrEmpty::<T>::deserialize(d)? {
+        ListOrEmpty::List(v) => Ok(v),
+        ListOrEmpty::Object(m) if m.is_empty() => Ok(Vec::new()),
+        ListOrEmpty::Object(_) => Err(serde::de::Error::custom("expected a list, got an object")),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -540,9 +564,11 @@ impl StreamDiscoveryManager {
                 total_unified += 1;
             }
         }
+        let mut placements = 0usize;
         for stream in placement_streams(conn, &crate::daemon::GNodeDaemon::node_id_for_lease()) {
             all_discovered.push(stream);
             total_unified += 1;
+            placements += 1;
         }
 
         // Process health streams
@@ -633,7 +659,9 @@ impl StreamDiscoveryManager {
         // formula — the old "({}×{})" printed sites×per-site as if that
         // were the whole expectation, hiding the shared-stream term and
         // making the mismatch look like broken arithmetic.
-        if response.expected_total > 0 && all_discovered.len() != response.expected_total as usize {
+        // The expectation counts per-site and shared streams; this node's placement streams come on top.
+        let counted = all_discovered.len() - placements;
+        if response.expected_total > 0 && counted != response.expected_total as usize {
             // Name the sites that are short. This warned once a minute on both nodes
             // for months while saying only the arithmetic, so nobody could tell that
             // the whole shortfall was one site: `_gtest`, a golden-test fixture left
@@ -645,12 +673,13 @@ impl StreamDiscoveryManager {
                     if info.streams.is_empty() { "neither".to_string() } else { info.streams.join("+") }))
                 .collect();
             warn!(
-                "Stream count mismatch: discovered {} but expected {} ({} sites × {} per-site + {} shared){}",
-                all_discovered.len(),
+                "Stream count mismatch: discovered {} but expected {} ({} sites × {} per-site + {} shared; {} placement streams not counted){}",
+                counted,
                 response.expected_total,
                 response.site_count,
                 response.expected_per_site,
                 response.expected_shared,
+                placements,
                 if short.is_empty() { String::new() } else { format!("; short: {}", short.join(", ")) }
             );
         }
@@ -954,6 +983,22 @@ fn parse_fcall_response(result: &Value) -> IntegrationResult<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn an_empty_lua_table_is_an_empty_list() {
+        // what GNODE_SERVICE_GET_ALL_STREAMS returns on a new constellation: cjson writes {} for empty tables
+        let raw = r#"{"streams":{"unified":[{"key":"{a}:gnode:unified:production","site_id":"a","environment":"production","type":"unified"}],
+            "health":{},"broadcast":[{"key":"{c}:gnode:broadcast:global","type":"broadcast"}],"registration":{},"global":{}},
+            "total_streams":2,"site_count":2,"sites":{"a":{"active_environment":"production","streams":["unified"]},"b":{"active_environment":"production","streams":{}}},
+            "expected_per_site":2,"expected_shared":1,"expected_total":5}"#;
+        let r: AllStreamsResponse = serde_json::from_str(raw).expect("parses");
+        let none: SiteListResponse = serde_json::from_str(r#"{"sites":{},"count":0}"#).expect("an empty site list parses");
+        assert!(none.sites.is_empty());
+        assert_eq!((r.streams.unified.len(), r.streams.health.len(), r.streams.registration.len(), r.streams.global.len()), (1, 0, 0, 0));
+        assert!(r.sites["b"].streams.is_empty());
+        let bad = raw.replace(r#""health":{}"#, r#""health":{"x":1}"#);
+        assert!(serde_json::from_str::<AllStreamsResponse>(&bad).is_err(), "a non-empty object is still an error");
+    }
     use super::*;
 
     #[test]
