@@ -33,6 +33,41 @@ use crate::integration::stream_discovery::StreamDiscoveryManager;
 use crate::config::{build_request_key, build_response_key};
 use std::sync::RwLock;
 
+/// The stream a NOGROUP reply names: `NOGROUP No such key '<key>' or consumer group '<g>' in XREADGROUP …`.
+pub(crate) fn nogroup_key(err: &str) -> Option<&str> {
+    if !err.contains("NOGROUP") {
+        return None;
+    }
+    let rest = &err[err.find("No such key '")? + "No such key '".len()..];
+    let key = &rest[..rest.find('\'')?];
+    (!key.is_empty()).then_some(key)
+}
+
+#[derive(Debug, PartialEq)]
+pub(crate) enum NogroupFix {
+    GroupRecreated,
+    StreamGone,
+    Failed(String),
+}
+
+/// After NOGROUP on `key`: a stream that still exists gets its group back (no MKSTREAM: a deleted
+/// stream is not recreated here); a missing one is reported gone.
+pub(crate) async fn fix_nogroup(conn: &mut redis::aio::MultiplexedConnection, key: &str, group: &str) -> NogroupFix {
+    let exists: i64 = match redis::cmd("EXISTS").arg(key).query_async(conn).await {
+        Ok(n) => n,
+        Err(e) => return NogroupFix::Failed(e.to_string()),
+    };
+    if exists == 0 {
+        return NogroupFix::StreamGone;
+    }
+    let r: redis::RedisResult<()> = redis::cmd("XGROUP").arg("CREATE").arg(key).arg(group).arg("$").query_async(conn).await;
+    match r {
+        Ok(()) => NogroupFix::GroupRecreated,
+        Err(e) if e.to_string().contains("BUSYGROUP") => NogroupFix::GroupRecreated,
+        Err(e) => NogroupFix::Failed(e.to_string()),
+    }
+}
+
 /// Request received from KeyBasedClient (PHP)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComputeRequest {
@@ -399,6 +434,24 @@ impl ComputeHandler {
                 Err(e) => {
                     // Timeout is normal (nil response), only log actual errors
                     let err_str = e.to_string();
+                    // One read spans every stream: a single deleted stream fails it for all of them.
+                    if let Some(key) = nogroup_key(&err_str).map(str::to_string) {
+                        match fix_nogroup(&mut conn, &key, Self::CONSUMER_GROUP).await {
+                            NogroupFix::GroupRecreated => info!("KeyBased: {} had lost its consumer group; recreated", key),
+                            NogroupFix::StreamGone => {
+                                self.active_streams.write().await.remove(&key);
+                                info!("KeyBased: {} is gone; reading the other streams without it", key);
+                                if let Ok(d) = self.shared_discovery.read() {
+                                    d.signal_immediate_sync();
+                                }
+                            }
+                            NogroupFix::Failed(why) => {
+                                self.active_streams.write().await.remove(&key);
+                                warn!("KeyBased: {} left out until the next sync: {}", key, why);
+                            }
+                        }
+                        continue;
+                    }
                     if !err_str.contains("nil") && !err_str.contains("response was nil") {
                         warn!("⚠️ KeyBased: XREADGROUP error: {}", e);
                         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -629,6 +682,53 @@ fn current_timestamp() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nogroup_names_the_stream() {
+        let e = "NOGROUP: No such key '{a_site}:gnode:unified:production' or consumer group 'gnode-daemon' in XREADGROUP with GROUP option";
+        assert_eq!(nogroup_key(e), Some("{a_site}:gnode:unified:production"));
+        assert_eq!(nogroup_key("BUSYGROUP Consumer Group name already exists"), None);
+        assert_eq!(nogroup_key("NOGROUP something else"), None);
+        assert_eq!(nogroup_key("response was nil"), None);
+    }
+
+    /// GNODE_TEST_VALKEY_URL=redis://127.0.0.1:6398 cargo test --lib nogroup_recovery -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn nogroup_recovery_against_valkey() {
+        let url = std::env::var("GNODE_TEST_VALKEY_URL").expect("GNODE_TEST_VALKEY_URL");
+        let mut conn = redis::Client::open(url).unwrap().get_multiplexed_async_connection().await.unwrap();
+        let (a, b, g) = ("{t_a}:gnode:unified:t", "{t_b}:gnode:unified:t", "gnode-daemon");
+        let _: () = redis::cmd("DEL").arg(a).arg(b).query_async(&mut conn).await.unwrap();
+        for k in [a, b] {
+            let _: () = redis::cmd("XGROUP").arg("CREATE").arg(k).arg(g).arg("$").arg("MKSTREAM").query_async(&mut conn).await.unwrap();
+        }
+        let read = |conn: &mut redis::aio::MultiplexedConnection, keys: Vec<&str>| {
+            let mut c = redis::cmd("XREADGROUP");
+            c.arg("GROUP").arg(g).arg("c").arg("COUNT").arg(1).arg("STREAMS");
+            for k in &keys { c.arg(*k); }
+            for _ in &keys { c.arg(">"); }
+            let mut conn = conn.clone();
+            async move { c.query_async::<redis::Value>(&mut conn).await }
+        };
+
+        // a deleted stream fails the read for every stream, and names itself
+        let _: () = redis::cmd("DEL").arg(b).query_async(&mut conn).await.unwrap();
+        let err = read(&mut conn, vec![a, b]).await.unwrap_err().to_string();
+        assert_eq!(nogroup_key(&err), Some(b), "{err}");
+        assert_eq!(fix_nogroup(&mut conn, b, g).await, NogroupFix::StreamGone);
+        let exists: i64 = redis::cmd("EXISTS").arg(b).query_async(&mut conn).await.unwrap();
+        assert_eq!(exists, 0, "recovery must not recreate a deleted stream");
+        assert!(read(&mut conn, vec![a]).await.is_ok(), "without it, the others read again");
+
+        // a stream recreated without its group gets the group back, and reads
+        let _: String = redis::cmd("XADD").arg(b).arg("*").arg("f").arg("v").query_async(&mut conn).await.unwrap();
+        let err = read(&mut conn, vec![a, b]).await.unwrap_err().to_string();
+        assert_eq!(nogroup_key(&err), Some(b));
+        assert_eq!(fix_nogroup(&mut conn, b, g).await, NogroupFix::GroupRecreated);
+        assert!(read(&mut conn, vec![a, b]).await.is_ok());
+        let _: () = redis::cmd("DEL").arg(a).arg(b).query_async(&mut conn).await.unwrap();
+    }
 
     #[tokio::test]
     async fn test_compute_response_success() {
