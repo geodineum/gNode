@@ -5,7 +5,8 @@
 # Creates everything a service needs to participate in the gNode mesh:
 #   1. ACL user (idempotent — skips if already exists)
 #   2. ValKey streams + registry (via GNODE_PROVISION_SERVICE)
-#   3. Discovery path registration (adds to discovery-paths.conf)
+#   3. Manifest location (adds to discovery-paths.conf: the CLI finds a service's .geodineum there;
+#      the daemon has read none of it since the one-topology flip)
 #   4. Tenant/owner group (optional, for cross-site discovery)
 #
 # Default environment is "testing" — sites are gated behind a ViewKey
@@ -689,7 +690,7 @@ fi
 # =============================================================================
 
 if [[ -n "$YAML_PATH" ]]; then
-    log_step "Step 3: Discovery Path Registration"
+    log_step "Step 3: Manifest Location"
 
     # Use the original --yaml path (directory or file), not the resolved YAML
     DISCOVERY_ENTRY="$YAML_PATH"
@@ -700,8 +701,8 @@ if [[ -n "$YAML_PATH" ]]; then
         # Create discovery paths file if it doesn't exist
         if [[ ! -f "$DISCOVERY_PATHS_FILE" ]]; then
             cat > "$DISCOVERY_PATHS_FILE" << 'HEADER'
-# gNode Service Discovery Paths
-# One path per line. Directories probed for gnode_services.yaml / geometric_topology.yaml
+# Manifest locations: where the geodineum CLI looks for a service's .geodineum (a .registered file names
+# the site). The daemon does not read this file; registration is by name on the one topology.
 HEADER
             chmod 640 "$DISCOVERY_PATHS_FILE"
             chown gnode:gnode "$DISCOVERY_PATHS_FILE" 2>/dev/null || true
@@ -709,10 +710,10 @@ HEADER
 
         # Idempotent append
         if grep -qxF "$DISCOVERY_ENTRY" "$DISCOVERY_PATHS_FILE" 2>/dev/null; then
-            log_info "Path already in discovery manifest (skipping)"
+            log_info "Manifest location already listed (skipping)"
         else
             echo "$DISCOVERY_ENTRY" >> "$DISCOVERY_PATHS_FILE"
-            log_success "Added to discovery manifest: $DISCOVERY_ENTRY"
+            log_success "Manifest location listed: $DISCOVERY_ENTRY"
             # The registration ledger (Geodineum lib/common.sh): what registering
             # created on this host, so `geodineum deregister` undoes exactly that.
             _ledger_dir="${GEODINEUM_REGISTRATIONS_DIR:-/etc/geodineum/registrations}"
