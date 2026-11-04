@@ -66,10 +66,14 @@ local function get_time_ms()
 end
 
 -- Helper: Track metrics
-local function track_metric(site_id, metric, value)
+local function track_metric_unsafe(site_id, metric, value)
     if not site_id or site_id == "" then return end
     local metrics_key = '{' .. site_id .. '}:metrics:resilience'
     server.call('HINCRBY', metrics_key, metric, value or 1)
+end
+-- A metric never fails the operation it measures (a NOPERM on a trim once left every lock acquired-then-errored).
+local function track_metric(...)
+    pcall(track_metric_unsafe, ...)
 end
 
 --[[

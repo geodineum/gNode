@@ -45,7 +45,7 @@ local function build_key(key, site_id, group, prefix)
 end
 
 -- Function to track metrics with detail recording
-local function track_metric(site_id, metric_type, value, details)
+local function track_metric_unsafe(site_id, metric_type, value, details)
     -- Skip if site_id not provided
     if not site_id or site_id == "" then
         return
@@ -74,6 +74,10 @@ local function track_metric(site_id, metric_type, value, details)
             server.call('LTRIM', details_key, 0, 999)  -- Keep last 1000 entries
         end
     end
+end
+-- A metric never fails the operation it measures (a NOPERM on a trim once left every lock acquired-then-errored).
+local function track_metric(...)
+    pcall(track_metric_unsafe, ...)
 end
 
 -- Register MGET function (mirroring CacheScriptsBatchOperations::MGET with RESP3)

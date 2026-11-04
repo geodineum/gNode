@@ -41,7 +41,7 @@ local function build_key(key, site_id, prefix)
 end
 
 -- Function to track metrics
-local function track_metric(site_id, metric_type, value, details, read_only)
+local function track_metric_unsafe(site_id, metric_type, value, details, read_only)
     -- Skip if site_id not provided or in read-only mode
     if not site_id or site_id == "" or read_only then
         return
@@ -70,6 +70,10 @@ local function track_metric(site_id, metric_type, value, details, read_only)
             server.call('LTRIM', details_key, 0, 999)  -- Keep last 1000 entries
         end
     end
+end
+-- A metric never fails the operation it measures (a NOPERM on a trim once left every lock acquired-then-errored).
+local function track_metric(...)
+    pcall(track_metric_unsafe, ...)
 end
 
 -- Register core GET function (direct mirror of CacheScriptsCoreOperations::GET)

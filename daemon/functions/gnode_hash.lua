@@ -9,7 +9,7 @@
 -- 
 
 
-local function track_metric(site_id, metric, value, context)
+local function track_metric_unsafe(site_id, metric, value, context)
     local metrics_key = '{' .. site_id .. '}:metrics'
     server.call('HINCRBY', metrics_key, metric, value or 1)
 
@@ -36,6 +36,10 @@ local function track_metric(site_id, metric, value, context)
             server.call('ZREMRANGEBYRANK', ctx_key, 0, count - 1001)
         end
     end
+end
+-- A metric never fails the operation it measures (a NOPERM on a trim once left every lock acquired-then-errored).
+local function track_metric(...)
+    pcall(track_metric_unsafe, ...)
 end
 
 -- Register hash increment function (mirroring CacheScriptsHashOperations::HINCRBY)

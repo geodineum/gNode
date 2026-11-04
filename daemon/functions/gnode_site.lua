@@ -48,9 +48,13 @@ local function safe_json_decode(value)
     end
 end
 
-local function track_metric(site_id, metric, value)
+local function track_metric_unsafe(site_id, metric, value)
     local metrics_key = '{' .. site_id .. '}:metrics'
     server.call('HINCRBY', metrics_key, metric, value or 1)
+end
+-- A metric never fails the operation it measures (a NOPERM on a trim once left every lock acquired-then-errored).
+local function track_metric(...)
+    pcall(track_metric_unsafe, ...)
 end
 
 -- Register site registration function (mirroring CacheScriptsSiteManager::SITE_REGISTER)

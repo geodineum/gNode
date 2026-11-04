@@ -20,7 +20,7 @@ end
 
 
 -- Helper function for metric tracking (used by other functions)
-local function track_metric(site_id, metric_type, value, extra)
+local function track_metric_unsafe(site_id, metric_type, value, extra)
     -- Site-specific metrics
     local site_metrics = '{' .. site_id .. '}:metrics'
     server.call('HINCRBY', site_metrics, metric_type, value or 1)
@@ -47,6 +47,10 @@ local function track_metric(site_id, metric_type, value, extra)
         server.call('ZADD', latency_key, value, tostring(server.call('TIME')[1]))
         server.call('ZREMRANGEBYRANK', latency_key, 0, -10001)  -- Keep last 10K samples
     end
+end
+-- A metric never fails the operation it measures (a NOPERM on a trim once left every lock acquired-then-errored).
+local function track_metric(...)
+    pcall(track_metric_unsafe, ...)
 end
 
 -- Register metric tracking function (mirroring CacheScriptsMonitoring::TRACK_METRIC)
