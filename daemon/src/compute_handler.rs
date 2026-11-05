@@ -602,7 +602,7 @@ impl ComputeHandler {
         debug_mode: bool,
     ) -> Result<CommandResult, Box<dyn std::error::Error + Send + Sync>> {
         // Create Command struct compatible with existing handler registry
-        let command = Command {
+        let mut command = Command {
             id: request_id.to_string(),
             command: request.command.clone(),
             parameters: request.parameters.clone(),
@@ -610,6 +610,10 @@ impl ComputeHandler {
             node_id: "keybased".to_string(), // Marker for key-based requests
             timestamp: request.requested_at,
         };
+        // site_id is the stream the announcement arrived on; request.site_id is what the caller wrote.
+        if let Some(no) = crate::integration::tenant_guard::apply(&format!("{{{}}}:", site_id), &mut command) {
+            return Ok(no);
+        }
 
         // Prefer async handlers for non-blocking execution (Phase 2: Async Architecture)
         if let Some(async_handler) = command_registry.get_async_handler(&request.command) {

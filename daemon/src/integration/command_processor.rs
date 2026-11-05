@@ -1151,7 +1151,7 @@ pub fn process_command_batch(
                     }
                     
                     // Convert to standard command
-                    let sub_command = Command::from_optimized(batch_msg);
+                    let mut sub_command = Command::from_optimized(batch_msg);
                     
                     // Skip empty commands to avoid logging errors
                     if sub_command.command.trim().is_empty() {
@@ -1159,10 +1159,12 @@ pub fn process_command_batch(
                     }
                     
                     // Get handler for command
+                    let refused = crate::integration::tenant_guard::apply(stream_key, &mut sub_command);
                     let handler_opt = registry.get_handler(&sub_command.command);
                     
                     // Execute handler
                     let result = match handler_opt {
+                        _ if refused.is_some() => refused.unwrap(),
                         Some(handler) => {
                             if debug_level >= LogLevel::Info {
                                 info!("Found registered handler for batch sub-command: {}", sub_command.command);
@@ -1222,7 +1224,7 @@ pub fn process_command_batch(
                                 }
                                 
                                 // Create a command
-                                let sub_command = Command {
+                                let mut sub_command = Command {
                                     id: format!("{}-{}", batch_cmd.id, idx),
                                     command: cmd_name.clone(),
                                     parameters: parse_params_safely(cmd_params).unwrap_or_else(|_| serde_json::json!({})),
@@ -1237,10 +1239,12 @@ pub fn process_command_batch(
                                 }
                                 
                                 // Get handler for command
+                                let refused = crate::integration::tenant_guard::apply(stream_key, &mut sub_command);
                                 let handler_opt = registry.get_handler(&sub_command.command);
                                 
                                 // Execute handler
                                 let result = match handler_opt {
+                                    _ if refused.is_some() => refused.unwrap(),
                                     Some(handler) => {
                                         if debug_level >= LogLevel::Info {
                                             info!("Found registered handler for raw batch command: {}", sub_command.command);
@@ -1288,7 +1292,7 @@ pub fn process_command_batch(
         
         for (_, command_obj) in &regular_commands {
             // Convert to standard command
-            let command = Command::from_optimized(command_obj);
+            let mut command = Command::from_optimized(command_obj);
 
             // Skip empty commands to avoid logging errors
             if command.command.trim().is_empty() {
@@ -1309,6 +1313,8 @@ pub fn process_command_batch(
                 }
                 continue;
             }
+
+            let refused = crate::integration::tenant_guard::apply(stream_key, &mut command);
 
             if debug_level >= LogLevel::Info {
                 info!("Processing regular command: {} (ID: {})", command.command, command.id);
@@ -1344,7 +1350,8 @@ pub fn process_command_batch(
             // Concurrent-lane spawn — fire-and-forget. The spawned task
             // writes its own response to the polling key; nothing more
             // to do here. Increment counter and skip to next message.
-            if matches!(lane, crate::integration::handlers::types::Lane::Concurrent)
+            if refused.is_none()
+                && matches!(lane, crate::integration::handlers::types::Lane::Concurrent)
                 && async_available
                 && crate::integration::concurrent_lane::is_initialized()
             {
@@ -1372,14 +1379,15 @@ pub fn process_command_batch(
             // Synchronous (Ordered lane, or Concurrent fallback) dispatch.
             let handler_opt = registry.get_handler(&command.command);
             let started = std::time::Instant::now();
-            let result = match handler_opt {
-                Some(handler) => {
+            let result = match (refused, handler_opt) {
+                (Some(no), _) => no,
+                (None, Some(handler)) => {
                     if debug_level >= LogLevel::Info {
                         info!("Found registered handler for command: {}", command.command);
                     }
                     handler(&command, conn, site_id, debug_mode)
                 },
-                None => {
+                (None, None) => {
                     unknown_command_error(&command.command)
                 }
             };

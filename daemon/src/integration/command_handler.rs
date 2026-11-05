@@ -278,7 +278,11 @@ pub fn process_command_unified_stream(
     site_id: &str,
     debug_mode: bool
 ) -> IntegrationResult<String> {
-    let result = process_command_with_registry(command, conn, site_id, debug_mode);
+    let mut named = command.clone();
+    let result = match crate::integration::tenant_guard::apply(stream_key, &mut named) {
+        Some(no) => no,
+        None => process_command_with_registry(&named, conn, site_id, debug_mode),
+    };
     let response = result.to_response(&command.id);
 
     send_response_with_routing(

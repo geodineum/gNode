@@ -75,17 +75,19 @@ pub fn process_pending_commands(
     // Process each claimed command
     for (msg_id, optimized) in pending_commands {
         // Convert to standard command
-        let command = Command::from_optimized(&optimized);
+        let mut command = Command::from_optimized(&optimized);
         
         if debug_mode {
             debug!("Processing pending command: {} (ID: {})", command.command, command.id);
         }
         
         // Get handler for command
+        let refused = crate::integration::tenant_guard::apply(stream_key, &mut command);
         let handler_opt = registry.get_handler(&command.command);
         
         // Execute handler
         let result = match handler_opt {
+            _ if refused.is_some() => refused.unwrap(),
             Some(handler) => {
                 // Call handler with proper arguments
                 handler(&command, conn, site_id, debug_mode)

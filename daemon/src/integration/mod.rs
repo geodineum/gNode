@@ -116,6 +116,7 @@ pub use command_handler::{
 };
 
 pub mod command_processor;
+pub mod tenant_guard;
 
 // Concurrent lane: async-spawned dispatch for Lane::Concurrent commands.
 // Owns a shared tokio runtime + redis Client. See module doc-comment
