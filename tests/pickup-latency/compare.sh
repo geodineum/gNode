@@ -50,12 +50,13 @@ pair() { # <label> <binary a> <binary b>
     for ((i=0;i<SITES;i++)); do s=site_$i; vk sadd gnode:sites:registry "$s" >/dev/null
         vk xadd "{$s}:gnode:unified:production" '*' t init >/dev/null; vk xadd "{$s}:gnode:health" '*' t init >/dev/null; done
     A=$(start_one aa "$2"); B=$(start_one bb "$3")
-    for _ in $(seq 100); do [[ $(vk xinfo consumers "{site_0}:gnode:unified:production" gnode-daemon 2>/dev/null | grep -c '^gnode') -ge 2 ]] && break; sleep 1; done
+    for _ in $(seq 100); do [[ $(vk xinfo consumers "{site_0}:gnode:unified:production" gnode-daemon 2>/dev/null | grep -c '^daemon-') -ge 2 ]] && break; sleep 1; done
     sleep 3
-    echo "== $1: consumers $(vk xinfo consumers '{site_0}:gnode:unified:production' gnode-daemon 2>&1 | grep -c '^gnode')"
+    echo "== $1: consumers $(vk xinfo consumers '{site_0}:gnode:unified:production' gnode-daemon 2>&1 | grep -c '^daemon-')"
     php "$HERE/driver.php" "$PORT" site_7 300 2>/dev/null
     php "$HERE/driver.php" "$PORT" site_1 100 2>/dev/null & P1=$!; php "$HERE/driver.php" "$PORT" site_2 100 2>/dev/null & P2=$!; php "$HERE/driver.php" "$PORT" site_9 100 2>/dev/null; wait $P1 $P2
     echo "pending on site_7: $(vk xpending '{site_7}:gnode:unified:production' gnode-daemon | head -1)"
+    vk xinfo consumers "{site_7}:gnode:unified:production" gnode-daemon | paste -sd" " | cut -c1-200
     kill "$A" "$B" 2>/dev/null; wait "$A" "$B" 2>/dev/null
 }
 if [[ ${PAIRS:-} == 1 ]]; then pair "new+new" "$NEW" "$NEW"; pair "old+new (rollout)" "$OLD" "$NEW"; exit 0; fi
