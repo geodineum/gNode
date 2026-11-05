@@ -907,7 +907,7 @@ pub fn create_unified_stream_worker(
                             // doing the same is a duplicate key write, not a
                             // duplicate delivery.
                             for (entry_id, reply) in &relay_replies {
-                                crate::integration::relay::deliver_service_reply(&mut conn, reply, debug_mode);
+                                crate::integration::relay::deliver_service_reply(&mut conn, &stream_key, reply, debug_mode);
                                 crate::integration::relay::roundtrip::note_arrival(
                                     &mut conn, crate::daemon::GNodeDaemon::get_topology_namespace(),
                                     &stream_key, entry_id, reply, debug_mode);
@@ -1476,7 +1476,7 @@ pub fn create_environment_stream_worker_dynamic(
                                 // site's stream, so it is where a service's
                                 // reply is most reliably caught on its way home.
                                 for (entry_id, reply) in &relay_replies {
-                                    crate::integration::relay::deliver_service_reply(&mut conn, reply, debug_mode);
+                                    crate::integration::relay::deliver_service_reply(&mut conn, current_unified_stream, reply, debug_mode);
                                     crate::integration::relay::roundtrip::note_arrival(
                                         &mut conn, crate::daemon::GNodeDaemon::get_topology_namespace(),
                                         current_unified_stream, entry_id, reply, debug_mode);
@@ -1619,6 +1619,7 @@ pub fn create_environment_stream_worker_dynamic(
                                                     .arg(&field_pairs)
                                                     .query::<String>(&mut conn) {
                                                     Ok(forward_entry_id) => {
+                                                        crate::integration::relay::reply::grant_reply(&mut conn, &forwarded.id, target_site_id, current_unified_stream);
                                                         info!("Relayed '{}' -> {} on {}", cmd.command, target_entity_id, target_stream_key);
                                                         crate::integration::relay::roundtrip::note_departure(
                                                             &mut conn, ns, &forwarded.id, &forward_entry_id,

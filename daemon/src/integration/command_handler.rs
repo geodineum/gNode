@@ -281,7 +281,7 @@ pub fn process_command_unified_stream(
     let mut named = command.clone();
     let result = match crate::integration::tenant_guard::apply(stream_key, &mut named) {
         Some(no) => no,
-        None => process_command_with_registry(&named, conn, site_id, debug_mode),
+        None => process_command_with_registry(&named, conn, crate::integration::tenant_guard::tenant_of_stream(stream_key).unwrap_or(site_id), debug_mode),
     };
     let response = result.to_response(&command.id);
 

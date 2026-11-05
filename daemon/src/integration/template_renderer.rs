@@ -105,10 +105,18 @@ impl From<crate::GeometricError> for TemplateError {
     }
 }
 
+/// Templates come from tenants: Tera's `get_env` would hand them the daemon's environment.
+fn no_environment(tera: &mut Tera) {
+    tera.register_function("get_env", |_: &std::collections::HashMap<String, tera::Value>| -> tera::Result<tera::Value> {
+        Err(tera::Error::msg("get_env is not available in templates"))
+    });
+}
+
 // Thread-safe singleton Tera engine instance
 lazy_static! {
     static ref TERA_ENGINE: Arc<RwLock<Tera>> = {
         let mut tera = Tera::default();
+        no_environment(&mut tera);
         tera.autoescape_on(vec![".html", ".htm", ".xml"]);
         Arc::new(RwLock::new(tera))
     };
@@ -556,6 +564,7 @@ pub fn render_template(
 /// ```
 pub fn render_string(template: &str, variables: &Value) -> IntegrationResult<String> {
     let mut tera = Tera::default();
+    no_environment(&mut tera);
     tera.autoescape_on(vec![".html", ".htm", ".xml"]);
 
     // Use .html extension to ensure auto-escaping (P2DF003 fix)

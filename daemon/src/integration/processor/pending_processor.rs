@@ -90,7 +90,7 @@ pub fn process_pending_commands(
             _ if refused.is_some() => refused.unwrap(),
             Some(handler) => {
                 // Call handler with proper arguments
-                handler(&command, conn, site_id, debug_mode)
+                handler(&command, conn, crate::integration::tenant_guard::tenant_of_stream(stream_key).unwrap_or(site_id), debug_mode)
             },
             None => {
                 unknown_command_error(&command.command)

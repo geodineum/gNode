@@ -1170,7 +1170,7 @@ pub fn process_command_batch(
                                 info!("Found registered handler for batch sub-command: {}", sub_command.command);
                             }
                             // Call handler with proper arguments
-                            handler(&sub_command, conn, site_id, debug_mode)
+                            handler(&sub_command, conn, crate::integration::tenant_guard::tenant_of_stream(stream_key).unwrap_or(site_id), debug_mode)
                         },
                         None => {
                             unknown_command_error(&sub_command.command)
@@ -1250,7 +1250,7 @@ pub fn process_command_batch(
                                             info!("Found registered handler for raw batch command: {}", sub_command.command);
                                         }
                                         // Call handler with proper arguments
-                                        handler(&sub_command, conn, site_id, debug_mode)
+                                        handler(&sub_command, conn, crate::integration::tenant_guard::tenant_of_stream(stream_key).unwrap_or(site_id), debug_mode)
                                     },
                                     None => {
                                         unknown_command_error(&sub_command.command)
@@ -1356,7 +1356,7 @@ pub fn process_command_batch(
                 && crate::integration::concurrent_lane::is_initialized()
             {
                 let cmd_owned = command.clone();
-                let site_owned = site_id.to_string();
+                let site_owned = crate::integration::tenant_guard::tenant_of_stream(stream_key).unwrap_or(site_id).to_string();
                 let env_owned = crate::integration::receipt::env_from_stream_key(stream_key)
                     .map(String::from);
                 let spawned = crate::integration::concurrent_lane::try_spawn_concurrent(
@@ -1385,7 +1385,7 @@ pub fn process_command_batch(
                     if debug_level >= LogLevel::Info {
                         info!("Found registered handler for command: {}", command.command);
                     }
-                    handler(&command, conn, site_id, debug_mode)
+                    handler(&command, conn, crate::integration::tenant_guard::tenant_of_stream(stream_key).unwrap_or(site_id), debug_mode)
                 },
                 (None, None) => {
                     unknown_command_error(&command.command)

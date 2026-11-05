@@ -48,6 +48,8 @@ use std::collections::HashMap;
 /// a slow poller. Correlation ids are UUIDs, so a long-lived key cannot be
 /// picked up by a later request.
 const RELAYED_REPLY_TTL_SECS: usize = 300;
+/// A relayed command may run most of a day (gFlow's CPU inference); its answer stays welcome for a week.
+const REPLY_GRANT_TTL_SECS: u64 = 604_800;
 
 /// Give a forwarded command the ORIGIN's correlation id.
 ///
@@ -204,6 +206,32 @@ pub fn is_relayed_service_reply(fields: &HashMap<String, String>) -> bool {
         || fields.contains_key("status")
 }
 
+fn reply_grant_key(correlation_id: &str) -> String {
+    format!("{{{}}}:gnode:relay:grant:{}", crate::daemon::GNodeDaemon::get_topology_namespace(), correlation_id)
+}
+
+/// A relayed command is on its way: its target, and only its target, may answer to `origin_stream`.
+pub fn grant_reply(conn: &mut Connection, correlation_id: &str, target_site: &str, origin_stream: &str) {
+    if correlation_id.is_empty() {
+        return;
+    }
+    let _: redis::RedisResult<()> = redis::cmd("SET").arg(reply_grant_key(correlation_id))
+        .arg(format!("{target_site}\n{origin_stream}")).arg("EX").arg(REPLY_GRANT_TTL_SECS).query(conn);
+}
+
+/// `_rr` is written by whoever wrote the entry: a reply is carried home only for a command the
+/// daemon itself forwarded to this stream's owner, to this origin.
+fn reply_was_asked_for(conn: &mut Connection, read_from: &str, fields: &HashMap<String, String>, reply_stream: &str) -> bool {
+    let Some(id) = fields.get("ri").or_else(|| fields.get("id")).map(String::as_str).filter(|s| !s.is_empty()) else { return false };
+    let Some(replier) = crate::config::site_of_stream_key(read_from) else { return false };
+    let grant: Option<String> = redis::cmd("GET").arg(reply_grant_key(id)).query(conn).unwrap_or(None);
+    grant_matches(grant.as_deref(), replier, reply_stream)
+}
+
+fn grant_matches(grant: Option<&str>, replier: &str, reply_stream: &str) -> bool {
+    grant.and_then(|g| g.split_once('\n')).is_some_and(|(target, origin)| target == replier && origin == reply_stream)
+}
+
 /// Write a service's reply to the origin's polling key.
 ///
 /// Best-effort and never fatal: a reply that cannot be delivered leaves the
@@ -213,6 +241,7 @@ pub fn is_relayed_service_reply(fields: &HashMap<String, String>) -> bool {
 /// Returns true when a key was written.
 pub fn deliver_service_reply(
     conn: &mut Connection,
+    read_from: &str,
     fields: &HashMap<String, String>,
     debug_mode: bool,
 ) -> bool {
@@ -220,6 +249,10 @@ pub fn deliver_service_reply(
         Some(s) if !s.is_empty() => s,
         _ => return false,
     };
+    if !reply_was_asked_for(conn, read_from, fields, reply_stream) {
+        warn!("Refused a reply on {read_from} naming {reply_stream}: this daemon sent that party no such command");
+        return false;
+    }
 
     let site = match origin_site_from_reply_stream(reply_stream) {
         Some(s) => s,
@@ -363,6 +396,15 @@ fn forward_to_origin_stream(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_reply_needs_the_grant_its_command_left_behind() {
+        let g = Some("geodine\n{gflow}:gnode:unified:production");
+        assert!(super::grant_matches(g, "geodine", "{gflow}:gnode:unified:production"));
+        assert!(!super::grant_matches(g, "evil", "{gflow}:gnode:unified:production"), "another party answering");
+        assert!(!super::grant_matches(g, "geodine", "{victim}:gnode:comms:production"), "the right party, another destination");
+        assert!(!super::grant_matches(None, "geodine", "{gflow}:gnode:unified:production"), "a command never sent");
+    }
+
     use super::*;
 
     fn party(extra: &[(&str, &str)]) -> crate::integration::processor::resp3_protocol::OptimizedCommand {
