@@ -203,6 +203,14 @@ local function build_type_index_key(index_key, topo_type)
     return string.sub(index_key, 1, -#REGISTRY_SUFFIX - 1) .. TYPE_INDEX_PREFIX .. topo_type
 end
 
+-- The constellation's generation: moves when what a reader would see moves, so a reader can tell
+-- without a diff. Routing counters (rr, in-flight) are not state a reader caches and do not move it.
+local function bump_generation(topology_key)
+    if server.call('HGET', topology_key .. ':meta', 'sv') == '5' then
+        server.call('HINCRBY', topology_key .. ':meta', 'gen', 1)
+    end
+end
+
 -- ============================================================================
 -- GNODE_TOPO_CREATE
 -- Create a new topology with metadata in the registry
@@ -350,6 +358,7 @@ server.register_function{
         local entity_id = args[1]
         local hashed_width = tonumber(args[6])
         local constellation = server.call('HGET', topology_key .. ':meta', 'sv') == '5'
+        local derived_moved = false
 
         -- A constellation passes its own lease key as KEYS[2]; a legacy topology reads the global one.
         local lease = server.call('GET', (constellation and keys[2]) or 'gnode:cluster:writer')
@@ -419,6 +428,7 @@ server.register_function{
                     "Axis %d is outside %s's stored point", slot - 1, entity_id))
             end
             if value.pd ~= nil then
+                if tonumber(entity.pd[slot]) ~= tonumber(value.pd) then derived_moved = true end
                 entity.pd[slot] = tonumber(value.pd)
             end
             if value.pr ~= nil and entity.pr and #entity.pr >= slot then
@@ -441,6 +451,7 @@ server.register_function{
             return server.error_reply("Failed to encode entity: " .. (encode_err or "unknown"))
         end
         server.call('HSET', topology_key .. ':entities', entity_id, final_json)
+        if derived_moved then bump_generation(topology_key) end
         if z_score then
             server.call('ZADD', topology_key .. ':z_order', z_score, entity_id)
         end
@@ -539,6 +550,7 @@ server.register_function{
         -- Update adjacency sets
         server.call('SADD', topology_key .. ':out:' .. from_id, to_id)
         server.call('SADD', topology_key .. ':in:' .. to_id, from_id)
+        bump_generation(topology_key)
 
         -- Update edge count if new
         if not is_update then
@@ -597,6 +609,7 @@ server.register_function{
 
         -- Decrement edge count
         server.call('HINCRBY', topology_key .. ':meta', 'xc', -1)  -- xc = edge_count
+        bump_generation(topology_key)
 
         -- Return success (abbreviated)
         local result = {
@@ -1286,6 +1299,7 @@ server.register_function{
         if not (ok1 and ok2 and ok3) then return server.error_reply('record, ordered and colours must be JSON') end
         local stored, upd = register(tk, id, sh, rec, ordered, colours, args[6])
         if not stored then return server.error_reply(upd) end
+        bump_generation(tk)
         return cjson.encode({ ok = true, eid = id, sh = sh, ro = stored.ro, upd = upd })
     end
 }
@@ -1323,6 +1337,7 @@ server.register_function{
         server.call('SADD', tk .. ':placements', id)
         server.call('HSET', tk .. ':w', id, sfmt(w))
         ring_sync(tk, stored)
+        bump_generation(tk)
         return cjson.encode({ ok = true, eid = id, sh = sh, ro = stored.ro, upd = upd })
     end
 }
@@ -1336,6 +1351,7 @@ server.register_function{
         if not is_constellation(tk) then return server.error_reply(tk .. ' is not a constellation topology') end
         local removed = deregister(tk, args[1])
         if removed == nil then return server.error_reply('unknown entity ' .. args[1]) end
+        bump_generation(tk)
         return cjson.encode({ ok = true, eid = args[1], placements_removed = removed })
     end
 }
@@ -1464,6 +1480,7 @@ server.register_function{
         for _, l in ipairs(holds) do server.call('SADD', tk .. ':holds:' .. id, l) end
         for _, l in ipairs(req) do server.call('SADD', tk .. ':req:' .. id, l) end
         for _, p in ipairs(peers) do server.call('SADD', tk .. ':peers:' .. id, p) end
+        bump_generation(tk)
         return cjson.encode({ ok = true, eid = id, holds = #holds, requires = #req, peers = #peers })
     end
 }
@@ -1474,6 +1491,7 @@ server.register_function{
         local ttl = tonumber(args[4])
         if not ttl or ttl <= 0 then return server.error_reply('ttl_ms must be > 0: a deny is always bounded') end
         server.call('ZADD', keys[1] .. ':deny', sfmt(tonumber(args[3]) + ttl), args[1] .. '>' .. args[2])
+        bump_generation(keys[1])
         return 'OK'
     end
 }
@@ -1481,7 +1499,9 @@ server.register_function{
     function_name = 'GNODE_TOPO_UNDENY',
     callback = function(keys, args)
         if #keys < 1 or #args < 2 then return server.error_reply('GNODE_TOPO_UNDENY tk | caller target') end
-        return server.call('ZREM', keys[1] .. ':deny', args[1] .. '>' .. args[2])
+        local gone = server.call('ZREM', keys[1] .. ':deny', args[1] .. '>' .. args[2])
+        if gone > 0 then bump_generation(keys[1]) end
+        return gone
     end
 }
 -- GNODE_TOPO_CAN_REACH tk | caller target now_ms → {0|1, reason}. Fail closed.
@@ -1519,7 +1539,7 @@ server.register_function{
         local tk, now, fresh = keys[1], tonumber(args[1]), tonumber(args[2])
         local ok, why = lease_ok(keys, args[3]); if not ok then return server.error_reply(why) end
         local hbns = tag_of(tk) .. ':gnode:heartbeat:'
-        local ent, nf, nt = {}, 0, 0
+        local ent, nf, nt, moved = {}, 0, 0, false
         for _, pid in ipairs(server.call('SMEMBERS', tk .. ':placements')) do
             local rec = load_record(tk, pid)
             if rec then
@@ -1536,6 +1556,7 @@ server.register_function{
                     end
                 end
                 nt = nt + 1; if h == 1 then nf = nf + 1 end
+                if tonumber(rec.pd[18]) ~= h then moved = true end
                 rec.pd[18] = h; rec.pr[18] = sfmt(h * 2 ^ 64)
                 rec.q.health = sfmt(h * Q48); rec.m.ds = now
                 store(tk, rec); server.call('ZADD', tk .. ':ix:health', rec.q.health, pid)
@@ -1547,11 +1568,22 @@ server.register_function{
         for e, h in pairs(ent) do
             local rec = load_record(tk, e)
             if rec then
+                if tonumber(rec.pd[18]) ~= h then moved = true end
                 rec.pd[18] = h; rec.pr[18] = sfmt(h * 2 ^ 64); rec.q.health = sfmt(h * Q48); rec.m.ds = now
                 store(tk, rec); server.call('ZADD', tk .. ':ix:health', rec.q.health, e); ne = ne + 1
             end
         end
+        if moved then bump_generation(tk) end
         return { nf, nt, ne }
+    end
+}
+
+-- GNODE_TOPO_GEN tk : the generation, a string of digits ("0" before the first write).
+server.register_function{
+    function_name = 'GNODE_TOPO_GEN', flags = { 'no-writes' },
+    callback = function(keys, args)
+        if #keys < 1 then return server.error_reply('GNODE_TOPO_GEN tk') end
+        return server.call('HGET', keys[1] .. ':meta', 'gen') or '0'
     end
 }
 
