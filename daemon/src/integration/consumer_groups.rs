@@ -47,6 +47,12 @@ const RECLAIM_MIN_IDLE_MS: u64 = 30_000;
 
 /// An idle daemon's wait between sweeps; a new entry ends it at once.
 const PICKUP_WAIT_MS: u64 = 250;
+const PICKUP_EMPTY_WAKE_MS: u64 = 25;
+
+fn is_refusal(e: &redis::RedisError) -> bool {
+    let text = e.to_string();
+    text.contains("NOPERM") || text.contains("no permissions")
+}
 
 /// Entries reclaimed per pass. Bounded so recovery cannot monopolise a cycle.
 const RECLAIM_BATCH: usize = 10;
@@ -1238,6 +1244,7 @@ pub fn create_environment_stream_worker_dynamic(
         let mut last_xclaim_check = Instant::now();
         let xclaim_interval_ms = RECLAIM_INTERVAL_MS;
         let mut pickup_wait_refused = false;
+        let mut woke_for_nothing = false;
         let mut last_reap_check = Instant::now();
 
         // Track last staleness check for service topology entities
@@ -1422,6 +1429,7 @@ pub fn create_environment_stream_worker_dynamic(
                     let stream_count = active_unified_streams.len();
                     let mut total_processed_all_streams = 0;
                     let mut had_any_error = false;
+                    let mut sweep_read_any = false;
                     let mut stale_stream_indices: Vec<usize> = Vec::new();
 
                     // A sweep reads every stream without blocking, then one wait covers them all: a
@@ -1432,8 +1440,11 @@ pub fn create_environment_stream_worker_dynamic(
                         match crate::integration::processor::sweep_mark(&mut conn) {
                             Ok(mark) => Some(mark),
                             Err(e) => {
-                                warn!("Falling back to blocking per stream: TIME refused: {}", e);
-                                pickup_wait_refused = true;
+                                // Only a refusal is lasting; a dropped connection is not a reason to slow down for good.
+                                if is_refusal(&e) {
+                                    warn!("Falling back to blocking per stream: TIME refused: {}", e);
+                                    pickup_wait_refused = true;
+                                }
                                 None
                             }
                         }
@@ -1455,11 +1466,12 @@ pub fn create_environment_stream_worker_dynamic(
                             current_health_stream,
                             consumer_group,   // gnode-workers (shared)
                             &consumer_name,   // gnode-{node_id} (unique)
-                            state.batch_size / stream_count.max(1), // Distribute batch across streams
+                            (state.batch_size / stream_count.max(1)).max(1), // Distribute batch across streams
                             block_ms_per_stream,
                             debug_mode
                         ) {
                             Ok((commands, health_messages, unified_message_ids, health_message_ids, relay_replies)) => {
+                                sweep_read_any |= !unified_message_ids.is_empty() || !health_message_ids.is_empty() || !relay_replies.is_empty();
                                 if debug_mode && (!commands.is_empty() || !health_messages.is_empty()) {
                                     debug!("Stream[{}] {}: {} commands, {} health updates",
                                         stream_idx, current_unified_stream, commands.len(), health_messages.len());
@@ -1613,13 +1625,13 @@ pub fn create_environment_stream_worker_dynamic(
                                                 let fields = forwarded.to_resp3_fields();
                                                 let field_pairs: Vec<(String, String)> = fields.into_iter().collect();
 
+                                                crate::integration::relay::reply::grant_reply(&mut conn, &forwarded.id, target_site_id, current_unified_stream);
                                                 let relay_success = match redis::cmd("XADD")
                                                     .arg(target_stream_key)
                                                     .arg("*")
                                                     .arg(&field_pairs)
                                                     .query::<String>(&mut conn) {
                                                     Ok(forward_entry_id) => {
-                                                        crate::integration::relay::reply::grant_reply(&mut conn, &forwarded.id, target_site_id, current_unified_stream);
                                                         info!("Relayed '{}' -> {} on {}", cmd.command, target_entity_id, target_stream_key);
                                                         crate::integration::relay::roundtrip::note_departure(
                                                             &mut conn, ns, &forwarded.id, &forward_entry_id,
@@ -1791,6 +1803,11 @@ pub fn create_environment_stream_worker_dynamic(
                                     info!("🗑️  Detected stale stream (site removed): {} - will remove from active list",
                                         current_unified_stream);
                                     stale_stream_indices.push(stream_idx);
+                                } else if error_str.contains("WRONGTYPE") {
+                                    // One site's key of the wrong type is that site's problem: no backoff for the others.
+                                    warn!("{} or its health twin is not a stream: leaving it out until the next discovery", current_unified_stream);
+                                    stale_stream_indices.push(stream_idx);
+                                    continue;
                                 } else if !error_str.contains("Circuit breaker") {
                                     // Don't log circuit breaker errors repeatedly
                                     warn!("Error reading from stream {}: {}", current_unified_stream, e);
@@ -1820,14 +1837,30 @@ pub fn create_environment_stream_worker_dynamic(
                         }
                     }
 
-                    if let (Some(mark), false, 0) = (sweep_mark, had_any_error, total_processed_all_streams) {
+                    // Any entry read means there may be more behind it: sweep again before waiting.
+                    if let (Some(mark), false, false, 0) = (sweep_mark, had_any_error, sweep_read_any, total_processed_all_streams) {
                         let streams: Vec<&str> = active_unified_streams.iter().chain(active_health_streams.iter()).map(String::as_str).collect();
                         if streams.is_empty() {
                             std::thread::sleep(Duration::from_millis(50));
-                        } else if let Err(e) = crate::integration::processor::wait_for_any(&mut conn, &streams, mark, PICKUP_WAIT_MS) {
-                            warn!("Falling back to blocking per stream: XREAD refused: {}", e);
-                            pickup_wait_refused = true;
+                        } else {
+                            // Woken and found nothing: another node took it, or an entry dated in the future keeps waking us.
+                            if woke_for_nothing {
+                                std::thread::sleep(Duration::from_millis(PICKUP_EMPTY_WAKE_MS));
+                            }
+                            match crate::integration::processor::wait_for_any(&mut conn, &streams, mark, PICKUP_WAIT_MS) {
+                                Ok(woke) => woke_for_nothing = woke,
+                                Err(e) if is_refusal(&e) => {
+                                    warn!("Falling back to blocking per stream: XREAD refused: {}", e);
+                                    pickup_wait_refused = true;
+                                }
+                                Err(e) => {
+                                    warn!("Waiting for streams failed: {}", e);
+                                    std::thread::sleep(Duration::from_millis(50));
+                                }
+                            }
                         }
+                    } else {
+                        woke_for_nothing = false;
                     }
 
                     // Update state based on overall results

@@ -50,6 +50,7 @@ use std::collections::HashMap;
 const RELAYED_REPLY_TTL_SECS: usize = 300;
 /// A relayed command may run most of a day (gFlow's CPU inference); its answer stays welcome for a week.
 const REPLY_GRANT_TTL_SECS: u64 = 604_800;
+const MAX_CORRELATION_ID: usize = 128;
 
 /// Give a forwarded command the ORIGIN's correlation id.
 ///
@@ -206,16 +207,19 @@ pub fn is_relayed_service_reply(fields: &HashMap<String, String>) -> bool {
         || fields.contains_key("status")
 }
 
-fn reply_grant_key(correlation_id: &str) -> String {
-    format!("{{{}}}:gnode:relay:grant:{}", crate::daemon::GNodeDaemon::get_topology_namespace(), correlation_id)
+/// A grant lives under its origin, so one party's chosen id cannot touch another's in-flight relay.
+fn reply_grant_key(origin_stream: &str, correlation_id: &str) -> Option<String> {
+    let origin = crate::config::site_of_stream_key(origin_stream)?;
+    if correlation_id.is_empty() || correlation_id.len() > MAX_CORRELATION_ID {
+        return None;
+    }
+    Some(format!("{{{}}}:gnode:relay:grant:{}:{}", crate::daemon::GNodeDaemon::get_topology_namespace(), origin, correlation_id))
 }
 
 /// A relayed command is on its way: its target, and only its target, may answer to `origin_stream`.
 pub fn grant_reply(conn: &mut Connection, correlation_id: &str, target_site: &str, origin_stream: &str) {
-    if correlation_id.is_empty() {
-        return;
-    }
-    let _: redis::RedisResult<()> = redis::cmd("SET").arg(reply_grant_key(correlation_id))
+    let Some(key) = reply_grant_key(origin_stream, correlation_id) else { return };
+    let _: redis::RedisResult<()> = redis::cmd("SET").arg(key)
         .arg(format!("{target_site}\n{origin_stream}")).arg("EX").arg(REPLY_GRANT_TTL_SECS).query(conn);
 }
 
@@ -224,7 +228,8 @@ pub fn grant_reply(conn: &mut Connection, correlation_id: &str, target_site: &st
 fn reply_was_asked_for(conn: &mut Connection, read_from: &str, fields: &HashMap<String, String>, reply_stream: &str) -> bool {
     let Some(id) = fields.get("ri").or_else(|| fields.get("id")).map(String::as_str).filter(|s| !s.is_empty()) else { return false };
     let Some(replier) = crate::config::site_of_stream_key(read_from) else { return false };
-    let grant: Option<String> = redis::cmd("GET").arg(reply_grant_key(id)).query(conn).unwrap_or(None);
+    let Some(key) = reply_grant_key(reply_stream, id) else { return false };
+    let grant: Option<String> = redis::cmd("GET").arg(key).query(conn).unwrap_or(None);
     grant_matches(grant.as_deref(), replier, reply_stream)
 }
 

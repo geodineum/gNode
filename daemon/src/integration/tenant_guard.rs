@@ -57,6 +57,8 @@ pub fn refusal(tenant: &str, command: &str, p: &Value) -> Option<String> {
                 return Some(format!("{} may read only its own endpoint registry, not {:?}", tenant, reg));
             }
         }
+    } else if c == "register_format" || c == "rf" {
+        return Some(format!("{} may not register a format: formats are shared, and the operator's", tenant));
     } else if c.starts_with("topo_") || c.starts_with("registry_") || c.starts_with("cross_") {
         return Some(format!("{} may not use {}: named topologies are shared, and the operator's", tenant, c));
     }
@@ -85,7 +87,10 @@ pub fn apply(stream_key: &str, command: &mut Command) -> Option<CommandResult> {
         warn!("Refused: {}", why);
         return Some(CommandResult::error(why));
     }
-    own_templates(tenant, command);
+    if let Some(why) = own_templates(tenant, command) {
+        warn!("Refused: {}", why);
+        return Some(CommandResult::error(why));
+    }
     None
 }
 
@@ -93,17 +98,28 @@ const TEMPLATE_COMMANDS: [&str; 4] = ["template_fragment", "TEMPLATE_FRAGMENT", 
 
 /// One template engine serves every site: a site's templates carry its name there, includes too,
 /// so a site neither overwrites nor renders another's.
-fn own_templates(tenant: &str, command: &mut Command) {
+fn own_templates(tenant: &str, command: &mut Command) -> Option<String> {
     if !TEMPLATE_COMMANDS.contains(&command.command.as_str()) {
-        return;
+        return None;
     }
-    let Some(p) = command.parameters.as_object_mut() else { return };
+    let p = command.parameters.as_object_mut()?;
     if let Some(id) = p.get("template_id").and_then(Value::as_str).map(str::to_string) {
         p.insert("template_id".into(), Value::String(owned_template_name(tenant, &id)));
     }
     if let Some(content) = p.get("content").and_then(Value::as_str).map(str::to_string) {
+        if names_a_template_otherwise(&content) {
+            return Some(format!("{} may name a template only as one quoted name", tenant));
+        }
         p.insert("content".into(), Value::String(own_includes(tenant, &content)));
     }
+    None
+}
+
+/// Tera's list form, `{% include ["a", "b"] %}`, would pass names no rewrite sees.
+fn names_a_template_otherwise(content: &str) -> bool {
+    static TAG: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let tag = TAG.get_or_init(|| regex::Regex::new(r"\{%[-+]?\s*(?:include|extends|import)\b\s*(.?)").expect("a fixed pattern"));
+    tag.captures_iter(content).any(|c| !matches!(&c[1], "\"" | "'"))
 }
 
 fn owned_template_name(tenant: &str, id: &str) -> String {
@@ -199,6 +215,10 @@ mod tests {
         let mut r = Command { command: "render_template".into(), parameters: json!({"template_id": "home"}), ..c.clone() };
         assert!(apply("{site_b}:gnode:unified:production", &mut r).is_none());
         assert_eq!(r.parameters["template_id"], "site_b__home");
+        for evil in [r#"{% include ["site_b__home"] %}"#, "{%- include [ 'x' ] %}", "{%include x%}", "{% extends [\"x\"] %}"] {
+            let mut e = Command { command: "template_fragment".into(), parameters: json!({"template_id": "t", "content": evil}), ..c.clone() };
+            assert!(apply("{site_a}:gnode:unified:production", &mut e).is_some(), "{evil}");
+        }
     }
 
     #[test]

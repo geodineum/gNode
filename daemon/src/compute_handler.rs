@@ -370,8 +370,9 @@ impl ComputeHandler {
                             // local helper takes &[&str] (same type as the
                             // constants), so we can pass them directly — no
                             // duplicate-list-with-sync-note dance.
-                            let site_id = Self::get_field_with_fallbacks(&fields, field_names::SOURCE_SITE)
-                                .filter(|s| !s.is_empty())
+                            // A tenant is its stream; only an operator's stream may name another site.
+                            let site_id = crate::integration::tenant_guard::tenant_of_stream(&stream_name).map(str::to_string)
+                                .or_else(|| Self::get_field_with_fallbacks(&fields, field_names::SOURCE_SITE).filter(|s| !s.is_empty()))
                                 .unwrap_or_else(|| Self::extract_site_from_stream(&stream_name));
 
                             let request_id = Self::get_field_with_fallbacks(&fields, field_names::ID);

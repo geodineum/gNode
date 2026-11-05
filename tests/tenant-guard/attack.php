@@ -60,6 +60,12 @@ foreach (['key-based request' => $keyed, 'client batch announcement' => $announc
     $way('site_2', 'site_1');
     $check("a $name cannot remove another site", $r->hExists("$tk:entities", 'site_1'));
 }
+$reg('site_1'); $reg('site_2');
+$id = bin2hex(random_bytes(8));
+$r->set("{geodineum}:req:$id", json_encode(['command' => 'deregister_service', 'parameters' => ['service_id' => 'site_1'], 'requested_at' => microtime(true), 'timeout_ms' => 2000, 'site_id' => 'geodineum']));
+$r->xAdd('{site_2}:gnode:unified:production', '*', ['id' => $id, 'ss' => 'geodineum']);
+usleep(500000);
+$check('a key-based request naming the operator as ss stays a tenant', $r->hExists("$tk:entities", 'site_1'));
 $reg('site_1');
 // ---- forged replies ------------------------------------------------------------------------
 $U1 = '{site_1}:gnode:unified:production'; $C1 = '{site_1}:gnode:comms:production';
@@ -110,6 +116,7 @@ $check('control: a site stores a template', ($s1['reply']['status'] ?? '') === '
 $send('site_2', 'template_fragment', ['template_id' => 'home', 'content' => '<script>attacker</script>', 'variables' => (object)[], 'ttl' => 600]);
 $rend = json_encode($send('site_1', 'render_template', ['template_id' => 'home', 'variables' => ['a' => 'x']])['reply']);
 $check("another site cannot overwrite a site's template", strpos($rend, 'attacker') === false && strpos($rend, 'mine x') !== false);
+$check('nor reach it through a list include', $refused($send('site_2', 'template_fragment', ['template_id' => 'peek', 'content' => '{% include ["site_1__home"] %}', 'variables' => (object)[], 'ttl' => 60])));
 $check("nor render it", strpos(json_encode($send('site_2', 'render_template', ['template_id' => 'site_1__home', 'variables' => ['a' => 'x']])['reply']), 'mine') === false);
 $cs = $send('site_1', 'content_store', ['key' => 'c1', 'content' => 'private-of-site-1', 'ttl' => 600]);
 $check('control: a site stores content', ($cs['reply']['status'] ?? '') === 'ok');
