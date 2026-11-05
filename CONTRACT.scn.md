@@ -37,6 +37,15 @@ CONSUMES ← ValKey 7.2+ (FUNCTION LOAD, RESP3, consumer groups, streams) | Lua 
 - Direct hot-pair channels: channel_open → dedicated stream, daemon steps out of data path.
 - Health: daemon heartbeat `{c}:gnode:heartbeat:<env>:gnode-daemon:<node>` per SERVED constellation → node + placement health on the one topology (no `gnode:node:*` record). Reconcile: master, 120 s, per served c, intents vs entities, drift → WARN, never writes.
 
+## ::TENANTS
+CALLER := stream read from, never `ss` | constellation tag = operator, unrestricted | other tag = tenant
+TENANT_MAY := register/deregister self (site|app; no holds peers on constellation) | edges from self | own streams, own endpoint registry
+TENANT_REFUSED := channel_open direct_provision channel_info channel_list topo_* registry_* cross_*
+SCOPE := handlers get the tenant as site → CMS `{tenant}:*`; templates `<tenant>__<id>`, includes too; no get_env
+REPLY := `_rr` honoured only with `{ns}:gnode:relay:grant:<id>` = forwarded to this stream's owner, for this origin (a week)
+GEN := GNODE_TOPO_GEN moves on changes a reader sees, not reads or routing counters
+PROOF := tests/tenant-guard/attack.sh, tests/pickup-latency/compare.sh
+
 ## ::LIMITATIONS
 - Unclassifiable entries (no resolvable `t`/`type`) are ACKed+dropped with a rate-limited WARN (30s window, suppressed-count) — was fully silent until 2026-08-07.
 - No cross-request ordering on Concurrent lane (only within one synchronous client batch).

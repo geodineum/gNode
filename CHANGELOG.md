@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [0.2.0] — unreleased
 
+### Security: tenants
+
+- The caller is the stream a command came from. A tenant may register and deregister only itself, reads only its own streams, and has no named topologies or channels. CMS state and templates are per tenant. A relayed reply needs the grant its command left. Templates have no `get_env`.
+
+### Faster
+
+- One wait over all streams instead of a short block per stream: a command is picked up at once, however many sites there are.
+
 ### Breaking: the one topology
 
 - The constellation is one topology: one schema for every shape (node, component, site, app, daemon, placement), declared by name, queried by layer, facet and axis word.

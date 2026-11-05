@@ -201,6 +201,22 @@ Verification is fail-soft: a failed/unsigned extension is skipped and the daemon
 
 ---
 
+## 8a. Tenants
+
+The caller of a command is the stream it was read from; `ss` is what the caller wrote, and on a tenant's stream it is replaced. A served constellation's own tag is the daemon's and the operator's, unrestricted (clients only read it). Every other tag is a tenant, and through its own stream:
+
+- `register_service`: only itself, shape site or app, without `holds`, `peers`, `on`, `constellation`. Services, providers and placements come from the operator's manifest.
+- `deregister_service`: only itself. `topology_edge_add`/`remove`: only `from` itself.
+- `stream_*`: only its own streams. `endpoint_registry`: only its own.
+- `channel_open`, `direct_provision`, `channel_info`, `channel_list`, `topo_*`, `registry_*`, `cross_*`: refused.
+- Handlers get the tenant as their site, so CMS content and assets are `{tenant}:*`. Template ids and their includes are stored as `<tenant>__<id>`.
+- A reply with `_rr` is carried home only when the daemon forwarded that correlation id to the stream's owner, for that origin (`{ns}:gnode:relay:grant:<id>`, a week).
+- Templates have no `get_env`.
+
+`GNODE_TOPO_GEN tk` is the constellation's generation: it moves on every change a reader would see, never on reads or routing counters.
+
+Proof: `tests/tenant-guard/attack.sh <binary>`, `tests/pickup-latency/compare.sh`.
+
 ## 8. Adherence (known cross-component facts & risks)
 
 Verified-aligned (from ecosystem cross-check):
