@@ -45,6 +45,9 @@ const RECLAIM_INTERVAL_MS: u64 = 5_000;
 /// the entry runs twice.
 const RECLAIM_MIN_IDLE_MS: u64 = 30_000;
 
+/// An idle daemon's wait between sweeps; a new entry ends it at once.
+const PICKUP_WAIT_MS: u64 = 250;
+
 /// Entries reclaimed per pass. Bounded so recovery cannot monopolise a cycle.
 const RECLAIM_BATCH: usize = 10;
 
@@ -1234,6 +1237,7 @@ pub fn create_environment_stream_worker_dynamic(
         // Orphan recovery cadence. Every node reclaims; see the call site below.
         let mut last_xclaim_check = Instant::now();
         let xclaim_interval_ms = RECLAIM_INTERVAL_MS;
+        let mut pickup_wait_refused = false;
         let mut last_reap_check = Instant::now();
 
         // Track last staleness check for service topology entities
@@ -1420,12 +1424,24 @@ pub fn create_environment_stream_worker_dynamic(
                     let mut had_any_error = false;
                     let mut stale_stream_indices: Vec<usize> = Vec::new();
 
-                    // Calculate block time per stream: short blocks for low latency
-                    // Prefer fast response over CPU efficiency - brief blocks only
-                    let block_ms_per_stream = if stream_count > 0 {
-                        (50 / stream_count as u64).max(10) // 10-50ms per stream (fast)
+                    // A sweep reads every stream without blocking, then one wait covers them all: a
+                    // short block per stream would make every command wait for the sweep to come round.
+                    let sweep_mark = if pickup_wait_refused {
+                        None
                     } else {
-                        50
+                        match crate::integration::processor::sweep_mark(&mut conn) {
+                            Ok(mark) => Some(mark),
+                            Err(e) => {
+                                warn!("Falling back to blocking per stream: TIME refused: {}", e);
+                                pickup_wait_refused = true;
+                                None
+                            }
+                        }
+                    };
+                    let block_ms_per_stream = match (sweep_mark, stream_count) {
+                        (Some(_), _) => 0,
+                        (None, 0) => 50,
+                        (None, n) => (50 / n as u64).max(10),
                     };
 
                     for stream_idx in 0..stream_count {
@@ -1800,6 +1816,16 @@ pub fn create_environment_stream_worker_dynamic(
                             if let Ok(disc) = discovery.read() {
                                 disc.signal_immediate_sync();
                             }
+                        }
+                    }
+
+                    if let (Some(mark), false, 0) = (sweep_mark, had_any_error, total_processed_all_streams) {
+                        let streams: Vec<&str> = active_unified_streams.iter().chain(active_health_streams.iter()).map(String::as_str).collect();
+                        if streams.is_empty() {
+                            std::thread::sleep(Duration::from_millis(50));
+                        } else if let Err(e) = crate::integration::processor::wait_for_any(&mut conn, &streams, mark, PICKUP_WAIT_MS) {
+                            warn!("Falling back to blocking per stream: XREAD refused: {}", e);
+                            pickup_wait_refused = true;
                         }
                     }
 

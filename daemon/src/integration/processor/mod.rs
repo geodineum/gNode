@@ -29,7 +29,7 @@ pub use stream_reader::{
     StreamReader,
     StreamReaderError,
     StreamReaderResult,
-    read_multi_stream,
+    read_multi_stream, sweep_mark, wait_for_any,
 };
 pub use resp3_protocol::{Resp3Value, OptimizedCommand};
 pub use crate::config::{GNodeSettings};
