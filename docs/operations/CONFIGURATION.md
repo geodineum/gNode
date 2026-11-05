@@ -487,7 +487,7 @@ gNode uses a unified node configuration system. On the master node, YAML files i
 - **Routing rules**: Which messages the node processes (include/exclude by group hint)
 - **Resources**: CPU cores, memory limits, thread pool size
 - **Performance**: Batch sizes, timeouts, circuit breaker settings
-- **Capabilities**: Geometric dimensions for service discovery
+- **Capabilities**: Node axes, declared as words of the topology schema's vocabulary
 - **Health**: Metrics reporting interval and retention
 
 ### Master vs Worker Nodes
@@ -527,9 +527,9 @@ performance:
     cooldown_secs: 30       # Cooldown before retry
 
 capabilities:
-  dimensions:               # Geometric capability dimensions (0.0-1.0)
-    general: 1.0
-    caching: 0.9
+  axes:                     # Node axes as words of the schema vocabulary
+    bandwidth_tier: high
+    data_residency: eu
 
 health:
   report_interval_ms: 5000  # Heartbeat frequency
