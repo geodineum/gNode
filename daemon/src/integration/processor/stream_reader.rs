@@ -701,6 +701,29 @@ pub fn parse_field_array(field_parts: &[Value]) -> HashMap<String, String> {
     fields
 }
 
+/// The server's clock in ms, for `wait_for_any`: taken before a sweep, so an entry that lands behind
+/// the sweep is still newer than the mark.
+pub fn sweep_mark(conn: &mut Connection) -> RedisResult<u64> {
+    let (secs, micros): (u64, u64) = redis::cmd("TIME").query(conn)?;
+    Ok(secs * 1000 + micros / 1000)
+}
+
+/// Sleep until any of `streams` has an entry newer than `mark_ms`, or `block_ms` passes. Consumes
+/// nothing: the group read that follows takes the entry. True if something woke it.
+pub fn wait_for_any(conn: &mut Connection, streams: &[&str], mark_ms: u64, block_ms: u64) -> RedisResult<bool> {
+    let after = format!("{}-{}", mark_ms.saturating_sub(1), u64::MAX);
+    let mut wait = redis::cmd("XREAD");
+    wait.arg("COUNT").arg(1).arg("BLOCK").arg(block_ms).arg("STREAMS");
+    for s in streams {
+        wait.arg(*s);
+    }
+    for _ in streams {
+        wait.arg(&after);
+    }
+    let woke: Value = wait.query(conn)?;
+    Ok(!matches!(woke, Value::Nil))
+}
+
 /// Read from multiple streams simultaneously (multi-stream XREADGROUP)
 ///
 /// This function reads from both unified and health streams in a single XREADGROUP call,
@@ -736,22 +759,19 @@ pub fn read_multi_stream(
         debug!("Reading from multiple streams: unified={}, health={}", unified_stream, health_stream);
     }
 
-    // Execute XREADGROUP for multiple streams
-    let result: RedisResult<Value> =
-        redis::cmd("XREADGROUP")
-            .arg("GROUP")
-            .arg(group_name)
-            .arg(consumer_name)
-            .arg("COUNT")
-            .arg(count)
-            .arg("BLOCK")
-            .arg(block_ms)
-            .arg("STREAMS")
-            .arg(unified_stream)
-            .arg(health_stream)
-            .arg(">")  // For unified stream
-            .arg(">")  // For health stream
-            .query(conn);
+    // Execute XREADGROUP for multiple streams; block_ms 0 reads what is there (BLOCK 0 would wait forever)
+    let mut read = redis::cmd("XREADGROUP");
+    read.arg("GROUP").arg(group_name).arg(consumer_name).arg("COUNT").arg(count);
+    if block_ms > 0 {
+        read.arg("BLOCK").arg(block_ms);
+    }
+    let result: RedisResult<Value> = read
+        .arg("STREAMS")
+        .arg(unified_stream)
+        .arg(health_stream)
+        .arg(">")  // For unified stream
+        .arg(">")  // For health stream
+        .query(conn);
 
     match result {
         Ok(value) => {
