@@ -411,6 +411,8 @@ impl ComputeHandler {
                                 // command_processor's job; a KeyBased GET on
                                 // its id would nil-error identically.
                                 Some("c") if has_inline_cmd => {}
+                                // A reply carried home by the relay is no announcement: answering "not found" would overwrite the real answer.
+                                _ if fields.contains_key("_rf") => {}
                                 _ => {
                                     if let Some(req_id) = request_id {
                                         // KeyBased single announcement (id, no inline body)
