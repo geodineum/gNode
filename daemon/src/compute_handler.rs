@@ -411,8 +411,8 @@ impl ComputeHandler {
                                 // command_processor's job; a KeyBased GET on
                                 // its id would nil-error identically.
                                 Some("c") if has_inline_cmd => {}
-                                // A reply carried home by the relay is no announcement: answering "not found" would overwrite the real answer.
-                                _ if fields.contains_key("_rf") => {}
+                                // A relayed reply, on the service's stream or its copy home, is no announcement: answering "not found" would overwrite the real answer.
+                                _ if Self::is_relayed_reply(&fields) => {}
                                 _ => {
                                     if let Some(req_id) = request_id {
                                         // KeyBased single announcement (id, no inline body)
@@ -462,6 +462,16 @@ impl ComputeHandler {
                 }
             }
         }
+    }
+
+    fn is_relayed_reply(fields: &std::collections::HashMap<String, RedisValue>) -> bool {
+        if fields.contains_key("_rf") {
+            return true;
+        }
+        let text: std::collections::HashMap<String, String> = fields.keys()
+            .filter_map(|k| Self::get_field_string(fields, k).map(|v| (k.clone(), v)))
+            .collect();
+        crate::integration::relay::is_relayed_service_reply(&text)
     }
 
     /// Extract a string value from the StreamId field map
@@ -689,6 +699,19 @@ fn current_timestamp() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_relayed_reply_is_no_announcement() {
+        let f = |pairs: &[(&str, &str)]| pairs.iter()
+            .map(|(k, v)| (k.to_string(), RedisValue::BulkString(v.as_bytes().to_vec())))
+            .collect::<std::collections::HashMap<_, _>>();
+        // Geodine's spelling on its own stream, and the copy on the origin's
+        assert!(ComputeHandler::is_relayed_reply(&f(&[("id", "a"), ("status", "ok"), ("result", "{}"), ("_rr", "{o}:gnode:unified:production")])));
+        assert!(ComputeHandler::is_relayed_reply(&f(&[("id", "a"), ("status", "ok"), ("result", "{}"), ("_rf", "{o}:gnode:unified:production")])));
+        // a bare announcement, also one that came through the relay
+        assert!(!ComputeHandler::is_relayed_reply(&f(&[("id", "a")])));
+        assert!(!ComputeHandler::is_relayed_reply(&f(&[("id", "a"), ("_rr", "{o}:gnode:unified:production")])));
+    }
 
     #[test]
     fn nogroup_names_the_stream() {

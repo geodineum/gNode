@@ -14,5 +14,7 @@ for s in geodineum site_1 site_2; do vk sadd gnode:sites:registry $s >/dev/null;
 D=$!
 for _ in $(seq 90); do [[ $(vk xinfo groups "{site_1}:gnode:unified:production" 2>/dev/null | wc -l) -gt 1 ]] && break; sleep 1; done; sleep 2
 timeout 150 php "$TREE/tests/tenant-guard/attack.php" $PORT; RC=$?
+# A relayed reply is no request: the key-based reader must not look it up.
+sleep 1; n=$(grep -c 'KeyBased: Failed to GET request key {site_2}:req:forge-' "$W/d.log"); [[ $n == 0 ]] && echo "  ok   no relayed reply was taken for a request" || { echo "  FAIL $n relayed replies were taken for a request"; RC=1; }
 kill $D; wait $D 2>/dev/null; vk shutdown nosave >/dev/null 2>&1; rm -rf "$W"
 exit ${RC:-1}
