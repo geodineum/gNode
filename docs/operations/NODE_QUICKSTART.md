@@ -161,8 +161,8 @@ performance:
   circuit_breaker: {threshold: 5, cooldown_secs: 30}
 
 capabilities:
-  dimensions:
-    custom_capability: 1.0
+  axes:
+    bandwidth_tier: high
 
 health:
   report_interval_ms: 5000

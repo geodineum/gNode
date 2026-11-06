@@ -283,7 +283,7 @@ Source: `daemon/src/integration/handlers/diagnostic.rs`
 | `connection_status` | `CONNECTION_STATUS` | `{}` | `{pool_size, active, idle, ...}` | Connection pool status |
 | `performance_metrics` | `PERFORMANCE_METRICS` | `{}` | `{commands_processed, avg_latency_ms, ...}` | Performance counters |
 | `security_status` | `SECURITY_STATUS` | `{}` | `{acl_user, keyspace_pattern, ...}` | Security posture info |
-| `topology_status` | `TOPOLOGY_STATUS` | `{}` | `{services, buckets, dimensions, ...}` | Current topology state |
+| `topology_status` | `TOPOLOGY_STATUS` | `{}` | `{topology_status: {services_registered, capabilities_defined, load_order_calculated, topology_health}}` | Placeholder counters (0/false); read the topology with `geometric_discover` or `GNODE_TOPO_QUERY` |
 
 ---
 
