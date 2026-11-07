@@ -368,15 +368,15 @@ enum Commands {
     /// Check daemon status
     Status,
 
-    /// Register tier services to the geometric topology (deploy-time)
+    /// Register an entity into the constellation's one topology, by name (operator side)
     ///
-    /// Reads geometric_topology.yaml and the active tier's schema
-    /// (service_schema.yaml by default; tool_schema.yaml / constellation_schema.yaml /
-    /// galaxy_schema.yaml for those tiers), translates human-readable capability
-    /// names to N-D Q64.64 coordinates (N = tier's total_dimensions), and registers
-    /// each entity via FCALL GNODE_REGISTER_CAPABILITY_VECTOR.
+    /// --tier tool registers the ecosystem components from ecosystem_tools.yaml;
+    /// --tier service --site <id> registers one site or service from its manifest's
+    /// gnode: block (or the named --profile); --tier node --site <id> declares a node
+    /// that runs no daemon. The daemon codes every word through the compiled schema
+    /// and refuses one it does not know.
     RegisterTools {
-        /// Topology tier: "service" (per-site, 30D) or "tool" (ecosystem, 16D)
+        /// What to register: "service", "tool" or "node"
         #[clap(long, default_value = "service")]
         tier: String,
 
