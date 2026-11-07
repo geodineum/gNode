@@ -26,7 +26,6 @@ pub use broadcast_reader::{
 
 // Re-export main components for use in other modules
 pub use stream_reader::{
-    StreamReader,
     StreamReaderError,
     StreamReaderResult,
     read_multi_stream, sweep_mark, wait_for_any,

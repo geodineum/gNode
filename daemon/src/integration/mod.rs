@@ -43,7 +43,6 @@ pub use processor::{
     Resp3Value, OptimizedCommand,
 
     //STREAM READER
-    StreamReader,
     StreamReaderError,
     StreamReaderResult,
 
@@ -133,7 +132,6 @@ pub mod receipt;
 // Per-site rate limiting (GN-D2.03 — Tier-2 commit 2.1.c).
 pub mod ratelimit;
 pub use command_processor::{
-    process_commands,
     process_command,
     send_command,
     send_response_with_routing,
@@ -241,61 +239,6 @@ pub use stream_discovery::{
 };
 
 
-/// Process node with unified stream approach
-///
-/// This function processes messages using the unified stream approach, with
-/// optimized RESP3 protocol for efficient storage and communication.
-///
-/// # Arguments
-///
-/// * `conn` - Redis connection
-/// * `node_id` - Node identifier
-/// * `site_id` - Site identifier for namespacing
-/// * `stream_prefix` - Stream prefix
-/// * `debug_mode` - Whether debug mode is enabled
-///
-/// # Returns
-///
-/// * `IntegrationResult<usize>` - Number of processed messages or error
-pub fn process_node_unified_stream(
-    conn: &mut redis::Connection,
-    node_id: &str,
-    site_id: &str,
-    stream_prefix: &str,
-    debug_mode: bool
-) -> IntegrationResult<usize> {
-    // Get registry
-    let registry = command_handler::get_command_registry();
-    
-    // Get unified stream
-    let stream_key = processor::unified_stream_processor::get_unified_stream(site_id, stream_prefix, node_id);
-    
-    // Get consumer name
-    let consumer_name = diagnostics::get_consistent_consumer_name(node_id, None);
-    
-    // Create configuration
-    let config = crate::config::GNodeSettings::default();
-    
-    // Create state
-    let mut state = consumer_groups::ConsumerGroupState::new(
-        config.initial_batch_size,
-        config.base_backoff_ms
-    );
-    
-    
-    // Process commands
-    command_processor::process_commands(
-        conn,
-        &stream_key,
-        "gnode-daemon",
-        &consumer_name,
-        &config,
-        &mut state,
-        registry,
-        site_id,
-        debug_mode
-    )
-}
 
 
 

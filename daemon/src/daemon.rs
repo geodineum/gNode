@@ -1652,10 +1652,6 @@ impl GNodeDaemon {
                         }
                     }
                 }
-
-                // Periodic service discovery scan (if enabled and due)
-                {
-                }
             }
         }
 

@@ -15,14 +15,9 @@ use log::{debug, error, warn, info};
 use redis::{Connection, Commands};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::time::Duration;
 use regex::Regex;
-use crate::config::GNodeSettings;
-use crate::integration::ConsumerGroupState;
 use crate::integration::CommandHandlerRegistry;
-use crate::integration::claim_pending_messages;
 use crate::daemon::LogLevel;
-use crate::integration::processor::stream_reader::StreamReader;
 use crate::integration::OptimizedCommand;
 use crate::utils::current_timestamp_ms;
 use crate::integration::command_handler::unknown_command_error;
@@ -864,148 +859,6 @@ pub fn parse_resp3_stream_response(resp3_str: &str) -> serde_json::Result<HashMa
     }
     
     Ok(result)
-}
-
-/// Process commands from the unified stream
-///
-/// This function reads and processes commands from the unified stream,
-/// handling batch operations, error recovery, and response generation.
-///
-/// # Arguments
-///
-/// * `conn` - Redis connection
-/// * `topology` - Shared geometric topology
-/// * `stream_key` - Unified stream key
-/// * `group_name` - Consumer group name
-/// * `consumer_name` - Consumer name
-/// * `config` - Unified stream configuration
-/// * `state` - Consumer group state
-/// * `registry` - Command handler registry
-/// * `site_id` - Site identifier for namespacing
-/// * `debug_mode` - Whether debug mode is enabled
-///
-/// # Returns
-///
-/// * `IntegrationResult<usize>` - Number of processed commands or error
-#[allow(clippy::too_many_arguments)]
-pub fn process_commands(
-    conn: &mut Connection,
-    stream_key: &str,
-    group_name: &str,
-    consumer_name: &str,
-    config: &GNodeSettings,
-    state: &mut ConsumerGroupState,
-    registry: &CommandHandlerRegistry,
-    site_id: &str,
-    debug_mode: bool
-) -> IntegrationResult<usize> {
-    // Check for pending messages if needed
-    if state.should_check_pending(config.pending_check_interval_ms) {
-        let pending_result = claim_pending_messages(
-            conn,
-            stream_key,
-            group_name,
-            consumer_name,
-            config.idle_time_ms,
-            state.batch_size,
-            site_id,
-            debug_mode
-        );
-        
-        match pending_result {
-            Ok(pending_commands) => {
-                if !pending_commands.is_empty() {
-                    if debug_mode {
-                        debug!("Processing {} pending commands", pending_commands.len());
-                    }
-                    
-                    let processed = process_command_batch(
-                        conn,
-                        stream_key,
-                        &pending_commands,
-                        registry,
-                        site_id,
-                        "daemon",
-                        debug_mode,
-                        LogLevel::Info // Default to Info level
-                    )?;
-                    
-                    // Update pending check timestamp
-                    state.update_pending_check();
-                    
-                    // If we processed pending messages, return early
-                    if processed > 0 {
-                        // Update state
-                        state.reset_after_success();
-                        state.adjust_batch_size(processed, config.min_batch_size, config.max_batch_size);
-                        
-                        return Ok(processed);
-                    }
-                }
-            },
-            Err(e) => {
-                warn!("Failed to claim pending messages: {}", e);
-                // Continue with new messages
-            }
-        }
-        
-        // Update pending check timestamp even if no messages were processed
-        state.update_pending_check();
-    }
-    
-    // Read new commands
-    let commands_result = StreamReader::read_commands(
-        conn,
-        stream_key,
-        group_name,
-        consumer_name,
-        state.batch_size,
-        1000, // Block for 1 second
-        site_id,
-        debug_mode
-    );
-    
-    match commands_result {
-        Ok(commands) => {
-            if commands.is_empty() {
-                // Apply backoff if there were no messages
-                state.apply_backoff(config.max_backoff_ms);
-                
-                // Sleep for backoff duration
-                if state.current_backoff_ms > 0 {
-                    std::thread::sleep(Duration::from_millis(state.current_backoff_ms));
-                }
-                
-                return Ok(0);
-            }
-            
-            // Process commands
-            let processed = process_command_batch(
-                conn,
-                stream_key,
-                &commands,
-                registry,
-                site_id,
-                "daemon",
-                debug_mode,
-                LogLevel::Info // Default to Info level
-            )?;
-            
-            // Update state
-            state.reset_after_success();
-            state.adjust_batch_size(processed, config.min_batch_size, config.max_batch_size);
-            
-            Ok(processed)
-        },
-        Err(e) => {
-            warn!("Failed to read commands: {}", e);
-            
-            // Register error
-            state.register_error();
-            
-            Err(e)
-        }
-    }
 }
 
 /// Process a batch of commands (PREFERRED METHOD)
