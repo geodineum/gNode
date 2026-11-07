@@ -1201,6 +1201,7 @@ local function register(tk, id, sh, rec, ordered, colours, preserve)
             end
         end
         if old.m and old.m.ds then rec.m.ds = old.m.ds end
+        if old.m and old.m.hs then rec.m.hs = old.m.hs end
         if old.m and old.m.share then rec.m.share = old.m.share end
     else
         rec.ro = server.call('HINCRBY', tk .. ':meta', 'ro', 1)
@@ -1558,7 +1559,7 @@ server.register_function{
                 nt = nt + 1; if h == 1 then nf = nf + 1 end
                 if tonumber(rec.pd[18]) ~= h then moved = true end
                 rec.pd[18] = h; rec.pr[18] = sfmt(h * 2 ^ 64)
-                rec.q.health = sfmt(h * Q48); rec.m.ds = now
+                rec.q.health = sfmt(h * Q48); rec.m.hs = now
                 store(tk, rec); server.call('ZADD', tk .. ':ix:health', rec.q.health, pid)
                 ring_sync(tk, rec)
                 for _, e in ipairs({ rec.of, rec.on }) do if e and h > (ent[e] or -1) then ent[e] = h end end  -- max over placements; unknown (0) never outranks a measured value
@@ -1569,7 +1570,7 @@ server.register_function{
             local rec = load_record(tk, e)
             if rec then
                 if tonumber(rec.pd[18]) ~= h then moved = true end
-                rec.pd[18] = h; rec.pr[18] = sfmt(h * 2 ^ 64); rec.q.health = sfmt(h * Q48); rec.m.ds = now
+                rec.pd[18] = h; rec.pr[18] = sfmt(h * 2 ^ 64); rec.q.health = sfmt(h * Q48); rec.m.hs = now
                 store(tk, rec); server.call('ZADD', tk .. ':ix:health', rec.q.health, e); ne = ne + 1
             end
         end

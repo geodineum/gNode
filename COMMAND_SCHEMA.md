@@ -374,7 +374,7 @@ The one topology of a constellation (`{c}:gnode:constellation`, SPEC-ONE-TOPOLOG
 | `GNODE_TOPO_DENY` | tk | caller, target, now_ms, ttl_ms | `OK` | A TTL-bounded deny (ttl must be > 0) |
 | `GNODE_TOPO_UNDENY` | tk | caller, target | 0\|1 | Remove a deny |
 | `GNODE_TOPO_CAN_REACH` | tk | caller, target, now_ms | `[0\|1, reason]` | φ(target) < φ(caller) or declared peer; env ∈ {env(caller), global}; requires ⊆ holds; no live deny. Undeclared ⇒ 0. `no-writes` |
-| `GNODE_TOPO_HEALTH_DERIVE` | tk [, lease_key] | now_s, fresh_s [, node_id] | `[fresh, placements, entities]` | Placement health from the heartbeat key it names (dead when missing or stale, unknown when none can be named); entity health = max over placements; ring membership follows |
+| `GNODE_TOPO_HEALTH_DERIVE` | tk [, lease_key] | now_s, fresh_s [, node_id] | `[fresh, placements, entities]` | Placement health from the heartbeat key it names (dead when missing or stale, unknown when none can be named); entity health = max over placements; ring membership follows; stamps `m.hs` (never `m.ds`, which only `GNODE_TOPO_SET_DERIVED` writes) |
 | `GNODE_TOPO_VERIFY` | tk | — | `OK` or the first violation | Invariants: counts, index ↔ record agreement, placement references, φ on every edge, ring membership. `no-writes` |
 
 ### gnode_topology — 1 function

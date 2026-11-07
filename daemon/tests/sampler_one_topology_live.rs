@@ -105,6 +105,24 @@ fn a_node_observation_lands_on_the_node_and_the_stamp_follows_the_write() {
 
 #[test]
 #[ignore]
+fn a_health_derive_does_not_re_stamp_the_load_reading() {
+    let Some((mut conn, c)) = connect() else { return };
+    let mut demand = DemandTracker::new(4);
+    let writes = vec![DerivedWrite { tier: Tier::Node, site: "geodineum".into(), entity: "squad".into(), index: 16, pd: 0.3, zs: 300000, reason: "test".into() }];
+    LoadSamplerWorker::apply_one_topology(&mut conn, &c, "aesir-solutions", 1_700_000_000_000, &writes, &[], &mut demand, &[], &HashMap::new());
+    assert_eq!(load_of(&mut conn, &c, "1", "squad")["m"]["ds"], 1_700_000_000);
+    let tk = c.key();
+    let _: redis::Value = redis::cmd("FCALL").arg("GNODE_TOPO_HEALTH_DERIVE").arg(1).arg(&tk).arg(1_700_000_900u64).arg(5000).query(&mut conn).unwrap();
+    let node = load_of(&mut conn, &c, "1", "squad");
+    assert_eq!(node["m"]["ds"], 1_700_000_000, "a health tick leaves the load stamp where the load write put it");
+    assert_eq!(node["m"]["hs"], 1_700_000_900, "the health derive stamps its own field");
+    let later = vec![DerivedWrite { tier: Tier::Node, site: "geodineum".into(), entity: "squad".into(), index: 16, pd: 0.4, zs: 400000, reason: "test".into() }];
+    LoadSamplerWorker::apply_one_topology(&mut conn, &c, "aesir-solutions", 1_700_001_000_000, &later, &[], &mut demand, &[], &HashMap::new());
+    assert_eq!(load_of(&mut conn, &c, "1", "squad")["m"]["ds"], 1_700_001_000, "a load write moves it");
+}
+
+#[test]
+#[ignore]
 fn the_workers_group_does_not_starve_the_sampler() {
     let Some((mut conn, _c)) = connect() else { return };
     let health = "{gflow}:gnode:health";
