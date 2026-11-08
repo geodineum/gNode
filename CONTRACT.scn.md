@@ -50,7 +50,7 @@ PROOF := tests/tenant-guard/attack.sh, tests/pickup-latency/compare.sh
 - Unclassifiable entries (no resolvable `t`/`type`) are ACKed+dropped with a rate-limited WARN (30s window, suppressed-count) — was fully silent until 2026-08-07.
 - No cross-request ordering on Concurrent lane (only within one synchronous client batch).
 - `t` required on every unified entry: key-based lane acts only on `t=c` + `id` + no inline body; no known type → warn (1/stream/h), XACK, not acted on, never taken for a request. A service's own replies carry `t=r`.
-- key-based error → `SET {site}:res:{id} … EX 10 NX`: never replaces a reply.
+- daemon error, any lane → `SET {site}:res:{id} … EX 10 NX`: never replaces a reply; a service's later reply replaces it.
 - Response poll TTL fixed 10s (concurrent_lane.rs) → silent expiry on slow poll, no retry.
 - 9 Ordered cmds block whole consumer thread, no per-cmd timeout → 1 slow handler stalls all tenants.
 - Single hardcoded ed25519 pubkey (ext_author.rs); rotation = recompile, no key versioning.

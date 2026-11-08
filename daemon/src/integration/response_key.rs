@@ -92,6 +92,21 @@ pub struct ResponseWrite {
     pub request_id: String,
     pub json: String,
     pub ttl_secs: usize,
+    /// An error from the daemon only fills an empty key: on a service's own stream the service
+    /// may already have answered, and its reply must not be replaced by the daemon's refusal.
+    pub only_if_absent: bool,
+}
+
+impl ResponseWrite {
+    /// The one way a lane writes a reply.
+    pub fn command(&self) -> redis::Cmd {
+        let mut c = redis::cmd("SET");
+        c.arg(&self.key).arg(&self.json).arg("EX").arg(self.ttl_secs);
+        if self.only_if_absent {
+            c.arg("NX");
+        }
+        c
+    }
 }
 
 /// The whole polling contract as one pure value. Both lanes call this and then
@@ -105,6 +120,7 @@ pub fn plan(command: &Command, fallback_site: &str, response: &Response) -> Opti
         request_id: target.request_id,
         json: response_json(response),
         ttl_secs: RESPONSE_TTL_SECS,
+        only_if_absent: response.status == "error",
     })
 }
 
@@ -252,5 +268,14 @@ mod tests {
                 assert!(p.key.starts_with('{'), "lost the hash tag: {}", p.key);
             }
         }
+    }
+
+    #[test]
+    fn only_an_error_waits_for_an_empty_key() {
+        let c = cmd("r1", "s", json!({}));
+        assert!(!plan(&c, "s", &resp()).unwrap().only_if_absent);
+        let mut err = resp();
+        err.status = "error".into();
+        assert!(plan(&c, "s", &err).unwrap().only_if_absent);
     }
 }

@@ -229,7 +229,7 @@ Operator-relevant risks (design, not divergence):
 - Relay permission fails closed: an undeclared pair, a layer or environment mismatch, an unmet `requires` label or a live deny is refused with its reason on the caller's verdict key.
 - ⚠️ **`st` overloaded** between source_site (`t=c`) and status (`t=r`); disambiguated by `t`. New writers use `ss`. (COMMAND_SCHEMA.md)
 - ⚠️ **`t` is required on every unified-stream entry.** The key-based lane acts only on `t=c` with an `id` and no inline body (the body waits under `{site}:req:{id}`). An entry without a known type is reported (one warning per stream per hour), acknowledged and not acted on: it is never taken for a request. A service's own replies on its stream carry `t=r`.
-- ⚠️ **An error from the key-based lane never replaces a reply:** it is written with `SET … EX 10 NX` on `{site}:res:{id}`.
+- ⚠️ **An error from the daemon never replaces a reply, on any lane:** it is written with `SET … EX 10 NX` on `{site}:res:{id}`; a reply already there stays, and a service's reply written after it replaces it.
 - ⚠️ **Response polling key TTL = 10s** (concurrent_lane.rs). Slow/late pollers silently lose the response; no retry. Poll within a few seconds, handle 404 gracefully.
 - ⚠️ **`Lane::Ordered` commands block the consumer thread** with no per-command timeout; a slow handler stalls subsequent messages, including other tenants' (intentional per COMMAND_SCHEMA.md).
 

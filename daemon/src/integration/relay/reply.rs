@@ -97,11 +97,8 @@ pub fn key_relay_verdict(
     let Some(plan) = crate::integration::response_key::plan(&command, fallback_site, response) else {
         return false;
     };
-    match redis::cmd("SET")
-        .arg(&plan.key).arg(&plan.json).arg("EX").arg(plan.ttl_secs)
-        .query::<()>(conn)
-    {
-        Ok(()) => {
+    match plan.command().query::<Option<String>>(conn) {
+        Ok(_) => {
             info!("Relay verdict keyed at {} (status={})", plan.key, response.status);
             true
         }

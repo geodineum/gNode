@@ -378,9 +378,6 @@ impl ComputeHandler {
                                 .or_else(|| Self::get_field_with_fallbacks(&fields, field_names::SOURCE_SITE).filter(|s| !s.is_empty()))
                                 .unwrap_or_else(|| Self::extract_site_from_stream(&stream_name));
 
-                            let request_id = Self::get_field_with_fallbacks(&fields, field_names::ID);
-                            let msg_type   = Self::get_field_with_fallbacks(&fields, field_names::TYPE);
-
                             // The unified streams carry ALL wire traffic —
                             // commands, responses, batches (t = c|r|bc|br|b|i).
                             // KeyBased must only act on actual KeyBased

@@ -72,11 +72,20 @@ $reg('site_1');
 $untyped = bin2hex(random_bytes(8));
 $r->setex("{site_2}:res:$untyped", 30, 'the real answer');
 $r->xAdd('{site_2}:gnode:unified:production', '*', ['id' => $untyped, 'status' => 'ok', 'result' => '{}']);
+// A command the daemon has no handler for, on a stream its service answers itself: the daemon's
+// refusal may fill an empty key, never replace a reply already there.
+$answered = bin2hex(random_bytes(8));
+$r->setex("{site_2}:res:$answered", 30, 'the real answer');
+$r->xAdd('{site_2}:gnode:unified:production', '*', ['t' => 'c', 'id' => $answered, 'c' => 'tenant_probe_no_such_command', 'p' => '{}', 'ss' => 'site_2', 'sn' => 'probe']);
+$unanswered = bin2hex(random_bytes(8));
+$r->xAdd('{site_2}:gnode:unified:production', '*', ['t' => 'c', 'id' => $unanswered, 'c' => 'tenant_probe_no_such_command', 'p' => '{}', 'ss' => 'site_2', 'sn' => 'probe']);
 $bare = bin2hex(random_bytes(8));
 $r->xAdd('{site_2}:gnode:unified:production', '*', ['id' => $bare]);
 usleep(800000);
 $check('an untyped entry does not overwrite the answer keyed under its id', $r->get("{site_2}:res:$untyped") === 'the real answer');
 $check('an untyped id gets no answer at all', $r->exists("{site_2}:res:$bare") == 0);
+$check("the daemon's refusal does not replace a service's reply", $r->get("{site_2}:res:$answered") === 'the real answer');
+$check('with nothing there, the caller still hears the command is unknown', strpos((string)$r->get("{site_2}:res:$unanswered"), 'Unknown command') !== false);
 // ---- forged replies ------------------------------------------------------------------------
 $U1 = '{site_1}:gnode:unified:production'; $C1 = '{site_1}:gnode:comms:production';
 $r->xAdd($C1, '*', ['subject' => 'mark']); $before = $r->xLen($C1);

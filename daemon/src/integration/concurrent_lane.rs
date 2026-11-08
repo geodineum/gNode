@@ -198,6 +198,7 @@ pub async fn dispatch(
     // true if neither lane owns a copy of this rule.
     if let Some(plan) = crate::integration::response_key::plan(&command, site_id.as_str(), &response)
     {
+        let write = plan.command();
         let request_id = plan.request_id;
         let response_key = plan.key;
         let response_json = plan.json;
@@ -207,13 +208,7 @@ pub async fn dispatch(
             command.site_id.as_str()
         };
 
-        let write_result: redis::RedisResult<()> = redis::cmd("SET")
-            .arg(&response_key)
-            .arg(&response_json)
-            .arg("EX")
-            .arg(plan.ttl_secs)
-            .query_async(&mut conn)
-            .await;
+        let write_result: redis::RedisResult<Option<String>> = write.query_async(&mut conn).await;
 
         if let Err(e) = write_result {
             error!(

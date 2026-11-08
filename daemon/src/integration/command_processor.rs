@@ -1262,15 +1262,11 @@ pub fn process_command_batch(
             // command with a top-level id and no _request_id wrote its reply
             // nowhere and hung the caller's poll to timeout.
             if let Some(plan) = crate::integration::response_key::plan(&command, site_id, &response) {
+                let _ = plan.command().query::<Option<String>>(conn);
                 let request_id = plan.request_id;
                 let response_key = plan.key;
                 let response_json = plan.json;
                 let key_site = if command.site_id.is_empty() { site_id } else { &command.site_id };
-                let _ = redis::cmd("SET")
-                    .arg(&response_key)
-                    .arg(&response_json)
-                    .arg("EX").arg(plan.ttl_secs)
-                    .query::<()>(conn);
                 if debug_level >= LogLevel::Info {
                     info!("Wrote response to polling key: {}", response_key);
                 }
