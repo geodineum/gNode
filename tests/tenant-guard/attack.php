@@ -41,7 +41,7 @@ $check("the victim's record is untouched", $r->hGet("$tk:entities", 'site_1') ==
 $keyed = function (string $from, string $target) use ($r) {
     $id = bin2hex(random_bytes(8));
     $r->set("{{$from}}:req:$id", json_encode(['command' => 'deregister_service', 'parameters' => ['service_id' => $target], 'requested_at' => microtime(true), 'timeout_ms' => 2000, 'site_id' => $target]));
-    $r->xAdd("{{$from}}:gnode:unified:production", '*', ['id' => $id, 'ss' => $from]);
+    $r->xAdd("{{$from}}:gnode:unified:production", '*', ['t' => 'c', 'id' => $id, 'ss' => $from]);
     usleep(500000);
 };
 $reg = fn (string $id) => $send($id, 'register_service', ['id' => $id, 'shape' => 'site', 'environment' => 'production']);
@@ -63,10 +63,20 @@ foreach (['key-based request' => $keyed, 'client batch announcement' => $announc
 $reg('site_1'); $reg('site_2');
 $id = bin2hex(random_bytes(8));
 $r->set("{geodineum}:req:$id", json_encode(['command' => 'deregister_service', 'parameters' => ['service_id' => 'site_1'], 'requested_at' => microtime(true), 'timeout_ms' => 2000, 'site_id' => 'geodineum']));
-$r->xAdd('{site_2}:gnode:unified:production', '*', ['id' => $id, 'ss' => 'geodineum']);
+$r->xAdd('{site_2}:gnode:unified:production', '*', ['t' => 'c', 'id' => $id, 'ss' => 'geodineum']);
 usleep(500000);
 $check('a key-based request naming the operator as ss stays a tenant', $r->hExists("$tk:entities", 'site_1'));
 $reg('site_1');
+// ---- an entry with no type -------------------------------------------------------------------
+// t is required: such an entry is no request, and nothing it names may be answered or overwritten.
+$untyped = bin2hex(random_bytes(8));
+$r->setex("{site_2}:res:$untyped", 30, 'the real answer');
+$r->xAdd('{site_2}:gnode:unified:production', '*', ['id' => $untyped, 'status' => 'ok', 'result' => '{}']);
+$bare = bin2hex(random_bytes(8));
+$r->xAdd('{site_2}:gnode:unified:production', '*', ['id' => $bare]);
+usleep(800000);
+$check('an untyped entry does not overwrite the answer keyed under its id', $r->get("{site_2}:res:$untyped") === 'the real answer');
+$check('an untyped id gets no answer at all', $r->exists("{site_2}:res:$bare") == 0);
 // ---- forged replies ------------------------------------------------------------------------
 $U1 = '{site_1}:gnode:unified:production'; $C1 = '{site_1}:gnode:comms:production';
 $r->xAdd($C1, '*', ['subject' => 'mark']); $before = $r->xLen($C1);

@@ -32,7 +32,7 @@ producers are visible in the journal, never silent.
 
 | Field | Used in     | Alias chain (preferred → fallback)    | Meaning |
 |-------|-------------|---------------------------------------|---------|
-| `t`   | all         | `t`, `type`                          | Message type — `c` (command), `r` (response), `bc`/`br`/`b` (batch), `i` (init) |
+| `t`   | all         | `t`, `type`                          | Message type — `c` (command), `r` (response), `bc`/`br`/`b` (batch), `i` (init). Required: an entry without a known type is reported (one warning per stream per hour), acknowledged and not acted on |
 | `id`  | all         | `id`, `request_id`                   | Unique request id; daemon writes the response to `{ss}:res:{id}` |
 | `c`   | `t=c`       | `c`, `cmd`, `command`, `command_name`| Command name |
 | `p`   | `t=c`       | `p`, `params`, `parameters`          | JSON-encoded parameters |

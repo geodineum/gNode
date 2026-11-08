@@ -305,6 +305,9 @@ impl ComputeHandler {
         let consumer_name = format!("daemon-{}", self.node_id);
         let mut refresh_counter = 0u32;
 
+        // one warning per stream per hour: a producer that writes untyped entries writes many
+        let mut malformed_warned: std::collections::HashMap<String, Instant> = std::collections::HashMap::new();
+
         info!("✅ KeyBased: Starting listener loop as consumer '{}'", consumer_name);
 
         loop {
@@ -390,13 +393,9 @@ impl ComputeHandler {
                             // GET'd {site}:req:br-… (nil), logged ERROR and
                             // wrote a junk error-response key for every batch
                             // it had just answered (~60 ERRORs/hour).
-                            let has_inline_cmd = Self::get_field_with_fallbacks(&fields, field_names::CMD).is_some();
-                            match msg_type.as_deref() {
-                                // Responses, canonical batches, info frames —
-                                // consumed (XACK below) but never treated as
-                                // compute requests.
-                                Some("r") | Some("br") | Some("b") | Some("bc") | Some("i") => {}
-                                Some("batch") => {
+                            match Self::classify_entry(&fields) {
+                                StreamEntry::NotForThisReader => {}
+                                StreamEntry::Batch => {
                                     // Legacy KeyBased batch - parse request_ids JSON array
                                     if let Some(ids_json) = Self::get_field_string(&fields, "request_ids") {
                                         if let Ok(request_ids) = serde_json::from_str::<Vec<String>>(&ids_json) {
@@ -407,19 +406,16 @@ impl ComputeHandler {
                                         }
                                     }
                                 }
-                                // Unified inline command (t=c with body) —
-                                // command_processor's job; a KeyBased GET on
-                                // its id would nil-error identically.
-                                Some("c") if has_inline_cmd => {}
-                                // A relayed reply, on the service's stream or its copy home, is no announcement: answering "not found" would overwrite the real answer.
-                                _ if Self::is_relayed_reply(&fields) => {}
-                                _ => {
-                                    if let Some(req_id) = request_id {
-                                        // KeyBased single announcement (id, no inline body)
-                                        debug!("🔔 KeyBased: Received compute request {} from {} via {}", req_id, site_id, stream_name);
-                                        self.spawn_request_handler(&site_id, &req_id);
-                                    } else {
-                                        warn!("⚠️ KeyBased: Message missing request_id on {}: message_id={}", stream_name, message_id);
+                                StreamEntry::Announcement(req_id) => {
+                                    debug!("🔔 KeyBased: Received compute request {} from {} via {}", req_id, site_id, stream_name);
+                                    self.spawn_request_handler(&site_id, &req_id);
+                                }
+                                StreamEntry::Malformed(why) => {
+                                    if malformed_warned.get(&stream_name).map_or(true, |last| last.elapsed() > Duration::from_secs(3600)) {
+                                        malformed_warned.insert(stream_name.clone(), Instant::now());
+                                        let mut names: Vec<&str> = fields.keys().map(String::as_str).collect();
+                                        names.sort_unstable();
+                                        warn!("⚠️ KeyBased: {} on {} ({}): not acted on; fields: {}", why, stream_name, message_id, names.join(","));
                                     }
                                 }
                             }
@@ -461,6 +457,30 @@ impl ComputeHandler {
                     }
                 }
             }
+        }
+    }
+
+    /// What an entry on a unified stream asks of this reader, by the wire contract: `t` is required
+    /// (COMMAND_SCHEMA). An entry without it is reported and left alone, because answering a guess
+    /// would write over whatever its producer keyed.
+    fn classify_entry(fields: &std::collections::HashMap<String, RedisValue>) -> StreamEntry {
+        let msg_type = Self::get_field_with_fallbacks(fields, field_names::TYPE);
+        let has_inline_cmd = Self::get_field_with_fallbacks(fields, field_names::CMD).is_some();
+        match msg_type.as_deref() {
+            Some("r") | Some("br") | Some("b") | Some("bc") | Some("i") | Some("init") => StreamEntry::NotForThisReader,
+            Some("batch") => StreamEntry::Batch,
+            // the unified command_processor's job
+            Some("c") if has_inline_cmd => StreamEntry::NotForThisReader,
+            Some("c") => match Self::get_field_with_fallbacks(fields, field_names::ID) {
+                Some(id) => StreamEntry::Announcement(id),
+                None => StreamEntry::Malformed("a command with neither body nor id"),
+            },
+            // a stream init frame carries no type and asks nothing
+            None if fields.contains_key("_init") => StreamEntry::NotForThisReader,
+            // the relay's own traffic, read by its reply path
+            _ if Self::is_relayed_reply(fields) => StreamEntry::NotForThisReader,
+            None => StreamEntry::Malformed("an entry with no type"),
+            Some(_) => StreamEntry::Malformed("an entry of an unknown type"),
         }
     }
 
@@ -683,7 +703,19 @@ impl ComputeHandler {
         error_code: Option<String>
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let response = ComputeResponse::error(request_id.to_string(), error, error_code);
-        Self::store_response_static(redis_client, site_id, request_id, &response).await
+        let response_key = build_response_key(site_id, request_id);
+        let response_json = serde_json::to_string(&response)?;
+        let mut conn = redis_client.get_multiplexed_async_connection().await?;
+        // Only where nothing is keyed yet: an error from this reader must never replace a real answer.
+        redis::cmd("SET")
+            .arg(&response_key)
+            .arg(response_json)
+            .arg("EX")
+            .arg(10)
+            .arg("NX")
+            .query_async::<Option<String>>(&mut conn)
+            .await?;
+        Ok(())
     }
 }
 
@@ -696,9 +728,68 @@ fn current_timestamp() -> f64 {
         .as_secs_f64()
 }
 
+#[derive(Debug, PartialEq)]
+enum StreamEntry {
+    NotForThisReader,
+    Batch,
+    Announcement(String),
+    Malformed(&'static str),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(pairs: &[(&str, &str)]) -> StreamEntry {
+        ComputeHandler::classify_entry(&pairs.iter()
+            .map(|(k, v)| (k.to_string(), RedisValue::BulkString(v.as_bytes().to_vec())))
+            .collect())
+    }
+
+    #[test]
+    fn only_a_typed_command_without_a_body_is_an_announcement() {
+        assert_eq!(entry(&[("t", "c"), ("id", "a")]), StreamEntry::Announcement("a".into()));
+        assert_eq!(entry(&[("type", "c"), ("request_id", "a")]), StreamEntry::Announcement("a".into()));
+        assert_eq!(entry(&[("t", "c"), ("id", "a"), ("c", "ping")]), StreamEntry::NotForThisReader);
+        assert_eq!(entry(&[("t", "r"), ("id", "a"), ("status", "ok")]), StreamEntry::NotForThisReader);
+        assert_eq!(entry(&[("type", "batch"), ("request_ids", "[]")]), StreamEntry::Batch);
+        assert_eq!(entry(&[("_init", "1"), ("_stream_type", "unified")]), StreamEntry::NotForThisReader);
+        assert_eq!(entry(&[("t", "init")]), StreamEntry::NotForThisReader);
+    }
+
+    #[test]
+    fn an_untyped_entry_is_never_taken_for_a_request() {
+        // a service's own reply on its stream, the case that lost real answers
+        assert!(matches!(entry(&[("id", "a"), ("status", "ok"), ("result", "{}"), ("ts", "1")]), StreamEntry::Malformed(_)));
+        // its own work item, and a bare id
+        assert!(matches!(entry(&[("id", "a"), ("cmd", "notes_draft"), ("params", "{}")]), StreamEntry::Malformed(_)));
+        assert!(matches!(entry(&[("id", "a"), ("ss", "geodineum")]), StreamEntry::Malformed(_)));
+        assert!(matches!(entry(&[("t", "zz"), ("id", "a")]), StreamEntry::Malformed(_)));
+        assert!(matches!(entry(&[("t", "c")]), StreamEntry::Malformed(_)));
+    }
+
+    /// GNODE_TEST_VALKEY_URL=redis://127.0.0.1:6398 cargo test --lib an_error_never_replaces -- --ignored
+    #[tokio::test]
+    #[ignore]
+    async fn an_error_never_replaces_a_reply() {
+        let url = std::env::var("GNODE_TEST_VALKEY_URL").expect("GNODE_TEST_VALKEY_URL");
+        let client = redis::Client::open(url).unwrap();
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let key = build_response_key("t_a", "r1");
+        let _: () = redis::cmd("SET").arg(&key).arg("the real answer").arg("EX").arg(60).query_async(&mut conn).await.unwrap();
+        ComputeHandler::store_error_response_static(&client, "t_a", "r1", "Request not found".into(), None).await.unwrap();
+        let v: String = redis::cmd("GET").arg(&key).query_async(&mut conn).await.unwrap();
+        assert_eq!(v, "the real answer");
+        // with nothing there the caller still hears why
+        let key2 = build_response_key("t_a", "r2");
+        let _: () = redis::cmd("DEL").arg(&key2).query_async(&mut conn).await.unwrap();
+        ComputeHandler::store_error_response_static(&client, "t_a", "r2", "Request not found".into(), None).await.unwrap();
+        let v2: String = redis::cmd("GET").arg(&key2).query_async(&mut conn).await.unwrap();
+        assert!(v2.contains("Request not found"), "{v2}");
+        let ttl: i64 = redis::cmd("TTL").arg(&key2).query_async(&mut conn).await.unwrap();
+        assert!(ttl > 0 && ttl <= 10, "{ttl}");
+        let _: () = redis::cmd("DEL").arg(&key).arg(&key2).query_async(&mut conn).await.unwrap();
+    }
 
     #[test]
     fn a_relayed_reply_is_no_announcement() {

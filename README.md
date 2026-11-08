@@ -16,7 +16,8 @@ Built by **Niels Erik Toren** · Rust daemon, crate `gnode-daemon` (see `daemon/
 
 ## What it is
 
-gNode is a stateless [tokio](https://tokio.rs) daemon. Services do not call it
+gNode is a stateless Rust daemon: plain threads, each subsystem blocking on its own
+[tokio](https://tokio.rs) runtime. Services do not call it
 directly - they `XADD` commands onto a ValKey stream, and gNode consumes them,
 runs the work (native handlers or ValKey Lua functions), and writes the response
 back to a polling key. Because every request carries its own routing and identity
