@@ -73,7 +73,7 @@ resolve_notify_site() {
         printf '%s' "$GEODINEUM_GRANTS_SITE"; return
     fi
     local ib
-    ib="$(comms_env COMMS_INBOUND_SITE)"; ib="${ib:-geodine}"
+    ib="$(comms_env COMMS_INBOUND_SITE)"; ib="${ib:-geodineum}"
     if [[ "$(vk EXISTS "{${ib}}:comms:config" 2>/dev/null | tr -d '[:space:]')" == "1" ]]; then
         printf '%s' "$ib"; return
     fi
@@ -244,11 +244,11 @@ watch)
 
     # The inbound stream is NOT under the notifying site. Outbound notification
     # is per-site; inbound is ONE bot bound to ONE site by COMMS_INBOUND_SITE,
-    # which defaults to "geodine" (Geodineum-COMMS/src/config.rs:238,266) —
+    # which defaults to "geodineum", the Geodineum bot's site —
     # so watching the notifying site would block forever on a stream nothing
     # ever writes, and every press would look like it did nothing.
     INBOUND_SITE="${COMMS_INBOUND_SITE:-$(comms_env COMMS_INBOUND_SITE)}"
-    INBOUND_SITE="${INBOUND_SITE:-geodine}"
+    INBOUND_SITE="${INBOUND_SITE:-geodineum}"
     STREAM="{${INBOUND_SITE}}:gnode:comms:inbound:production"
     GROUP=grants-watch
     # From 0, not $: a press that lands before this loop starts must still be
