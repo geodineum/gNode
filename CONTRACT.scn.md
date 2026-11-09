@@ -29,7 +29,8 @@ CONSUMES ← ValKey 7.2+ (FUNCTION LOAD, RESP3, consumer groups, streams) | Lua 
 
 ## ::USECASES
 - Service self-register (register_service by NAME: shape + axes as words; the daemon codes) → others `geometric_discover` {layer, facets, axes} (one GNODE_TOPO_QUERY; records carry their colour) or relay by `_rt` (the ring picks the placement).
-- Discovery: geometric_discover {layer, facets, axes} → GNODE_TOPO_QUERY: layer interval, facet sets, axis-range index lookups; unknown axes and words are errors.
+- Discovery: geometric_discover {layer, facets, axes, absent} → GNODE_TOPO_QUERY: layer interval, facet sets, axis-range index lookups, `absent` = declares none of these axes/colours (a shape without the axis declares none); unknown axes and words are errors.
+- Re-registration: leaving out a stored DECLARED axis or colour is REFUSED (record untouched) unless `replace: true` (GNODE_TOPO_REGISTER 7th arg `replace`); derived slots 16+ go by `preserve`, never count. The daemon (node, gNode component) and `register-tools` from a manifest/profile register with replace; placements (GNODE_TOPO_PLACE) always replace.
 - Notification queue → `{site}:gnode:comms:{env}` (gNode ignores, COMMS consumes/dispatches/ACK-after-SQLite).
 - Inter-service relay via `_rt` → resolve service→ring→CAN_REACH → forward.
 - Named topologies: `{c}:gnode:topo:<name>` on gnode_topo.lua; creation is a Pro (gNode-TOPO) command (D16); `GNODE_TOPO_CREATE/LIST/DELETE` take keys[1]=`{c}:gnode:topo:registry` and refuse a topology key of another hash tag or not `{c}:gnode:topo:<name>`. The JSON-document engine and topo_create/topo_register 3-D model retired 2026-10-11.

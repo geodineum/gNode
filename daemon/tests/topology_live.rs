@@ -271,14 +271,14 @@ fn fcall2<T: redis::FromRedisValue>(conn: &mut redis::Connection, f: &str, k2: &
 fn registration_order_is_allocated_once_and_derived_axes_survive_a_re_registration() {
     let Some(mut conn) = connect() else { return };
     seed(&mut conn);
-    let first: serde_json::Value = serde_json::from_str(&fcall::<String>(&mut conn, "GNODE_TOPO_REGISTER", &["gflow", "3.3", &record("3.3", "production", 1.0, 0.25), "{}", r#"{"protocol":["gnode_stream"]}"#, "16,17"]).unwrap()).unwrap();
+    let first: serde_json::Value = serde_json::from_str(&fcall::<String>(&mut conn, "GNODE_TOPO_REGISTER", &["gflow", "3.3", &record("3.3", "production", 1.0, 0.25), "{}", r#"{"protocol":["gnode_stream"]}"#, "16,17", "replace"]).unwrap()).unwrap();
     let before: String = fcall(&mut conn, "GNODE_TOPO_GET_ENTITIES", &[r#"["gflow"]"#]).unwrap();
     let ro0 = serde_json::from_str::<serde_json::Value>(&before).unwrap()["ents"]["gflow"]["ro"].as_u64().unwrap();
     assert_eq!(first["upd"], true, "seed registered gflow already; this is an update");
     // A derived write on slot 16, then a re-registration preserving 16,17: the measurement survives, the declared axis changes.
     let upd = format!(r#"{{"16":{{"pd":0.6,"pr":"{}","s":"{}"}}}}"#, (0.6f64 * 2f64.powi(64)) as i128, score(0.6));
     let _: String = fcall(&mut conn, "GNODE_TOPO_SET_DERIVED", &["gflow", &upd, "", "", "1", "", ""]).unwrap();
-    let r: String = fcall(&mut conn, "GNODE_TOPO_REGISTER", &["gflow", "3.3", &record("3.3", "production", 1.0, 0.25), "{}", r#"{"protocol":["grpc"]}"#, "16,17"]).unwrap();
+    let r: String = fcall(&mut conn, "GNODE_TOPO_REGISTER", &["gflow", "3.3", &record("3.3", "production", 1.0, 0.25), "{}", r#"{"protocol":["grpc"]}"#, "16,17", "replace"]).unwrap();
     let r: serde_json::Value = serde_json::from_str(&r).unwrap();
     assert_eq!(r["ro"].as_u64().unwrap(), ro0, "ro is allocated once (M1)");
     let after: String = fcall(&mut conn, "GNODE_TOPO_GET_ENTITIES", &[r#"["gflow"]"#]).unwrap();
@@ -306,4 +306,55 @@ fn the_lease_holder_alone_writes_derived_axes_and_unknown_entities_are_refused()
     assert!(r.unwrap_err().to_string().contains("not found"), "an unknown entity is refused (M4)");
     let r: Vec<String> = fcall(&mut conn, "GNODE_TOPO_CAN_REACH", &["{gflow}", "gcore", "1"]).unwrap();
     assert_eq!(r[1], "undeclared", "a braced caller id is nobody (M11): the router derives the bare site");
+}
+
+fn ids(records: &[String]) -> Vec<String> {
+    records.iter().map(|r| serde_json::from_str::<serde_json::Value>(r).unwrap()["id"].as_str().unwrap().to_string()).collect()
+}
+
+#[test]
+#[ignore]
+fn a_re_registration_that_leaves_out_a_stored_axis_is_refused_unless_it_replaces() {
+    let Some(mut conn) = connect() else { return };
+    seed(&mut conn);
+    let rec = record("3.3", "production", 1.0, 0.25);
+    refused(&mut conn, "GNODE_TOPO_REGISTER", &["gflow", "3.3", &rec, "{}", r#"{"protocol":["gnode_stream"]}"#], "contract_version, domain, implementation_language");
+    let e: String = fcall(&mut conn, "GNODE_TOPO_GET_ENTITIES", &[r#"["gflow"]"#]).unwrap();
+    let e = serde_json::from_str::<serde_json::Value>(&e).unwrap()["ents"]["gflow"].clone();
+    assert_eq!(e["c"]["domain"][0], "workflow", "a refused registration changes nothing");
+    let in_ix: Option<String> = redis::cmd("ZSCORE").arg(format!("{TK}:ix:contract_version")).arg("gflow").query(&mut conn).unwrap();
+    assert!(in_ix.is_some(), "and leaves the index alone");
+    // a derived measurement is not a declaration: a re-registration without `preserve` is not refused for it
+    let upd = format!(r#"{{"16":{{"pd":0.6,"pr":"{}","s":"{}"}}}}"#, (0.6f64 * 2f64.powi(64)) as i128, score(0.6));
+    let _: String = fcall(&mut conn, "GNODE_TOPO_SET_DERIVED", &["gflow", &upd, "", "", "1", "", ""]).unwrap();
+    let ordered = format!(r#"{{"fundamentality":"{}","contract_version":"{}"}}"#, score(0.3), score(0.2));
+    let colours = r#"{"protocol":["gnode_stream"],"domain":["workflow"],"implementation_language":"rust"}"#;
+    let _: String = fcall(&mut conn, "GNODE_TOPO_REGISTER", &["gflow", "3.3", &rec, &ordered, colours]).unwrap();
+    let _: String = fcall(&mut conn, "GNODE_TOPO_REGISTER", &["gflow", "3.3", &rec, "{}", r#"{"protocol":["gnode_stream"]}"#, "", "replace"]).unwrap();
+    let e: String = fcall(&mut conn, "GNODE_TOPO_GET_ENTITIES", &[r#"["gflow"]"#]).unwrap();
+    let e = serde_json::from_str::<serde_json::Value>(&e).unwrap()["ents"]["gflow"].clone();
+    assert!(e["c"].get("domain").is_none() && e["q"].get("contract_version").is_none(), "replace drops what it leaves out");
+    let in_ix: Option<String> = redis::cmd("ZSCORE").arg(format!("{TK}:ix:contract_version")).arg("gflow").query(&mut conn).unwrap();
+    assert!(in_ix.is_none(), "from the index too");
+    let member: bool = redis::cmd("SISMEMBER").arg(format!("{TK}:c:domain:workflow")).arg("gflow").query(&mut conn).unwrap();
+    assert!(!member);
+    seed(&mut conn);
+}
+
+#[test]
+#[ignore]
+fn a_query_finds_what_does_not_declare_an_axis() {
+    let Some(mut conn) = connect() else { return };
+    seed(&mut conn);
+    let (lo, hi) = layer_interval("3").unwrap();
+    let found = ids(&fcall::<Vec<String>>(&mut conn, "GNODE_TOPO_QUERY", &[&lo.to_string(), &hi.to_string(), r#"{"absent":["contract_version"]}"#, "{}"]).unwrap());
+    assert!(found.contains(&"geodine".to_string()) && found.contains(&"nierto_com".to_string()), "{found:?}");
+    assert!(!found.contains(&"gflow".to_string()), "gflow declares contract_version");
+    let found = ids(&fcall::<Vec<String>>(&mut conn, "GNODE_TOPO_QUERY", &[&lo.to_string(), &hi.to_string(), r#"{"absent":["domain"]}"#, "{}"]).unwrap());
+    assert!(!found.iter().any(|i| i == "gflow" || i == "geodine" || i == "nierto_com"), "all three declare a domain: {found:?}");
+    let (lo2, hi2) = layer_interval("2").unwrap();
+    let found = ids(&fcall::<Vec<String>>(&mut conn, "GNODE_TOPO_QUERY", &[&lo2.to_string(), &hi2.to_string(), r#"{"absent":["domain"],"facets":{"protocol":["library"]}}"#, "{}"]).unwrap());
+    for c in ["ValKey", "gCore", "gNode"] { assert!(found.contains(&c.to_string()), "{c} declares no domain: {found:?}"); }
+    let found = ids(&fcall::<Vec<String>>(&mut conn, "GNODE_TOPO_QUERY", &[&lo.to_string(), &hi.to_string(), r#"{"absent":["protocol"]}"#, "{}"]).unwrap());
+    assert!(!found.iter().any(|i| i == "gflow" || i == "geodine" || i == "nierto_com"));
 }

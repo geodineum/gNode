@@ -66,6 +66,10 @@ pub struct RegisterParams {
     /// The constellation to register in; must be served by this daemon. Default: the caller's.
     #[serde(default)]
     pub constellation: Option<String>,
+    /// This registration is the whole declaration: stored axes and colours it leaves out are dropped.
+    /// Without it, leaving one out is refused.
+    #[serde(default)]
+    pub replace: bool,
 }
 
 fn default_shape() -> String { "app".to_string() }
@@ -90,6 +94,7 @@ pub struct RegisterPlan {
     pub entity: Encoded,
     pub placement: Option<(Placement, Encoded)>,
     pub labels: Option<(Vec<String>, Vec<String>, Vec<String>)>,
+    pub replace: bool,
 }
 
 pub fn plan_register(schema: &TopologySchema, p: &RegisterParams) -> Result<RegisterPlan, String> {
@@ -135,7 +140,7 @@ pub fn plan_register(schema: &TopologySchema, p: &RegisterParams) -> Result<Regi
         None => None,
     };
     let labels = if p.holds.is_empty() && p.requires.is_empty() && p.peers.is_empty() { None } else { Some((p.holds.clone(), p.requires.clone(), p.peers.clone())) };
-    Ok(RegisterPlan { entity, placement, labels })
+    Ok(RegisterPlan { entity, placement, labels, replace: p.replace })
 }
 
 fn fcall(tk: &str, f: &str, args: &[&str]) -> redis::Cmd {
@@ -151,7 +156,7 @@ pub fn register_cmds(c: &Constellation, plan: &RegisterPlan) -> Vec<redis::Cmd> 
     let e = &plan.entity;
     let mut cmds = vec![
         fcall(&tk, "GNODE_ENSURE_CONSTELLATION", &[]),
-        fcall(&tk, "GNODE_TOPO_REGISTER", &[&e.id, &e.shape, &e.record, &e.ordered, &e.colours, &e.preserve]),
+        fcall(&tk, "GNODE_TOPO_REGISTER", &[&e.id, &e.shape, &e.record, &e.ordered, &e.colours, &e.preserve, if plan.replace { "replace" } else { "" }]),
     ];
     if let Some((p, pe)) = &plan.placement {
         let w = p.weight.to_string();
@@ -251,6 +256,9 @@ pub struct DiscoverParams {
     pub axes: BTreeMap<String, Value>,
     #[serde(default)]
     pub limit: usize,
+    /// axes and colours the entity must not declare
+    #[serde(default)]
+    pub absent: Vec<String>,
     /// Legacy forms, refused by name.
     #[serde(default)]
     pub capabilities: Option<Value>,
@@ -295,6 +303,13 @@ pub fn plan_discover(schema: &TopologySchema, p: &DiscoverParams) -> Result<(Str
             code.ok_or_else(|| format!("{} = {} is not a rung of the axis in layer {}", name, word, layer))
         };
         f = f.range(name, code(&bounds[0])?, code(&bounds[1])?);
+    }
+    for name in &p.absent {
+        let in_layer = |k: &&str| *k == layer || k.starts_with(&format!("{}.", layer));
+        if !schema.shape_keys().into_iter().filter(in_layer).any(|k| schema.shape(k).and_then(|s| s.resolve(name)).is_some()) {
+            return Err(format!("{} is not an axis or colour of layer {}", name, layer));
+        }
+        f = f.without(name);
     }
     Ok((layer, f))
 }
@@ -403,6 +418,23 @@ mod tests {
         assert!(f.axes.contains_key("contract_version") && f.axes.contains_key("latency_class"));
         let d: DiscoverParams = serde_json::from_value(json!({})).unwrap();
         assert_eq!(plan_discover(&s, &d).unwrap().0, "3", "default: every service");
+        assert!(!serde_json::to_string(&f).unwrap().contains("absent"), "no absent filter, no key: the query JSON is as before");
+        let d: DiscoverParams = serde_json::from_value(json!({ "layer": "daemon", "absent": ["contract_version", "domain"] })).unwrap();
+        assert_eq!(plan_discover(&s, &d).unwrap().1.absent, vec!["contract_version", "domain"]);
+        let d: DiscoverParams = serde_json::from_value(json!({ "absent": ["contract_versoin"] })).unwrap();
+        assert!(plan_discover(&s, &d).unwrap_err().contains("not an axis or colour"), "a misspelt axis is refused, not matched everywhere");
+    }
+
+    #[test]
+    fn a_registration_replaces_only_when_it_says_so() {
+        let s = schema();
+        let p: RegisterParams = serde_json::from_value(json!({ "id": "gflow", "shape": "daemon" })).unwrap();
+        assert!(!plan_register(&s, &p).unwrap().replace);
+        let c = Constellation::new("geodineum");
+        let args = |plan: &RegisterPlan| register_cmds(&c, plan)[1].get_packed_command();
+        assert!(!String::from_utf8_lossy(&args(&plan_register(&s, &p).unwrap())).contains("replace"));
+        let p: RegisterParams = serde_json::from_value(json!({ "id": "gflow", "shape": "daemon", "replace": true })).unwrap();
+        assert!(String::from_utf8_lossy(&args(&plan_register(&s, &p).unwrap())).contains("replace"));
     }
 }
 
@@ -566,7 +598,7 @@ fn plan_ids(p: &DiscoverIdsParams) -> Result<(String, Filters), String> {
     if p.capabilities.is_some() {
         return Err("capabilities by name are not axes: name `facets` (words) and `axes` ([lo, hi])".to_string());
     }
-    plan_discover(schema, &DiscoverParams { layer: p.layer.clone(), facets: p.facets.clone(), axes: p.axes.clone(), limit: p.limit, capabilities: None, requirements: None })
+    plan_discover(schema, &DiscoverParams { layer: p.layer.clone(), facets: p.facets.clone(), axes: p.axes.clone(), limit: p.limit, absent: Vec::new(), capabilities: None, requirements: None })
 }
 
 pub fn discover_ids(conn: &mut redis::Connection, site_id: &str, params: &Value) -> Result<Vec<String>, String> {

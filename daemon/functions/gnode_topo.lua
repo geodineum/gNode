@@ -1148,7 +1148,7 @@ local function store(tk, rec)
 end
 
 -- The one write path for entities and placements.
-local function register(tk, id, sh, rec, ordered, colours, preserve)
+local function register(tk, id, sh, rec, ordered, colours, preserve, replace)
     local sm = shape_map(tk, sh)
     if not sm then return nil, 'schema for shape ' .. sh .. ' is not published at ' .. tk .. ':schema:' .. sh end
     if type(rec.pd) ~= 'table' or type(rec.pr) ~= 'table' or #rec.pd ~= W or #rec.pr ~= W then
@@ -1187,6 +1187,19 @@ local function register(tk, id, sh, rec, ordered, colours, preserve)
         c[facet] = vals
     end
     local old = load_record(tk, id)
+    if old and not replace then
+        -- a declared axis or colour stored before and missing now is refused, not dropped; derived slots (16+) have `preserve`
+        local gone = {}
+        for axis in pairs(old.q or {}) do
+            local def = sm.by_name[axis]
+            if q[axis] == nil and def and def.slot < 16 then gone[#gone + 1] = axis end
+        end
+        for facet in pairs(old.c or {}) do if c[facet] == nil and sm.by_name[facet] then gone[#gone + 1] = facet end end
+        if #gone > 0 then
+            table.sort(gone)
+            return nil, id .. ' is stored with ' .. table.concat(gone, ', ') .. ' and this registration leaves them out: name them again, or register with replace to drop them'
+        end
+    end
     rec.id, rec.sh, rec.q, rec.c = id, sh, q, c
     rec.m = rec.m or {}
     if old then
@@ -1286,7 +1299,9 @@ server.register_function{
     end
 }
 
--- GNODE_TOPO_REGISTER tk | id shape record_json ordered_json colours_json [preserve_csv]
+-- GNODE_TOPO_REGISTER tk | id shape record_json ordered_json colours_json [preserve_csv] [mode]
+-- mode `replace`: the registration is the whole declaration and drops what it leaves out; otherwise leaving out a stored
+-- declared axis or colour is refused.
 server.register_function{
     function_name = 'GNODE_TOPO_REGISTER',
     callback = function(keys, args)
@@ -1298,7 +1313,7 @@ server.register_function{
         if sh == '4.1' or sh == '4.2' then return server.error_reply('placements register through GNODE_TOPO_PLACE') end
         local ok1, rec = pcall(cjson.decode, args[3]); local ok2, ordered = pcall(cjson.decode, args[4]); local ok3, colours = pcall(cjson.decode, args[5])
         if not (ok1 and ok2 and ok3) then return server.error_reply('record, ordered and colours must be JSON') end
-        local stored, upd = register(tk, id, sh, rec, ordered, colours, args[6])
+        local stored, upd = register(tk, id, sh, rec, ordered, colours, args[6], args[7] == 'replace')
         if not stored then return server.error_reply(upd) end
         bump_generation(tk)
         return cjson.encode({ ok = true, eid = id, sh = sh, ro = stored.ro, upd = upd })
@@ -1331,7 +1346,7 @@ server.register_function{
                 if sm and sm.by_name[facet] then colours[facet] = vals end
             end
         end
-        local stored, upd = register(tk, id, sh, rec, ordered, colours, nil)
+        local stored, upd = register(tk, id, sh, rec, ordered, colours, nil, true)
         if not stored then return server.error_reply(upd) end
         server.call('SADD', tk .. ':plof:' .. of, id)
         server.call('SADD', tk .. ':plon:' .. on, id)
@@ -1358,7 +1373,8 @@ server.register_function{
 }
 
 -- GNODE_TOPO_QUERY tk | layer_lo layer_hi filters_json [opts_json]
--- filters: { axes: { name: [lo, hi] }, facets: { name: [any-of] } }; opts: { limit }
+-- filters: { axes: { name: [lo, hi] }, facets: { name: [any-of] }, absent: [name] }; opts: { limit }
+-- absent: entities that declare none of these axes or colours (an entity whose shape lacks the axis declares none).
 -- The layer range drives; every other constraint is one index lookup per candidate; survivors decode.
 server.register_function{
     function_name = 'GNODE_TOPO_QUERY', flags = { 'no-writes' },
@@ -1384,6 +1400,14 @@ server.register_function{
                     local any = false
                     for _, v in ipairs(vals) do if server.call('SISMEMBER', tk .. ':c:' .. facet .. ':' .. v, id) == 1 then any = true; break end end
                     if not any then pass = false; break end
+                end
+            end
+            if pass and type(filt.absent) == 'table' and #filt.absent > 0 then
+                local r = load_record(tk, id)
+                if not r then pass = false else
+                    for _, name in ipairs(filt.absent) do
+                        if (r.q and r.q[name] ~= nil) or (r.c and r.c[name] ~= nil) then pass = false; break end
+                    end
                 end
             end
             if pass then keep[#keep + 1] = id; if limit > 0 and #keep >= limit then break end end

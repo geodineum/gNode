@@ -118,7 +118,8 @@ impl Constellation {
     }
 
     pub fn register(&self, conn: &mut redis::Connection, e: &Encoded) -> Result<RegisterReply> {
-        let reply: String = self.fcall(conn, "GNODE_TOPO_REGISTER", &[&e.id, &e.shape, &e.record, &e.ordered, &e.colours, &e.preserve])?;
+        // the daemon declares an entity whole: what it leaves out is dropped
+        let reply: String = self.fcall(conn, "GNODE_TOPO_REGISTER", &[&e.id, &e.shape, &e.record, &e.ordered, &e.colours, &e.preserve, "replace"])?;
         serde_json::from_str(&reply).map_err(GeometricError::Json)
     }
 
@@ -250,11 +251,19 @@ pub struct Filters {
     pub axes: BTreeMap<String, [String; 2]>,
     /// colour facet → any of these values
     pub facets: BTreeMap<String, Vec<String>>,
+    /// axes and colours the entity must not declare
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub absent: Vec<String>,
 }
 
 impl Filters {
     pub fn facet(mut self, name: &str, values: &[&str]) -> Self {
         self.facets.insert(name.to_string(), values.iter().map(|v| v.to_string()).collect());
+        self
+    }
+
+    pub fn without(mut self, name: &str) -> Self {
+        self.absent.push(name.to_string());
         self
     }
 

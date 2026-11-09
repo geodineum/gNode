@@ -194,6 +194,8 @@ fn run_service(args: &RegisterToolsArgs) -> Result<()> {
     if let Some(node) = args.on.as_deref().filter(|n| !n.is_empty()) {
         p["on"] = serde_json::json!(node);
     }
+    // the manifest or profile is the whole declaration
+    p["replace"] = serde_json::json!(true);
     info!("Registering '{}' by name as shape {} in {}", site, p["shape"], p["constellation"].as_str().unwrap_or(&args.topology_namespace));
     if args.dry_run {
         info!("Dry run — would register {}", p);
