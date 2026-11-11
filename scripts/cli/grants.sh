@@ -12,8 +12,9 @@
 # Requests are DATA on {ns}:gnode:grants:requests; every decision appends to
 # the {ns}:gnode:grants:ledger BEFORE any ACL change (ledger-then-apply).
 # Approval ADDS ~patterns to gnode_client_<service> (ACL is additive; revoke =
-# recompose via re-onboard). Notification rides COMMS (a working transport):
-# one email per request + per timeout-deny, carrying the approve/deny CLI
+# recompose via re-onboard). A pattern written %R~<keys> is granted read-only
+# (%W~ write-only); a bare pattern is read and write. Notification rides COMMS
+# (a working transport): one email per request + per timeout-deny, carrying the approve/deny CLI
 # one-liners. v0 ledger entries are unsigned; the provisioner (SB-8.83 3-4)
 # takes over signing + auto-grant matching when it lands.
 
@@ -32,6 +33,7 @@ Usage: geodineum grants <subcommand>
 
 The grant-request approval loop: requests are data, every decision is
 ledgered BEFORE any ACL change, undecided requests auto-deny after the TTL.
+A pattern written %R~<keys> is granted read-only; a bare <keys> read and write.
 HLP
     exit 0
 fi
@@ -50,6 +52,21 @@ COMMS_ENV=/etc/geodineum/components/geodineum-comms/geodineum-comms.env
 
 log()  { echo "[grants] $*"; }
 die()  { echo "[grants] ERROR: $*" >&2; exit 1; }
+
+# One requested pattern -> one ACL selector. Only the key-permission prefixes
+# pass through; anything else becomes ~<keys>, so a pattern can never carry
+# another ACL rule (+@all, on, >password).
+acl_selector() {
+    local p="$1"
+    [[ "$p" =~ ^(%(R|W|RW)~)?~?[^[:space:]%~]+$ ]] || return 1
+    case "$p" in
+        %R~*|%W~*|%RW~*) printf '%s' "$p" ;;
+        *) printf '~%s' "${p#\~}" ;;
+    esac
+}
+access_of() {
+    case "$1" in %R~*) echo "read";; %W~*) echo "write";; *) echo "read+write";; esac
+}
 
 # Read one variable out of the COMMS environment file. Unreadable (not root,
 # not in the group) is not an error — every caller has a fallback.
@@ -148,6 +165,11 @@ request)
         *) PATTERNS+=("$1"); shift;;
     esac; done
     [[ ${#PATTERNS[@]} -gt 0 ]] || die "at least one key pattern required"
+    ACCESS=()
+    for p in "${PATTERNS[@]}"; do
+        acl_selector "$p" >/dev/null || die "not a key pattern: $p"
+        ACCESS+=("$p ($(access_of "$p"))")
+    done
 
     # Refuse an identical request that is already pending. Filing used to be
     # unconditional, so a provisioning script run three times left six requests
@@ -180,7 +202,7 @@ print(json.dumps({"inline_keyboard": [[
     notify "[geodineum] grant request $RID: $SERVICE" \
 "Service '$SERVICE' requests ValKey access:
 
-  patterns: ${PATTERNS[*]}
+  patterns: ${ACCESS[*]}
   reason:   ${REASON:-none given}
   filed:    $(date -Iseconds) by ${SUDO_USER:-$(whoami)}@$(hostname)
   timeout:  auto-DENY after ${TTL}h
@@ -345,6 +367,15 @@ approve|deny)
     PATTERNS="${OVERRIDE:-$REQ_PATTERNS}"
     ACL_USER="gnode_client_${SVC}"
 
+    GRANT_ARGS=()
+    if [[ "$ACTION" == "approve" ]]; then
+        read -ra PARR <<< "$PATTERNS"
+        for p in "${PARR[@]}"; do
+            sel="$(acl_selector "$p")" || die "not a key pattern: $p (nothing decided)"
+            GRANT_ARGS+=("$sel")
+        done
+    fi
+
     # LEDGER-THEN-APPLY: the decision is recorded before any ACL mutation.
     vk_admin XADD "$LEDGER_STREAM" '*' \
         req "$RID" svc "$SVC" action "$ACTION" patterns "$PATTERNS" \
@@ -352,7 +383,6 @@ approve|deny)
         ts "$(date -Iseconds)" >/dev/null
 
     if [[ "$ACTION" == "approve" ]]; then
-        GRANT_ARGS=(); for p in $PATTERNS; do GRANT_ARGS+=("~${p#\~}"); done
         vk_admin ACL SETUSER "$ACL_USER" "${GRANT_ARGS[@]}" >/dev/null \
             || die "ACL SETUSER failed (ledger already records the intent — investigate)"
         vk_admin ACL SAVE >/dev/null
