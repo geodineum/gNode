@@ -55,7 +55,7 @@ cli:
       category: Daemon
     - name: grants
       handler: scripts/cli/grants.sh
-      description: Grant-request loop — request <svc> <patterns> | pending | approve <id> | deny <id> | show <svc> | sweep (auto-deny timeouts); ledger-then-apply, COMMS email notify
+      description: Grant-request loop — request <svc> <patterns> | pending | approve <id> | deny <id> | revoke <id> | show <svc> | sweep (auto-deny timeouts); the ledger is what a service holds, replayed at every regrant
       requires_sudo: true
       category: Topology
     - name: topology

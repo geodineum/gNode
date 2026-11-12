@@ -6,13 +6,15 @@
 #   geodineum grants pending
 #   geodineum grants approve <request_id> [--patterns "…"]     (master, admin cred)
 #   geodineum grants deny    <request_id> [--reason "…"]        (master, admin cred)
+#   geodineum grants revoke  <request_id> [--reason "…"]        (master, admin cred)
 #   geodineum grants show    <service>
 #   geodineum grants sweep                                       (timeout auto-deny)
 #
 # Requests are DATA on {ns}:gnode:grants:requests; every decision appends to
 # the {ns}:gnode:grants:ledger BEFORE any ACL change (ledger-then-apply).
-# Approval ADDS ~patterns to gnode_client_<service> (ACL is additive; revoke =
-# recompose via re-onboard). A pattern written %R~<keys> is granted read-only
+# Approval ADDS ~patterns to gnode_client_<service>. The ledger is the record of what
+# a service holds beyond its manifest: every regrant replays the approvals in force
+# (cli/grants-ledger.sh), and a revoke takes effect at the service's next regrant. A pattern written %R~<keys> is granted read-only
 # (%W~ write-only); a bare pattern is read and write. Notification rides COMMS
 # (a working transport): one email per request + per timeout-deny, carrying the approve/deny CLI
 # one-liners. v0 ledger entries are unsigned; the provisioner (SB-8.83 3-4)
@@ -28,6 +30,7 @@ Usage: geodineum grants <subcommand>
   pending
   approve <request_id> [--patterns "…"]     (master, admin cred)
   deny    <request_id> [--reason "…"]       (master, admin cred)
+  revoke  <request_id> [--reason "…"]       (master, admin cred; applied at the next regrant)
   show    <service>
   sweep                                     (timeout auto-deny)
 
@@ -53,17 +56,8 @@ COMMS_ENV=/etc/geodineum/components/geodineum-comms/geodineum-comms.env
 log()  { echo "[grants] $*"; }
 die()  { echo "[grants] ERROR: $*" >&2; exit 1; }
 
-# One requested pattern -> one ACL selector. Only the key-permission prefixes
-# pass through; anything else becomes ~<keys>, so a pattern can never carry
-# another ACL rule (+@all, on, >password).
-acl_selector() {
-    local p="$1"
-    [[ "$p" =~ ^(%(R|W|RW)~)?~?[^[:space:]%~]+$ ]] || return 1
-    case "$p" in
-        %R~*|%W~*|%RW~*) printf '%s' "$p" ;;
-        *) printf '~%s' "${p#\~}" ;;
-    esac
-}
+source "$(dirname "${BASH_SOURCE[0]}")/grants-ledger.sh"
+acl_selector() { grants_acl_selector "$1"; }
 access_of() {
     case "$1" in %R~*) echo "read";; %W~*) echo "write";; *) echo "read+write";; esac
 }
@@ -432,8 +426,28 @@ Re-file with: geodineum grants request $svc <patterns> --reason ..."
     log "sweep complete"
     ;;
 
+revoke)
+    RID="${1:-}"; shift || true
+    [[ -n "$RID" ]] || die "usage: grants revoke <request_id> [--reason ...]"
+    REASON=""
+    while [[ $# -gt 0 ]]; do case "$1" in --reason) REASON="$2"; shift 2;; *) shift;; esac; done
+    [[ "$(decision_for "$RID")" == "approve" ]] || die "request $RID is not an approval in force"
+    SVC=$(vk XRANGE "$LEDGER_STREAM" - + | awk -v want="$RID" '
+        /^[0-9]+-[0-9]+$/ { flush(); delete f; next }
+        { if (prev != "") { f[prev] = $0; prev = "" } else { prev = $0 } }
+        function flush() { if (f["req"] == want && f["action"] == "approve") s = f["svc"] }
+        END { flush(); print s }')
+    [[ -n "$SVC" ]] || die "no approval for $RID in the ledger"
+    vk_admin XADD "$LEDGER_STREAM" '*' \
+        req "$RID" svc "$SVC" action revoke patterns "-" \
+        decider "operator:${SUDO_USER:-$(whoami)}" reason "${REASON:-—}" \
+        ts "$(date -Iseconds)" >/dev/null
+    log "REVOKED $RID for $SVC in the ledger; the ACL drops it at the next regrant:"
+    log "  sudo bash /opt/geodineum/gNode/scripts/onboard-service.sh $SVC --regrant --environment <env> --no-mail-probe"
+    ;;
+
 *)
-    sed -n '3,12p' "$0" | sed 's/^# \?//'
+    sed -n '3,13p' "$0" | sed 's/^# \?//'
     exit 1
     ;;
 esac

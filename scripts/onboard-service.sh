@@ -54,6 +54,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/cli/constellation.sh"
+source "$SCRIPT_DIR/cli/grants-ledger.sh"
 
 # Credential and config directories (centralized FHS layout)
 CREDENTIAL_DIR="${GNODE_CREDENTIAL_DIR:-/etc/geodineum/credentials}"
@@ -152,14 +153,23 @@ apply_service_grants() {
         # entity or DEL the whole hash was the TOPOLOGY-ACL-SCOPE finding. Reads
         # of no-writes functions go through FCALL_RO (the rw form is refused on
         # a read-only pattern by design). clearselectors keeps regrants
-        # idempotent.
+        # idempotent; the grant ledger's approvals in force are replayed, so a
+        # regrant never silently revokes what an operator approved.
+        local _ledger
+        _ledger="$(valkey_admin_cli XRANGE "{${TOPOLOGY_NS}}:gnode:grants:ledger" - + 2>&1)"
+        if [[ -n "$_ledger" && ! "$_ledger" =~ ^[0-9]+-[0-9]+ ]]; then
+            log_error "Cannot read the grant ledger (${_ledger%%$'\n'*}); refusing a regrant that would drop approved grants"
+            exit 1
+        fi
+        local -a _ledger_grants=()
+        mapfile -t _ledger_grants < <(printf '%s\n' "$_ledger" | grants_in_force "$SITE_ID")
         valkey_admin_cli ACL SETUSER "$ACL_USER" clearselectors resetkeys \
             "~${SITE_ID}:*" \
             "~{${SITE_ID}}:*" \
             "~{${TOPOLOGY_NS}}:gnode:heartbeat:*:${SITE_ID}:*" \
             "%R~{${TOPOLOGY_NS}}:gnode:*" \
-            "${_key_grants[@]}" >/dev/null
-        log_success "Keyspace grants set (manifest-driven: ${#_key_grants[@]} declared + safe base; shared bus read-only)"
+            "${_key_grants[@]}" "${_ledger_grants[@]}" >/dev/null
+        log_success "Keyspace grants set (manifest-driven: ${#_key_grants[@]} declared + ${#_ledger_grants[@]} approved in the ledger + safe base; shared bus read-only)"
     else
         log_error "No manifest declarations — refusing to grant."
         log_error "  This service's manifest declares no consumes:/produces:, and the old"
@@ -168,7 +178,7 @@ apply_service_grants() {
         log_error "  template:*, membership:* to services that asked for nothing."
         log_error "  Fix: declare consumes:/produces: in the manifest"
         log_error "       (.geodineum/gnode_services.yaml — see CONTRACTS/SERVICE_ONBOARDING.md),"
-        log_error "       or regenerate it with:  sudo geodineum register <service> --force"
+        log_error "       or write it with:  sudo geodineum register <name> --new <type> --env <env> --dry-run"
         log_error "  Then re-run with --regrant."
         exit 1
     fi
