@@ -7,6 +7,7 @@ All notable changes to this project are documented here. The format follows Keep
 ### Security: tenants
 
 - The caller is the stream a command came from. A tenant may register and deregister only itself, reads only its own streams, and has no named topologies or channels. CMS state and templates are per tenant. A relayed reply needs the grant its command left. Templates have no `get_env`.
+- A joined node's ValKey login may not write the Lua libraries (`FUNCTION LOAD`, `DELETE`, `FLUSH`, `RESTORE`); the master's keeps `LOAD`. A client login has no `SCAN` unless its manifest declares `keyspace_scan: true` or it is a site (`scripts/acl-tiers.sh`).
 
 ### Faster
 
