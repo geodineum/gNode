@@ -24,8 +24,8 @@ IN ← ValKey `XREAD/XREADGROUP` `{site_id}:gnode:unified:{env}` = `[[stream_key
 OUT → `SET {ss}:res:{id} '<json>' EX 10` (plain JSON: {id,status,result,error,timestamp:float}). → `XADD {ss}:gnode:receipts:{env}` signed receipt beside every keyed reply (ed25519 NodeSigner, fail-closed: unsigned never emitted; body_ref=res-key, bh=sha256; receipt.rs). → FCALL exec on ValKey. → relayed cmd to `{target}:gnode:unified:{env}`. → provisions COMMS stream via provision_service.
 
 ## ::CONTRACT
-PROVIDES → unified-stream cmd protocol (t=c {id,t,c,p,ss,sn,ts}; p=JSON-string) | response (t=r {id,t,st,r,e,ri,ts}) | batch (t=bc {bi,tc,p:{commands:[…]}}) | 210 FCALL fns `^(GNODE|GCUBE|COMMS|GC)_…` | topology record {id,sh,env,ly,pd[24],pr[24],q,c,m,ra,ro (+of,on,hb,w for placements)} | declaration by name {shape, axes: words} → one 24-slot point | signed-ext loader | inter-svc relay via `_rt`/`_rr`.
-CONSUMES ← ValKey 7.2+ (FUNCTION LOAD, RESP3, consumer groups, streams) | Lua fns daemon/functions/*.lua | topology key | reach labels and denies | DTAP env from key suffix.
+PROVIDES → unified-stream cmd protocol (t=c {id,t,c,p,ss,sn,ts}; p=JSON-string) | response (t=r {id,t,st,r,e,ri,ts}) | batch (t=bc {bi,tc,p:{commands:[…]}}) | 210 FCALL fns `^(GNODE|GCUBE|COMMS|GC)_…` | topology record {id,sh,env,ly,pd[24],pr[24],q,c,m,ra,ro (+of,on,hb,w for placements)} | declaration by name {shape, axes: words} → one 24-slot point | signed-ext loader | inter-svc relay via `_rt`/`_rr` | signals `{c}:signals:global:stream` (scale_out|sick, start/clear, via gNode-SIGNALS).
+CONSUMES ← ValKey 7.2+ (FUNCTION LOAD, RESP3, consumer groups, streams) | Lua fns daemon/functions/*.lua | topology key | reach labels and denies | DTAP env from key suffix | Pro gNode-SIGNALS `GNODE_SIGNAL_PUBLISH` (optional; absent = no signals).
 
 ## ::USECASES
 - Service self-register (register_service by NAME: shape + axes as words; the daemon codes) → others `geometric_discover` {layer, facets, axes} (one GNODE_TOPO_QUERY; records carry their colour) or relay by `_rt` (the ring picks the placement).
@@ -37,6 +37,7 @@ CONSUMES ← ValKey 7.2+ (FUNCTION LOAD, RESP3, consumer groups, streams) | Lua 
 - Config distribution: config_set ↔ GNODE_NODE_FETCH_CONFIG via `{node_type}:gnode:config:*`.
 - Direct hot-pair channels: channel_open → dedicated stream, daemon steps out of data path.
 - Health: daemon heartbeat `{c}:gnode:heartbeat:<env>:gnode-daemon:<node>` per SERVED constellation → node + placement health on the one topology (no `gnode:node:*` record). Reconcile: master, 120 s, per served c, intents vs entities, drift → WARN, never writes.
+- Signals: lease holder → `{c}:signals:global:stream` via Pro gNode-SIGNALS `GNODE_SIGNAL_PUBLISH`; payload {constellation, kind scale_out|sick, state start|clear, subject, since, at, node, detail, producer gnode-daemon@ver, schema_version 1, fingerprint, timestamp_fp}. ON CHANGE ONLY: scale_out = sampler suggestion (write mode), start first tick, clear after 3 without; sick = placement health dead (heartbeat > 75 s), start 2nd dead pass, clear after 2 not dead. fingerprint = SHA3-256(`gnode-signal|1|c|kind|state|subject|since`) → retry dedups, new episode does not. Open set `{c}:gnode:signals:open` HASH `kind|subject`→{since,detail} survives restart + lease change. Library absent → nothing published or recorded, 1 INFO/process, re-probe 5 min.
 
 ## ::TENANTS
 CALLER := stream read from, never `ss` | constellation tag = operator, unrestricted | other tag = tenant

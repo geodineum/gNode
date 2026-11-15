@@ -313,6 +313,7 @@ pub struct LoadSamplerWorker {
     last_saved: Instant,
     /// D18: routed demand per service from the ring counters; idle after a quiet window.
     demand: crate::integration::sampler::DemandTracker,
+    signals: crate::integration::signals::SignalBus,
 }
 
 /// What the sampler is allowed to do. `Shadow` computes and logs without writing —
@@ -350,6 +351,7 @@ impl LoadSamplerWorker {
             seeded: false,
             last_saved: Instant::now(),
             demand: crate::integration::sampler::DemandTracker::new(window_ticks),
+            signals: crate::integration::signals::SignalBus::new(crate::integration::signals::Kind::ScaleOut),
         }
     }
 
@@ -406,6 +408,21 @@ impl LoadSamplerWorker {
             }
         }
         done
+    }
+
+    /// This constellation's scale-out suggestions as signal conditions: entity → detail.
+    pub fn scale_out_conditions(
+        conn: &mut redis::Connection,
+        c: &crate::constellation::Constellation,
+        suggestions: &[crate::integration::sampler::Suggestion],
+    ) -> std::collections::BTreeMap<String, serde_json::Value> {
+        suggestions.iter()
+            .filter(|s| c.holds(conn, &s.entity))
+            .map(|s| {
+                let tier = if s.tier == crate::integration::sampler::Tier::Node { "node" } else { "service" };
+                (s.entity.clone(), serde_json::json!({ "inflation": (s.inflation * 100.0).round() / 100.0, "since_ticks": s.ticks, "tier": tier }))
+            })
+            .collect()
     }
 
     /// The ring counters of a constellation's services, for the demand tracker.
@@ -579,6 +596,8 @@ impl DaemonWorker for LoadSamplerWorker {
                     .cloned().collect();
                 let counters = Self::ring_counters(&mut conn, constellation, &services);
                 done.extend(Self::apply_one_topology(&mut conn, constellation, &self.node_id, now_ms, &mine, &suggestions, &mut self.demand, &services, &counters));
+                let pressed = Self::scale_out_conditions(&mut conn, constellation, &suggestions);
+                done.extend(self.signals.evaluate(&mut conn, &constellation.name, &pressed, now_ms / 1000, &self.node_id));
             }
             if !done.is_empty() {
                 info!("[load-sampler] {}", done.join(", "));

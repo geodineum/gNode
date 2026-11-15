@@ -10,6 +10,7 @@ use log::{info, warn};
 
 use crate::constellation::{declare_gnode_component, declare_gnode_placement, declare_node, encode, Constellation, Declared, Filters, NodeHardware, Placement};
 use crate::integration::lease::hold_lease;
+use crate::integration::signals::{Kind, SignalBus};
 use crate::topology_schema::TopologySchema;
 use crate::worker::{DaemonWorker, TickResult, WorkerConfig};
 
@@ -79,11 +80,23 @@ pub struct ConstellationWorker {
     last_tick: Option<Instant>,
     fresh_secs: u64,
     declared: bool,
+    signals: SignalBus,
+}
+
+/// Placements whose heartbeat is gone (health `dead`), with what a reader needs to name them.
+pub fn sick_placements(placements: &[serde_json::Value]) -> BTreeMap<String, serde_json::Value> {
+    placements.iter()
+        .filter(|p| p["pd"][crate::constellation::HEALTH_SLOT].as_f64() == Some(crate::constellation::HEALTH_DEAD))
+        .filter_map(|p| {
+            let id = p["id"].as_str()?.to_string();
+            Some((id, serde_json::json!({ "of": p["of"], "on": p["on"], "heartbeat": p["hb"], "health": "dead" })))
+        })
+        .collect()
 }
 
 impl ConstellationWorker {
     pub fn new(constellations: Vec<Constellation>, schema: TopologySchema, facts: SelfFacts) -> Self {
-        Self { constellations, schema, facts, tick_interval: Duration::from_secs(15), last_tick: None, fresh_secs: 75, declared: false }
+        Self { constellations, schema, facts, tick_interval: Duration::from_secs(15), last_tick: None, fresh_secs: 75, declared: false, signals: SignalBus::new(Kind::Sick) }
     }
 
     /// Every node describes ITSELF, lease or not: the node entity, the gNode component
@@ -220,6 +233,14 @@ impl DaemonWorker for ConstellationWorker {
                         info!("{}: {} heartbeats, placed {:?}, unmatched {:?}, unparsed {:?}; health {}/{} fresh, {} entities",
                             c.name, r.heartbeats, r.placed, r.unmatched, r.unparsed, r.fresh, r.placements, r.entities_with_health);
                     }
+                    // A failed read is not a recovery: without the placements nothing is decided.
+                    if let Ok(placements) = c.query(&mut conn, "4", &Filters::default(), 0) {
+                        let now = crate::utils::current_timestamp_ms().max(0) as u64 / 1000;
+                        let done = self.signals.evaluate(&mut conn, &c.name, &sick_placements(&placements), now, &self.facts.node_id);
+                        if !done.is_empty() {
+                            info!("{}: signalled {}", c.name, done.join(", "));
+                        }
+                    }
                 }
                 Ok(_) => {}
                 Err(e) => warn!("{}: constellation pass failed: {}", c.name, e),
@@ -260,6 +281,20 @@ mod tests {
         assert_eq!(m, vec![("gFlow", "2"), ("gflow", "3.3")], "the component and the daemon-service both run where the heartbeat is");
         assert_eq!(match_heartbeat("comms", &entities), vec![("Geodineum-COMMS", "2")]);
         assert!(match_heartbeat("gshield", &entities).is_empty());
+    }
+
+    #[test]
+    fn a_placement_is_sick_when_its_health_reads_dead_and_only_then() {
+        let pd = |h: f64| { let mut v = vec![0.0; 24]; v[17] = h; v };
+        let placements = vec![
+            serde_json::json!({ "id": "gflow@squad", "of": "gflow", "on": "squad", "hb": "gflow", "pd": pd(0.25) }),
+            serde_json::json!({ "id": "gflow@aesir-solutions", "of": "gflow", "on": "aesir-solutions", "hb": "gflow", "pd": pd(1.0) }),
+            serde_json::json!({ "id": "gBak@squad", "of": "gBak", "on": "squad", "pd": pd(0.0) }),
+        ];
+        let sick = sick_placements(&placements);
+        assert_eq!(sick.keys().collect::<Vec<_>>(), vec!["gflow@squad"], "unknown (0) names no heartbeat and is not sickness");
+        assert_eq!(sick["gflow@squad"]["on"], "squad");
+        assert_eq!(sick["gflow@squad"]["health"], "dead");
     }
 
     #[test]

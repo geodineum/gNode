@@ -63,7 +63,8 @@ pub fn named_or_for_site(conn: &mut redis::Connection, named: Option<&str>, site
         None => Ok(for_entity(conn, site_id)),
     }
 }
-const HEALTH_SLOT: usize = 17;
+pub const HEALTH_SLOT: usize = 17;
+pub const HEALTH_DEAD: f64 = 0.25;
 const LIFECYCLE_SLOT: usize = 18;
 
 /// One constellation: its name is the hash tag of every key it owns.
@@ -85,6 +86,12 @@ impl Constellation {
         format!("{{{}}}:gnode:cluster:writer", self.name)
     }
 
+
+    /// Whether this constellation's key holds the entity.
+    pub fn holds(&self, conn: &mut redis::Connection, id: &str) -> bool {
+        let hit: redis::RedisResult<i64> = redis::cmd("HEXISTS").arg(format!("{}:entities", self.key())).arg(id).query(conn);
+        matches!(hit, Ok(1))
+    }
 
     pub fn heartbeat_key(&self, env: &str, component: &str, node: &str) -> String {
         format!("{{{}}}:gnode:heartbeat:{}:{}:{}", self.name, env, component, node)

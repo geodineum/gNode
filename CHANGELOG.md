@@ -9,6 +9,10 @@ All notable changes to this project are documented here. The format follows Keep
 - The caller is the stream a command came from. A tenant may register and deregister only itself, reads only its own streams, and has no named topologies or channels. CMS state and templates are per tenant. A relayed reply needs the grant its command left. Templates have no `get_env`.
 - A joined node's ValKey login may not write the Lua libraries (`FUNCTION LOAD`, `DELETE`, `FLUSH`, `RESTORE`); the master's keeps `LOAD`. A client login has no `SCAN` unless its manifest declares `keyspace_scan: true` or it is a site (`scripts/acl-tiers.sh`).
 
+### Signals
+
+- With Pro gNode-SIGNALS loaded, the writer-lease holder publishes scale-out (the sampler's suggestion) and sickness (a placement whose heartbeat went dead) to `{c}:signals:global:stream`: one entry when a condition starts, one when it clears. Without the library the daemon publishes nothing and says so once.
+
 ### Faster
 
 - One wait over all streams instead of a short block per stream: a command is picked up at once, however many sites there are.

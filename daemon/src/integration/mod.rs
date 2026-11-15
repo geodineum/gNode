@@ -18,6 +18,7 @@
 // Re-export path resolution
 pub mod lease;
 pub mod sampler;
+pub mod signals;
 pub mod path_resolution;
 pub use path_resolution::{
     find_valkey_functions_directory,
