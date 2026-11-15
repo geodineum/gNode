@@ -1,7 +1,4 @@
-// Stream reader module for gNode
-//
-// This module provides functionality for reading command and response
-// messages from unified streams using Redis consumer groups.
+// The multi-stream reader: one sweep over every stream a daemon reads, then one wait.
 
 use std::collections::HashMap;
 use log::{debug, warn};
@@ -12,20 +9,6 @@ use crate::integration::{
     error_handlings::{stream_processing_error, log_error},
 };
 use crate::integration::processor::resp3_protocol::OptimizedCommand;
-
-/// Stream reader errors
-#[derive(Debug)]
-pub enum StreamReaderError {
-    /// Redis connection error
-    ConnectionError(String),
-    /// Stream parsing error
-    ParsingError(String),
-    /// Validation error
-    ValidationError(String),
-}
-
-/// Stream reader result type
-pub type StreamReaderResult<T> = Result<T, StreamReaderError>;
 
 /// One multi-stream read, unpacked.
 ///

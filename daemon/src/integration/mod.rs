@@ -43,10 +43,6 @@ pub use processor::{
     // RESP3 protocol
     Resp3Value, OptimizedCommand,
 
-    //STREAM READER
-    StreamReaderError,
-    StreamReaderResult,
-
     // Unified stream processor
     initialize_unified_stream,
 };

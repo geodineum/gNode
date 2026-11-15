@@ -25,11 +25,7 @@ pub use broadcast_reader::{
 };
 
 // Re-export main components for use in other modules
-pub use stream_reader::{
-    StreamReaderError,
-    StreamReaderResult,
-    read_multi_stream, sweep_mark, wait_for_any,
-};
+pub use stream_reader::{read_multi_stream, sweep_mark, wait_for_any};
 pub use resp3_protocol::{Resp3Value, OptimizedCommand};
 pub use crate::config::{GNodeSettings};
 pub use crate::integration::consumer_groups::{create_unified_stream_worker};
