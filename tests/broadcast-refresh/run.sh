@@ -1,6 +1,6 @@
 #!/bin/bash
-# on any dev box, no sudo: the daemon on a throwaway ValKey subscribes to an announced site within
-# a second, and to an unannounced one at its next discovery poll (within ~60 s).
+# on any dev box, no sudo: the daemon on a throwaway ValKey reads an announced site's stream within
+# a second, and an unannounced one's at its next discovery poll (within ~60 s).
 #   bash tests/broadcast-refresh/run.sh <daemon binary> [port]
 set -uo pipefail
 TREE=$(cd "$(dirname "$0")/../.." && pwd); BIN=${1:?daemon binary}; PORT=${2:-47992}
@@ -12,7 +12,8 @@ trap cleanup EXIT
 check() { if [[ "$2" == "$3" ]]; then echo "  ok   $1"; else echo "  FAIL $1: expected '$3', got '$2'"; fail=1; fi; }
 vk() { valkey-cli -p "$PORT" --no-auth-warning --raw "$@"; }
 ms() { date +%s%3N; }
-subscribed() { vk XINFO GROUPS "{$1}:gnode:unified:production" 2>/dev/null | grep -qx gnode-workers; }
+# A reader, not a declaration: the worker's consumer exists only once it has read the stream.
+subscribed() { [[ -n "$(vk XINFO CONSUMERS "{$1}:gnode:unified:production" gnode-workers 2>/dev/null | grep -x 'gnode-d1')" ]]; }
 provision() { vk FCALL GNODE_PROVISION_SERVICE 0 "$1" '["production"]' geodineum '' >/dev/null; }
 announce() { vk XADD '{geodineum}:gnode:broadcast:global' MAXLEN '~' 1000 '*' type site_registered \
     data "{\"site_id\":\"$1\",\"environment\":\"production\",\"constellation\":\"geodineum\",\"ts\":$(date +%s)}" >/dev/null; }
