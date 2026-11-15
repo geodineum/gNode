@@ -798,6 +798,26 @@ else
 fi
 
 # =============================================================================
+# Announce: the daemon and COMMS re-read their site discovery now, not at their
+# next poll. Best effort; the poll catches a lost announcement.
+# =============================================================================
+
+BROADCAST_KEY="{${TOPOLOGY_NS}}:gnode:broadcast:global"
+if [[ "$DRY_RUN" == "true" ]]; then
+    log_dry "XADD $BROADCAST_KEY type site_registered"
+else
+    _announce=$(printf '{"site_id":"%s","environment":"%s","constellation":"%s","ts":%s}' \
+        "$SITE_ID" "${PRIMARY_ENV:-production}" "$TOPOLOGY_NS" "$(date +%s)")
+    _announced=$(valkey_daemon_cli XADD "$BROADCAST_KEY" MAXLEN '~' 1000 '*' \
+        type site_registered data "$_announce" 2>&1) || true
+    if [[ "$_announced" =~ ^[0-9]+-[0-9]+$ ]]; then
+        log_success "Announced on $BROADCAST_KEY"
+    else
+        log_warning "Not announced (${_announced:-no reply}); the daemon and COMMS see '$SITE_ID' at their next poll, within a minute"
+    fi
+fi
+
+# =============================================================================
 # Step 5: COMMS Channel Setup
 # =============================================================================
 
