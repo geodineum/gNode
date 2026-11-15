@@ -15,6 +15,7 @@ All notable changes to this project are documented here. The format follows Keep
 
 ### Registration
 
+- A registration or a deploy announced on `{c}:gnode:broadcast:global` (`site_registered` from `onboard-service.sh`, `component_deployed` from the installer's deploy sweep) makes the daemon re-read its site discovery and subscribe at once instead of at the next minute; the poll stays and a lost announcement costs at most one interval.
 - `register-tools --tier tool` records each component's intent in `{c}:gnode:registrations:components`; the reconciler reports a component that goes missing or changes shape, as it does for sites and services. `deregister-service.sh` removes either intent.
 - The reconciler takes the shape an intent names; a site or service onboarded with the `component` profile (a daemon) is no longer reported as drift.
 
