@@ -820,22 +820,26 @@ expand_node() {
     # for. Mint this node its own user of the same daemon tier.
     #
     # Grants come from the rule the installer wrote when it provisioned
-    # gnode_daemon, never from a copy kept here: one definition of the
-    # privilege boundary. Identical grants means this changes identity only,
-    # not what a node may do — scoping is a later, separate change.
+    # gnode_daemon, never from a copy kept here, minus the Lua library writes
+    # (acl-tiers.sh): the libraries are shared by every constellation on the
+    # ValKey and the master loads them.
     local node_user="gnode_node_$(printf '%s' "$name" | tr -c 'a-zA-Z0-9_' '_')"
     local node_pw="" acl_rule_file="/etc/geodineum/components/gnode-daemon/acl-daemon-tier.rule"
     local admin_pwfile="${cred_dir}/valkey.password"
     [[ -r "$admin_pwfile" ]] || admin_pwfile="${cred_dir}/valkey_admin.password"
 
-    if [[ -r "$acl_rule_file" && -r "$admin_pwfile" ]]; then
+    local node_tier=""
+    # shellcheck source=acl-tiers.sh
+    source "${SCRIPT_DIR}/acl-tiers.sh"
+    [[ -r "$acl_rule_file" ]] && node_tier="$(acl_node_tier "$acl_rule_file")"
+    if [[ -n "$node_tier" && -r "$admin_pwfile" ]]; then
         node_pw="$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)"
-        # Unquoted on purpose: the rule file holds whitespace-separated ACL
-        # tokens that must arrive as separate arguments.
-        # shellcheck disable=SC2046
+        # Unquoted on purpose: the tier is whitespace-separated ACL tokens
+        # that must arrive as separate arguments.
         # valkey-cli exits 0 on server errors, so match the reply, not $?.
+        # shellcheck disable=SC2086
         _acl_out="$(REDISCLI_AUTH="$(cat "$admin_pwfile")" valkey-cli -p "${VALKEY_PORT:-47445}" \
-            ACL SETUSER "$node_user" resetpass ">${node_pw}" $(cat "$acl_rule_file") 2>&1)"
+            ACL SETUSER "$node_user" resetpass ">${node_pw}" $node_tier 2>&1)"
         if [[ "$_acl_out" == "OK" ]]; then
             REDISCLI_AUTH="$(cat "$admin_pwfile")" valkey-cli -p "${VALKEY_PORT:-47445}" ACL SAVE >/dev/null 2>&1 || true
             log_success "Minted per-node ValKey identity: ${node_user}"

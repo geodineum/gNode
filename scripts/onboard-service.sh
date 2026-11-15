@@ -38,7 +38,7 @@ set -euo pipefail
 # ValKey credential ownership + client ACL grants are defined in TWO places
 # that MUST change together (fixing one alone is what caused the geodine
 # NOAUTH crash-loop). Canonical model + rationale: the installer repos' CONTRACTS/permission-model.md.
-#   [1] THIS FILE — every service's and site's creds: ACL grant + root:<group> 0640
+#   [1] THIS FILE (command set: acl-tiers.sh) — every service's and site's creds: ACL grant + root:<group> 0640
 #                   (--cred-group: geodineum-web for sites, the component's own group
 #                   for services) + .owner sidecar
 #   [2] Geodineum[-pro]/lib/geodeploy.sh :: geodeploy_fix_all_credentials()
@@ -55,6 +55,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 source "$SCRIPT_DIR/cli/constellation.sh"
 source "$SCRIPT_DIR/cli/grants-ledger.sh"
+source "$SCRIPT_DIR/acl-tiers.sh"
 
 # Credential and config directories (centralized FHS layout)
 CREDENTIAL_DIR="${GNODE_CREDENTIAL_DIR:-/etc/geodineum/credentials}"
@@ -591,6 +592,8 @@ if [[ "$ACL_EXISTS" == "true" && "$PASSWORD_EXISTS" == "true" && "$REGRANT" == "
     # looked correct on every own-namespace check and was wider than declared.
     log_info "Re-applying grants from the manifest (credential untouched)"
     apply_service_grants
+    valkey_admin_cli ACL SETUSER "$ACL_USER" "$(acl_client_scan "$RESOLVED_YAML" "$SHAPE")" >/dev/null
+    valkey_admin_cli ACL SAVE >/dev/null 2>&1 || log_warning "ACL SAVE failed — the SCAN grant will NOT survive a ValKey restart"
     log_success "Grants recomposed for ${ACL_USER}"
 elif [[ "$ACL_EXISTS" == "true" && "$PASSWORD_EXISTS" == "true" && "$FORCE" != "true" ]]; then
     log_success "ACL user already provisioned (skipping — use --regrant to re-apply manifest policy)"
@@ -605,15 +608,8 @@ EOF
         # Keyspace + channel grants: manifest-composed when declared, legacy
         # uniform otherwise (apply_service_grants, top of file).
         apply_service_grants
-        valkey_admin_cli ACL SETUSER "$ACL_USER" nocommands \
-            +xread +xreadgroup +xadd +xack +xclaim +xpending +xinfo +xlen +xtrim +xrange +xrevrange +xgroup +xdel \
-            +fcall +fcall_ro \
-            +get +set +setex +setnx +del +exists +ttl +expire +mget +mset +incr +decr +incrby +decrby \
-            +hget +hset +hgetall +hdel +hexists +hkeys +hvals +hincrby +hmget +hmset \
-            +sadd +smembers +sismember +srem +scard \
-            +lpush +rpush +lpop +rpop +lrange +llen +lindex +ltrim \
-            +zadd +zrange +zrevrange +zrem +zscore +zcard \
-            +scan +ping +publish +auth +select +info '+client|id' '+client|getname' '+client|setname' '+client|setinfo' +multi +exec +discard +time +type +object >/dev/null
+        valkey_admin_cli ACL SETUSER "$ACL_USER" nocommands "${ACL_CLIENT_COMMANDS[@]}" \
+            "$(acl_client_scan "$RESOLVED_YAML" "$SHAPE")" >/dev/null
         valkey_admin_cli ACL SAVE >/dev/null
         log_success "ACL user recreated with existing password"
     fi
@@ -659,15 +655,8 @@ EOF
         # Keyspace + channel grants: manifest-composed when declared, legacy
         # uniform otherwise (apply_service_grants, top of file).
         apply_service_grants
-        valkey_admin_cli ACL SETUSER "$ACL_USER" nocommands \
-            +xread +xreadgroup +xadd +xack +xclaim +xpending +xinfo +xlen +xtrim +xrange +xrevrange +xgroup +xdel \
-            +fcall +fcall_ro \
-            +get +set +setex +setnx +del +exists +ttl +expire +mget +mset +incr +decr +incrby +decrby \
-            +hget +hset +hgetall +hdel +hexists +hkeys +hvals +hincrby +hmget +hmset \
-            +sadd +smembers +sismember +srem +scard \
-            +lpush +rpush +lpop +rpop +lrange +llen +lindex +ltrim \
-            +zadd +zrange +zrevrange +zrem +zscore +zcard \
-            +scan +ping +publish +auth +select +info '+client|id' '+client|getname' '+client|setname' '+client|setinfo' +multi +exec +discard +time +type +object >/dev/null
+        valkey_admin_cli ACL SETUSER "$ACL_USER" nocommands "${ACL_CLIENT_COMMANDS[@]}" \
+            "$(acl_client_scan "$RESOLVED_YAML" "$SHAPE")" >/dev/null
         valkey_admin_cli ACL SAVE >/dev/null
         log_success "ACL user created: $ACL_USER"
     fi

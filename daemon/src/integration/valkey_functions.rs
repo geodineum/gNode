@@ -1260,7 +1260,7 @@ pub fn verify_functions(
 }
 
 /// Library names currently loaded in ValKey, via read-only FUNCTION LIST.
-fn list_loaded_library_names(conn: &mut Connection) -> IntegrationResult<Vec<String>> {
+pub(crate) fn list_loaded_library_names(conn: &mut Connection) -> IntegrationResult<Vec<String>> {
     let value: redis::Value = redis::cmd("FUNCTION")
         .arg("LIST")
         .query(conn)

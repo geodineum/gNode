@@ -632,7 +632,8 @@ pub fn load_lua_libraries_into_valkey(conn: &mut redis::Connection) -> (usize, u
         return (0, 0);
     }
 
-    for status in mgr.list() {
+    let mut denied = false;
+    'extensions: for status in mgr.list() {
         if !status.operational {
             continue;
         }
@@ -687,6 +688,10 @@ pub fn load_lua_libraries_into_valkey(conn: &mut redis::Connection) -> (usize, u
                     );
                     loaded += 1;
                 }
+                Err(e) if e.code() == Some("NOPERM") || e.to_string().contains("NOPERM") => {
+                    denied = true;
+                    break 'extensions;
+                }
                 Err(e) => {
                     warn!(
                         "FUNCTION LOAD failed for extension '{}' library '{}' ({}): {}",
@@ -699,6 +704,27 @@ pub fn load_lua_libraries_into_valkey(conn: &mut redis::Connection) -> (usize, u
                 }
             }
         }
+    }
+
+    if denied {
+        // A joined node's login may not write the library namespace; check instead.
+        info!("This ValKey login may not load Lua libraries (a joined node); the master loads them");
+        let declared = mgr.operational_lua_libraries();
+        let missing: Vec<String> = match crate::integration::valkey_functions::list_loaded_library_names(conn) {
+            Ok(present) => declared.into_iter().filter(|l| !present.contains(l)).collect(),
+            Err(e) => {
+                warn!("Could not list ValKey function libraries: {}", e);
+                declared
+            }
+        };
+        if !missing.is_empty() {
+            warn!(
+                "ValKey is missing extension librar{} this node serves: {}. Load them ON THE MASTER: scripts/load-valkey-functions.sh",
+                if missing.len() == 1 { "y" } else { "ies" },
+                missing.join(", ")
+            );
+        }
+        return (loaded, missing.len());
     }
 
     if loaded > 0 || failed > 0 {

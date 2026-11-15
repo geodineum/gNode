@@ -12,19 +12,21 @@
 # registry, and nothing the node is currently using to stay connected.
 #
 # Run ON THE MASTER:
-#   sudo ./mint-node-identity.sh <node-name> [--rotate]
+#   sudo ./mint-node-identity.sh <node-name> [--rotate | --regrant]
 #
 # Grants come from acl-daemon-tier.rule -- the same single definition expand
-# reads. If that file is missing, run write-acl-daemon-tier-rule.sh first.
+# reads -- minus the Lua library writes (acl-tiers.sh). If that file is
+# missing, run write-acl-daemon-tier-rule.sh first.
 #
 # Idempotent by default: an existing identity is reported, not replaced.
 # --rotate issues a new password, which BREAKS the node until it is updated.
+# --regrant re-applies the node tier to an existing identity; its password stays.
 set -uo pipefail
 
 NODE="${1:-}"
-ROTATE="false"
-[ "${2:-}" = "--rotate" ] && ROTATE="true"
-[ -n "$NODE" ] || { echo "Usage: sudo $0 <node-name> [--rotate]" >&2; exit 1; }
+MODE="${2:-}"
+case "$MODE" in ""|--rotate|--regrant) ;; *) echo "Usage: sudo $0 <node-name> [--rotate | --regrant]" >&2; exit 1 ;; esac
+[ -n "$NODE" ] || { echo "Usage: sudo $0 <node-name> [--rotate | --regrant]" >&2; exit 1; }
 
 # Match the sanitisation expand applies, so a name mints the same user here.
 SAFE="$(printf '%s' "$NODE" | tr -c 'a-zA-Z0-9_' '_')"
@@ -48,12 +50,27 @@ if [ ! -r "$RULE_FILE" ]; then
     exit 1
 fi
 
+# shellcheck source=acl-tiers.sh
+. "$(dirname "$0")/acl-tiers.sh"
+NODE_TIER="$(acl_node_tier "$RULE_FILE")" || { echo "FATAL: ${RULE_FILE} is empty." >&2; exit 1; }
+
 vk() { REDISCLI_AUTH="$(cat "$PW_FILE")" valkey-cli -h "$HOST" -p "$PORT" "$@"; }
 
 EXISTS="false"
-vk ACL GETUSER "$USER_NAME" 2>/dev/null | grep -q . && EXISTS="true"
+[ -n "$(vk ACL GETUSER "$USER_NAME" 2>/dev/null)" ] && EXISTS="true"
 
-if [ "$EXISTS" = "true" ] && [ "$ROTATE" != "true" ]; then
+if [ "$MODE" = "--regrant" ]; then
+    [ "$EXISTS" = "true" ] || { echo "FATAL: ${USER_NAME} does not exist; mint it without --regrant." >&2; exit 1; }
+    # shellcheck disable=SC2086
+    SETOUT="$(vk ACL SETUSER "$USER_NAME" $NODE_TIER 2>&1)"
+    [ "$SETOUT" = "OK" ] || { echo "FATAL: ACL SETUSER ${USER_NAME} rejected: ${SETOUT}" >&2; exit 1; }
+    vk ACL SAVE >/dev/null 2>&1 || echo "WARNING: ACL SAVE failed; the grant reverts at the next ValKey restart" >&2
+    echo "Regranted ${USER_NAME} (password unchanged)"
+    echo "Grant:  ${NODE_TIER}"
+    exit 0
+fi
+
+if [ "$EXISTS" = "true" ] && [ "$MODE" != "--rotate" ]; then
     echo "Identity ${USER_NAME} already exists."
     echo "Its password is held only by the node; it is not recoverable here."
     echo "Re-issue with --rotate ONLY if the node has lost it: rotating breaks"
@@ -63,16 +80,16 @@ fi
 
 NODE_PW="$(head -c 32 /dev/urandom | base64 | tr -d '/+=' | head -c 32)"
 
-# Unquoted on purpose: the rule file holds whitespace-separated ACL tokens
-# that must arrive as separate arguments.
+# Unquoted on purpose: the tier is whitespace-separated ACL tokens that must
+# arrive as separate arguments.
 # valkey-cli exits 0 even when the server rejects the command, so the reply
 # is checked rather than the exit status.
-# shellcheck disable=SC2046
-SETOUT="$(vk ACL SETUSER "$USER_NAME" resetpass ">${NODE_PW}" $(cat "$RULE_FILE") 2>&1)"
+# shellcheck disable=SC2086
+SETOUT="$(vk ACL SETUSER "$USER_NAME" resetpass ">${NODE_PW}" $NODE_TIER 2>&1)"
 if [ "$SETOUT" != "OK" ]; then
     echo "FATAL: ACL SETUSER ${USER_NAME} rejected by the server:" >&2
     echo "       ${SETOUT}" >&2
-    echo "       Grant used: $(cat "$RULE_FILE")" >&2
+    echo "       Grant used: ${NODE_TIER}" >&2
     exit 1
 fi
 vk ACL SAVE >/dev/null 2>&1 || true
@@ -84,7 +101,7 @@ if ! vk ACL DRYRUN "$USER_NAME" PING >/dev/null 2>&1; then
 fi
 
 echo "Minted ${USER_NAME} ($([ "$EXISTS" = "true" ] && echo rotated || echo new))"
-echo "Grant:  $(cat "$RULE_FILE")"
+echo "Grant:  ${NODE_TIER}"
 echo
 echo "=== Run these ON ${NODE} (the password is shown once) ==="
 cat <<APPLY
