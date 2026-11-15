@@ -1261,7 +1261,7 @@ pub fn create_environment_stream_worker_dynamic(
         while !crate::daemon::is_shutdown_requested() {
             // Dynamic stream sync: check for newly discovered streams OR immediate sync signal
             if let Some(ref discovery) = shared_discovery {
-                // Check if immediate sync was signaled (e.g., from environment_changed broadcast)
+                // Signaled after every discovery re-read: the interval poll and the broadcast events alike.
                 let immediate_sync_needed = discovery.read()
                     .map(|d| d.check_and_clear_sync_signal())
                     .unwrap_or(false);
@@ -1269,9 +1269,6 @@ pub fn create_environment_stream_worker_dynamic(
                 let time_for_sync = last_stream_sync.elapsed().as_secs() >= stream_sync_interval_secs;
 
                 if immediate_sync_needed || time_for_sync {
-                    if immediate_sync_needed {
-                        info!("🔔 Immediate stream sync triggered (environment change detected)");
-                    }
                     last_stream_sync = Instant::now();
 
                     // Read from shared discovery manager

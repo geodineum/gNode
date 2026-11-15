@@ -331,8 +331,33 @@ pub fn is_broadcast_message(message_type: &str) -> bool {
         "service_deregistered" |
         "format_registered" |
         "global_announcement" |
+        "site_registered" |
+        "component_deployed" |
+        "environment_changed" |
         "bi" // broadcast initialization
     )
+}
+
+/// Events after which a node re-reads the registered sites and their streams: what the
+/// interval poll re-reads, early. The poll stays, so a lost event costs at most one interval.
+pub fn triggers_discovery_refresh(message_type: &str) -> bool {
+    matches!(message_type,
+        "site_registered" |
+        "component_deployed" |
+        "service_registered" |
+        "service_deregistered" |
+        "environment_changed"
+    )
+}
+
+/// What an event is about, for the log line: a top-level field, else the same key in `data`.
+pub fn event_subject(msg: &BroadcastMessage) -> String {
+    const KEYS: [&str; 3] = ["site_id", "service_id", "component"];
+    let data = msg.fields.get("data").and_then(|d| serde_json::from_str::<serde_json::Value>(d).ok());
+    KEYS.iter()
+        .find_map(|k| msg.fields.get(*k).cloned()
+            .or_else(|| data.as_ref().and_then(|d| d.get(*k)).and_then(|v| v.as_str()).map(str::to_string)))
+        .unwrap_or_else(|| "?".to_string())
 }
 
 #[cfg(test)]
@@ -374,5 +399,31 @@ mod tests {
         assert!(is_broadcast_message("service_deregistered"));
         assert!(!is_broadcast_message("ping"));
         assert!(!is_broadcast_message("discover"));
+    }
+
+    #[test]
+    fn registration_and_deploy_events_trigger_a_refresh() {
+        for t in ["site_registered", "component_deployed", "service_registered", "service_deregistered", "environment_changed"] {
+            assert!(triggers_discovery_refresh(t), "{t}");
+        }
+        for t in ["topology_update", "format_registered", "global_announcement", "unknown", ""] {
+            assert!(!triggers_discovery_refresh(t), "{t}");
+        }
+    }
+
+    fn msg(fields: &[(&str, &str)]) -> BroadcastMessage {
+        BroadcastMessage {
+            id: "1-0".into(), message_type: "site_registered".into(), site_id: "geodineum".into(), timestamp: 0,
+            fields: fields.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        }
+    }
+
+    #[test]
+    fn event_subject_reads_the_field_then_the_data() {
+        assert_eq!(event_subject(&msg(&[("site_id", "a_com")])), "a_com");
+        assert_eq!(event_subject(&msg(&[("data", r#"{"site_id":"b_com","environment":"production"}"#)])), "b_com");
+        assert_eq!(event_subject(&msg(&[("data", r#"{"component":"Geodineum-COMMS","rev":"abc"}"#)])), "Geodineum-COMMS");
+        assert_eq!(event_subject(&msg(&[("data", "not json")])), "?");
+        assert_eq!(event_subject(&msg(&[])), "?");
     }
 }

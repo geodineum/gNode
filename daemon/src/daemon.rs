@@ -1077,7 +1077,7 @@ impl GNodeDaemon {
                     let topology_namespace_bc = self.topology_namespace.clone();
                     let stream_prefix_bc = self.stream_prefix.clone();
                     let debug_bc = self.debug;
-                    let stream_discovery_bc = self.stream_discovery.clone();  // For environment_changed handling
+                    let stream_discovery_bc = self.stream_discovery.clone();
 
                     // Store JoinHandle and check shutdown flag
                     let broadcast_handle = std::thread::spawn(move || {
@@ -1099,8 +1099,13 @@ impl GNodeDaemon {
                                         if !messages.is_empty() {
                                             info!("Received {} broadcast messages", messages.len());
 
-                                            // Process each broadcast message
+                                            // One re-read for the whole batch, however many events asked for it.
+                                            let mut refresh_for: Vec<String> = Vec::new();
                                             for msg in messages {
+                                                if crate::integration::processor::triggers_discovery_refresh(&msg.message_type) {
+                                                    refresh_for.push(format!("{} {}", msg.message_type,
+                                                        crate::integration::processor::event_subject(&msg)));
+                                                }
                                                 if debug_bc {
                                                     debug!("Broadcast message type: {}, ID: {}",
                                                            msg.message_type, msg.id);
@@ -1111,16 +1116,6 @@ impl GNodeDaemon {
                                                     "topology_update" => {
                                                         // The in-memory engine is gone (WP3e K12); the one topology is read from ValKey on demand.
                                                         info!("Topology update broadcast received; nothing to refresh in memory");
-                                                    },
-                                                    "service_registered" => {
-                                                        if let Some(service_id) = msg.fields.get("service_id") {
-                                                            info!("Service registered broadcast: {}", service_id);
-                                                        }
-                                                    },
-                                                    "service_deregistered" => {
-                                                        if let Some(service_id) = msg.fields.get("service_id") {
-                                                            info!("Service deregistered broadcast: {}", service_id);
-                                                        }
                                                     },
                                                     "format_registered" => {
                                                         if let Some(format_name) = msg.fields.get("format_name") {
@@ -1158,43 +1153,23 @@ impl GNodeDaemon {
                                                             info!("Global announcement: {}", message);
                                                         }
                                                     },
-                                                    "environment_changed" => {
-                                                        // Site environment changed - trigger immediate stream refresh
-                                                        let data = msg.fields.get("data")
-                                                            .and_then(|d| serde_json::from_str::<serde_json::Value>(d).ok());
-
-                                                        if let Some(data) = data {
-                                                            let site_id = data.get("site_id").and_then(|v| v.as_str()).unwrap_or("unknown");
-                                                            let old_env = data.get("old_environment").and_then(|v| v.as_str()).unwrap_or("?");
-                                                            let new_env = data.get("new_environment").and_then(|v| v.as_str()).unwrap_or("?");
-
-                                                            info!("Site {} environment changed: {} → {} - triggering immediate stream refresh",
-                                                                  site_id, old_env, new_env);
-
-                                                            // Refresh stream discovery immediately and signal workers
-                                                            match stream_discovery_bc.read() {
-                                                                Ok(discovery) => {
-                                                                    if let Err(e) = discovery.refresh(&mut conn) {
-                                                                        warn!("Failed to refresh streams after environment change: {:?}", e);
-                                                                    } else {
-                                                                        // Signal workers to sync immediately
-                                                                        discovery.signal_immediate_sync();
-                                                                        info!("Stream discovery refreshed and workers notified");
-                                                                    }
-                                                                },
-                                                                Err(e) => {
-                                                                    warn!("Failed to acquire stream_discovery lock: {}", e);
-                                                                }
-                                                            }
-                                                        } else {
-                                                            warn!("environment_changed broadcast missing data field");
-                                                        }
-                                                    },
+                                                    t if crate::integration::processor::triggers_discovery_refresh(t) => {},
                                                     _ => {
                                                         if debug_bc {
                                                             debug!("Unknown broadcast message type: {}", msg.message_type);
                                                         }
                                                     }
+                                                }
+                                            }
+
+                                            if !refresh_for.is_empty() {
+                                                match stream_discovery_bc.read() {
+                                                    Ok(discovery) => match discovery.refresh_now(&mut conn) {
+                                                        Ok(()) => info!("Stream discovery refreshed on broadcast ({})", refresh_for.join(", ")),
+                                                        Err(e) => warn!("Stream discovery refresh on broadcast failed ({}): {:?}; the interval poll catches up",
+                                                                        refresh_for.join(", "), e),
+                                                    },
+                                                    Err(e) => warn!("Failed to acquire stream_discovery lock: {}", e),
                                                 }
                                             }
                                         }
@@ -1418,7 +1393,7 @@ impl GNodeDaemon {
         info!("  Node ID: {} (unique consumer name: gnode-{})", self.node_id, self.node_id);
         info!("  Topology namespace: {} (fallback if no sites discovered)", self.topology_namespace);
         info!("  Consumer group: gnode-workers (shared), Consumer: gnode-{}", self.node_id);
-        info!("  Dynamic discovery: ENABLED (syncs every 60s, immediate on environment_changed)");
+        info!("  Dynamic discovery: ENABLED (syncs every 60s, immediate on site_registered, component_deployed, environment_changed)");
 
         // Start the environment-based stream processor
         self.start_stream_processor();
@@ -1456,8 +1431,8 @@ impl GNodeDaemon {
                                             debug!("Refreshing stream discovery for environment: {}", refresh_environment);
                                         }
 
-                                        // Refresh sites and streams
-                                        match discovery.refresh(&mut conn) {
+                                        // Refresh sites and streams; the workers subscribe now, not on their own minute.
+                                        match discovery.refresh_now(&mut conn) {
                                             Ok(()) => {
                                                 let site_count = discovery.site_count();
                                                 let stream_count = discovery.stream_count();

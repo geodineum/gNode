@@ -694,6 +694,13 @@ impl StreamDiscoveryManager {
         Ok(())
     }
 
+    /// Re-read now and wake the workers to subscribe: the interval poll, early.
+    pub fn refresh_now(&self, conn: &mut Connection) -> IntegrationResult<()> {
+        self.refresh(conn)?;
+        self.signal_immediate_sync();
+        Ok(())
+    }
+
     /// Refresh if needed (based on configured interval)
     pub fn refresh_if_needed(&self, conn: &mut Connection) -> IntegrationResult<bool> {
         if self.needs_refresh() {
@@ -705,10 +712,10 @@ impl StreamDiscoveryManager {
     }
 
     /// Signal that workers should sync streams immediately
-    /// Called by broadcast handler when environment_changed is received
+    /// Called after every discovery re-read, the poll and a broadcast event alike
     pub fn signal_immediate_sync(&self) {
         self.needs_immediate_sync.store(true, Ordering::SeqCst);
-        info!("🔔 Stream sync signaled - workers will update on next iteration");
+        debug!("Stream sync signaled - workers will update on next iteration");
     }
 
     /// Check if immediate sync was signaled and clear the flag

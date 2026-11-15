@@ -22,6 +22,8 @@ pub use broadcast_reader::{
     BroadcastMessage,
     trim_broadcast_stream,
     is_broadcast_message,
+    triggers_discovery_refresh,
+    event_subject,
 };
 
 // Re-export main components for use in other modules
