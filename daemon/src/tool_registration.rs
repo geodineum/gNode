@@ -230,7 +230,8 @@ fn run_node_tier(args: &RegisterToolsArgs) -> Result<()> {
     Ok(())
 }
 
-/// The ecosystem components (shape 2, environment global) from ecosystem_tools.yaml.
+/// The ecosystem components (shape 2, environment global) from ecosystem_tools.yaml, each
+/// with its intent so the reconciler reports a component that drifts or goes missing.
 fn run_tool_tier(args: &RegisterToolsArgs) -> Result<()> {
     let config_path = find_ecosystem_tools_path(args.config_path.as_ref())
         .ok_or_else(|| GeometricError::Other("Cannot find ecosystem_tools.yaml. Use --config to specify path.".to_string()))?;
@@ -243,19 +244,27 @@ fn run_tool_tier(args: &RegisterToolsArgs) -> Result<()> {
     let params: Vec<serde_json::Value> = components.iter().map(crate::integration::handlers::one_topology::component_params).collect();
     if args.dry_run {
         for p in &params { info!("  [DRY-RUN] {} → shape 2 {}", p["id"], p["axes"]); }
-        info!("Dry run complete. {} components would register on the one topology.", params.len());
+        info!("Dry run complete. {} components would register on the one topology, each with its intent in {}.",
+            params.len(), crate::registration_intent::component_intent_key(&args.topology_namespace));
         return Ok(());
     }
     let mut conn = connect(args)?;
-    let (mut ok, mut err) = (0usize, 0usize);
+    let (mut ok, mut err, mut unrecorded) = (0usize, 0usize, 0usize);
     for p in params {
         let id = p["id"].as_str().unwrap_or("").to_string();
         let r = crate::integration::handlers::one_topology::register(&mut conn, &id, p);
-        if r.status == "ok" { ok += 1 } else { err += 1; warn!("component {} refused: {:?}", id, r.error) }
+        if r.status != "ok" { err += 1; warn!("component {} refused: {:?}", id, r.error); continue; }
+        ok += 1;
+        let c = r.result.as_ref().and_then(|v| v["constellation"].as_str()).unwrap_or(&args.topology_namespace).to_string();
+        let intent = crate::registration_intent::component_intent(&id, "register-tools --tier tool");
+        if let Err(e) = crate::registration_intent::declare_component(&mut conn, &c, &intent) {
+            unrecorded += 1;
+            warn!("component {} registered, but its intent was not recorded in {{{}}}: {}", id, c, e);
+        }
     }
-    info!("Component registration: {} registered, {} refused", ok, err);
-    if err > 0 {
-        return Err(GeometricError::Other(format!("{} component(s) refused", err)));
+    info!("Component registration: {} registered, {} refused, {} intents not recorded", ok, err, unrecorded);
+    if err > 0 || unrecorded > 0 {
+        return Err(GeometricError::Other(format!("{} component(s) refused, {} intent(s) not recorded", err, unrecorded)));
     }
     Ok(())
 }

@@ -13,6 +13,11 @@ All notable changes to this project are documented here. The format follows Keep
 
 - With Pro gNode-SIGNALS loaded, the writer-lease holder publishes scale-out (the sampler's suggestion) and sickness (a placement whose heartbeat went dead) to `{c}:signals:global:stream`: one entry when a condition starts, one when it clears. Without the library the daemon publishes nothing and says so once.
 
+### Registration
+
+- `register-tools --tier tool` records each component's intent in `{c}:gnode:registrations:components`; the reconciler reports a component that goes missing or changes shape, as it does for sites and services. `deregister-service.sh` removes either intent.
+- The reconciler takes the shape an intent names; a site or service onboarded with the `component` profile (a daemon) is no longer reported as drift.
+
 ### Faster
 
 - One wait over all streams instead of a short block per stream: a command is picked up at once, however many sites there are.

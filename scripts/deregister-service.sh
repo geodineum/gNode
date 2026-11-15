@@ -3,7 +3,7 @@
 # The ValKey half of `geodineum deregister`: removes what registration wrote into
 # ValKey for one service, in every constellation this node serves.
 #
-#   1. its registration intent ({c}:gnode:registrations)
+#   1. its registration intent ({c}:gnode:registrations, or :components for a catalogue component)
 #   2. its topology entity and placements, in the constellation that holds it
 #   3. its keys: streams, metadata, {id}:* (GNODE_DEPROVISION_SERVICE; a constellation
 #      that shares the namespace keeps its own keys)
@@ -66,7 +66,9 @@ DRY_JSON="{\"dry_run\":true,${OPTIONS_JSON#\{}"
 # --- what exists --------------------------------------------------------------
 intent_in=() entity_in=()
 for c in "${CONSTELLATIONS[@]}"; do
-    [[ "$(vk HEXISTS "{$c}:gnode:registrations" "$SERVICE_ID")" == 1 ]] && intent_in+=("$c")
+    for k in "{$c}:gnode:registrations" "{$c}:gnode:registrations:components"; do
+        [[ "$(vk HEXISTS "$k" "$SERVICE_ID")" == 1 ]] && intent_in+=("$k")
+    done
     [[ "$(vk HEXISTS "{$c}:gnode:constellation:entities" "$SERVICE_ID")" == 1 ]] && entity_in+=("$c")
 done
 acl_exists=false
@@ -124,9 +126,9 @@ fi
 
 # --- remove, intent first so nothing re-derives what is being removed ---------
 failed=0
-for c in "${intent_in[@]}"; do
-    if [[ "$(vk HDEL "{$c}:gnode:registrations" "$SERVICE_ID")" == 1 ]]; then log_success "Intent removed from {$c}"
-    else log_error "Could not remove the intent from {$c}"; failed=1; fi
+for k in "${intent_in[@]}"; do
+    if [[ "$(vk HDEL "$k" "$SERVICE_ID")" == 1 ]]; then log_success "Intent removed from $k"
+    else log_error "Could not remove the intent from $k"; failed=1; fi
 done
 for c in "${entity_in[@]}"; do
     if out="$(GNODE_TOPOLOGY_NAMESPACE="$c" "$SCRIPT_DIR/cli/deregister.sh" "$SERVICE_ID" 2>&1)" && [[ "$out" == *'"ok":true'* ]]; then

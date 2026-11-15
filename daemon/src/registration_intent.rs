@@ -52,6 +52,9 @@ pub struct RegistrationIntent {
     pub profile: String,
     /// DTAP environment stamped into the schema's environment axis.
     pub environment: String,
+    /// The shape word registered (site | app | daemon | component); empty means the profile's.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub shape: String,
     /// Schema version at declaration time. NOT used to derive — recorded so a
     /// reconciliation can say *why* a vector changed rather than only that it did.
     #[serde(default)]
@@ -71,19 +74,27 @@ pub fn intent_key(topology_ns: &str) -> String {
     format!("{{{}}}:gnode:registrations", topology_ns)
 }
 
+/// The ecosystem components a catalogue registered (`register-tools --tier tool`), kept apart
+/// from the sites and services so every reader of `intent_key` still lists only those.
+pub fn component_intent_key(topology_ns: &str) -> String {
+    format!("{{{}}}:gnode:registrations:components", topology_ns)
+}
+
+fn store(conn: &mut redis::Connection, key: &str, intent: &RegistrationIntent) -> Result<()> {
+    let json = serde_json::to_string(intent)
+        .map_err(|e| crate::GeometricError::Other(format!("intent encode failed: {}", e)))?;
+    redis::cmd("HSET").arg(key).arg(&intent.site).arg(&json)
+        .query::<i64>(conn).map_err(crate::GeometricError::Redis)?;
+    Ok(())
+}
+
 /// Record what a site is. Called at onboarding; idempotent.
 pub fn declare(
     conn: &mut redis::Connection,
     topology_ns: &str,
     intent: &RegistrationIntent,
 ) -> Result<()> {
-    let json = serde_json::to_string(intent)
-        .map_err(|e| crate::GeometricError::Other(format!("intent encode failed: {}", e)))?;
-    let _: redis::RedisResult<()> = redis::cmd("HSET")
-        .arg(intent_key(topology_ns))
-        .arg(&intent.site)
-        .arg(&json)
-        .query(conn);
+    store(conn, &intent_key(topology_ns), intent)?;
     info!(
         "Declared registration intent for '{}': profile={} environment={}",
         intent.site, intent.profile, intent.environment
@@ -91,13 +102,38 @@ pub fn declare(
     Ok(())
 }
 
-/// Read every declared intent.
+/// What a catalogue component is: shape 2, environment global.
+pub fn component_intent(id: &str, declared_by: &str) -> RegistrationIntent {
+    RegistrationIntent {
+        site: id.to_string(), profile: "component".into(), environment: "global".into(), shape: "component".into(),
+        schema_version: crate::integration::handlers::one_topology::schema().map(|s| s.version.clone()).unwrap_or_default(),
+        declared_at: crate::utils::current_timestamp_ms() / 1000, declared_by: declared_by.to_string(),
+    }
+}
+
+/// Record a catalogue component. Called by the tool tier after it registered; idempotent.
+pub fn declare_component(conn: &mut redis::Connection, topology_ns: &str, intent: &RegistrationIntent) -> Result<()> {
+    store(conn, &component_intent_key(topology_ns), intent)?;
+    debug!("Declared component intent for '{}' in {{{}}}", intent.site, topology_ns);
+    Ok(())
+}
+
+/// Read every declared site and service intent.
 pub fn read_all(
     conn: &mut redis::Connection,
     topology_ns: &str,
 ) -> Result<Vec<RegistrationIntent>> {
+    read_key(conn, &intent_key(topology_ns))
+}
+
+/// Read every declared component intent.
+pub fn read_components(conn: &mut redis::Connection, topology_ns: &str) -> Result<Vec<RegistrationIntent>> {
+    read_key(conn, &component_intent_key(topology_ns))
+}
+
+fn read_key(conn: &mut redis::Connection, key: &str) -> Result<Vec<RegistrationIntent>> {
     let raw: redis::RedisResult<HashMap<String, String>> =
-        redis::cmd("HGETALL").arg(intent_key(topology_ns)).query(conn);
+        redis::cmd("HGETALL").arg(key).query(conn);
     let map = match raw {
         Ok(m) => m,
         Err(e) => {
@@ -128,11 +164,13 @@ pub struct ReconcileReport {
     pub errors: usize,
 }
 
-/// The shape a declared profile is stored as.
-fn expected_shape(profile: &str) -> &'static str {
-    match profile {
-        "web" => "3.1", "headless" => "3.2", "service" | "system" => "3.3", "component" => "2", _ => "3.2",
+/// The shape key an intent is stored as: its shape word when it names one, else its profile's
+/// (web a site, headless an app, every other profile a daemon, as `profile_params` registers it).
+fn expected_shape(intent: &RegistrationIntent) -> String {
+    if let Ok(k) = crate::integration::handlers::one_topology::shape_key(&intent.shape) {
+        return k;
     }
+    match intent.profile.as_str() { "web" => "3.1", "headless" => "3.2", _ => "3.3" }.to_string()
 }
 
 /// Drift = the stored shape or environment differs from the declared profile and
@@ -142,7 +180,7 @@ fn drift(intent: &RegistrationIntent, stored: Option<&serde_json::Value>) -> Opt
         Some(r) => (r["sh"].as_str().unwrap_or("").to_string(), r["env"].as_str().unwrap_or("").to_string()),
         None => (String::new(), String::new()),
     };
-    if sh == expected_shape(&intent.profile) && env == intent.environment {
+    if sh == expected_shape(intent) && env == intent.environment {
         return None;
     }
     Some((sh, env))
@@ -151,14 +189,17 @@ fn drift(intent: &RegistrationIntent, stored: Option<&serde_json::Value>) -> Opt
 fn report_drift(c: &Constellation, intent: &RegistrationIntent, sh: &str, env: &str) {
     let or_absent = |v: &str| if v.is_empty() { "<absent>".to_string() } else { v.to_string() };
     warn!("registration drift in {{{}}}: '{}' stored shape={} env={} declared shape={} env={}",
-        c.name, intent.site, or_absent(sh), or_absent(env), expected_shape(&intent.profile), intent.environment);
+        c.name, intent.site, or_absent(sh), or_absent(env), expected_shape(intent), intent.environment);
 }
 
-/// Compare every intent declared in `c` with the entity stored in `c`. Reports only:
-/// a re-assertion without the manifest's axes would erase what the site declared.
+/// Compare every intent declared in `c`, sites, services and components, with the entity
+/// stored in `c`. Reports only: a re-assertion without the manifest's axes would erase what
+/// the site declared.
 pub fn reconcile(conn: &mut redis::Connection, c: &Constellation) -> Result<ReconcileReport> {
     let mut report = ReconcileReport::default();
-    for intent in &read_all(conn, &c.name)? {
+    let mut intents = read_all(conn, &c.name)?;
+    intents.extend(read_components(conn, &c.name)?);
+    for intent in &intents {
         report.examined += 1;
         let stored: redis::RedisResult<Option<String>> = redis::cmd("HGET").arg(format!("{}:entities", c.key())).arg(&intent.site).query(conn);
         let rec = stored.ok().flatten().and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok());
@@ -195,8 +236,41 @@ mod tests {
     static LOGGER: Capture = Capture;
 
     fn intent(site: &str, profile: &str, env: &str) -> RegistrationIntent {
-        RegistrationIntent { site: site.into(), profile: profile.into(), environment: env.into(),
+        RegistrationIntent { site: site.into(), profile: profile.into(), environment: env.into(), shape: String::new(),
             schema_version: String::new(), declared_at: 0, declared_by: String::new() }
+    }
+
+    #[test]
+    fn the_expected_shape_is_the_registered_one() {
+        for (profile, key) in [("web", "3.1"), ("headless", "3.2"), ("service", "3.3"), ("system", "3.3"), ("component", "3.3")] {
+            assert_eq!(expected_shape(&intent("x", profile, "production")), key, "profile {}", profile);
+        }
+        let mut i = intent("x", "service", "production");
+        for (shape, key) in [("site", "3.1"), ("app", "3.2"), ("daemon", "3.3"), ("component", "2"), ("3.1", "3.1")] {
+            i.shape = shape.into();
+            assert_eq!(expected_shape(&i), key, "shape {}", shape);
+        }
+        i.shape = "not-a-shape".into();
+        assert_eq!(expected_shape(&i), "3.3");
+    }
+
+    #[test]
+    fn a_component_intent_is_shape_two_and_global() {
+        let i = component_intent("gFlow", "test");
+        assert!(drift(&i, Some(&serde_json::json!({ "sh": "2", "env": "global" }))).is_none());
+        assert!(drift(&i, Some(&serde_json::json!({ "sh": "3.3", "env": "global" }))).is_some());
+        assert!(drift(&i, None).is_some());
+        assert_eq!(component_intent_key("geodineum"), "{geodineum}:gnode:registrations:components");
+    }
+
+    #[test]
+    fn an_onboarding_record_reads_with_its_shape() {
+        let raw = r#"{"site":"s","profile":"service","shape":"site","environment":"production","on":"aesir","declared_at":1,"declared_by":"onboard-service.sh@aesir"}"#;
+        let i: RegistrationIntent = serde_json::from_str(raw).unwrap();
+        assert_eq!(expected_shape(&i), "3.1");
+        let legacy: RegistrationIntent = serde_json::from_str(r#"{"site":"s","profile":"web","environment":"production"}"#).unwrap();
+        assert!(legacy.shape.is_empty());
+        assert!(!serde_json::to_string(&legacy).unwrap().contains("shape"));
     }
 
     #[test]
@@ -222,7 +296,7 @@ mod tests {
     #[test]
     fn intent_round_trips_through_json() {
         let i = RegistrationIntent {
-            site: "gflow".into(), profile: "service".into(), environment: "production".into(),
+            site: "gflow".into(), profile: "service".into(), environment: "production".into(), shape: String::new(),
             schema_version: "3.0".into(), declared_at: 1, declared_by: "test".into(),
         };
         let back: RegistrationIntent = serde_json::from_str(&serde_json::to_string(&i).unwrap()).unwrap();
