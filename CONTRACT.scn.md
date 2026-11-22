@@ -67,7 +67,7 @@ PROOF := tests/tenant-guard/attack.sh, tests/pickup-latency/compare.sh
 - No global backpressure; rate-limit per-site only → one tenant can monopolize async runtime via slow FCALLs.
 
 ## ::GRAPH
-DEPENDS_ON: ValKey 7.2+ · g_math 0.4.0 (Q64.64) · daemon/functions/*.lua · Geodineum installer (bootstrap/creds/schemas).
+DEPENDS_ON: ValKey 7.2+ · g_math 0.7.3 (Q64.64) · daemon/functions/*.lua · Geodineum installer (bootstrap/creds/schemas).
 PROVIDES_TO: PHP gNode-Client (gCore/gNode/gNodeClient) · gCore · gTemplate · child themes (gCube et al.) · Geodineum-COMMS (provisions its stream).
 ADHERES_TO: RESP3 unified-stream field contract ↔ gNode-Client (utils.rs, ✓ no legacy aliases emitted) · FCALL allowlist `^(GNODE|GCUBE|COMMS|GC)_` ↔ gNode-Client (✓ superset gate) · Ed25519 signed-ext scheme ↔ gNode-CMS (✓ pubkey 2ff9966fcad06b6d) · comms wire format ↔ COMMS parse_message (✓ producers stamp top-level scalar environment).
 ISOLATED_FROM: `{site_id}:comms:config` (COMMS-owned settings, gNode no knowledge) · COMMS SQLite archive · COMMS non-prod gating logic.

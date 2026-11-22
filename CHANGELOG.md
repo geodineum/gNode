@@ -22,6 +22,7 @@ All notable changes to this project are documented here. The format follows Keep
 ### Faster
 
 - One wait over all streams instead of a short block per stream: a command is picked up at once, however many sites there are.
+- g_math 0.7.3: wide division, square roots and the decimal engine are several times faster; every value is the same as on 0.7.0.
 
 ### Breaking: the one topology
 
